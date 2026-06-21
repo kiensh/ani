@@ -340,36 +340,45 @@ func pickSort(current string, useFzf bool) (string, error) {
 
 // ---- release browser (command loop) ----
 
+// browseState is the browser's mutable view state. It lives in the caller
+// (main.go's post-play loop) so the group filter, sort, and page persist across
+// play/download round-trips instead of resetting each re-entry.
+type browseState struct {
+	group string
+	sort  string
+	page  int
+}
+
 // browseReleases runs the paginated, filterable, sortable release list and
-// returns the user's chosen release.
-func browseReleases(all []*Release, group, sortName string, useFzf bool) (*Release, error) {
-	page := 0
-	curGroup := group
-	curSort := normalizeSort(sortName)
+// returns the user's chosen release. It mutates st so state survives re-entry.
+func browseReleases(all []*Release, st *browseState, useFzf bool) (*Release, error) {
+	if st.sort == "" {
+		st.sort = "newest"
+	}
 
 	for {
-		items := sortedReleases(filterByGroup(all, curGroup), curSort)
+		items := sortedReleases(filterByGroup(all, st.group), st.sort)
 		if len(items) == 0 {
-			return nil, fmt.Errorf("no releases for group %q", curGroup)
+			return nil, fmt.Errorf("no releases for group %q", st.group)
 		}
 		totalPages := (len(items) + releasePageSize - 1) / releasePageSize
-		if page >= totalPages {
-			page = totalPages - 1
+		if st.page >= totalPages {
+			st.page = totalPages - 1
 		}
-		if page < 0 {
-			page = 0
+		if st.page < 0 {
+			st.page = 0
 		}
-		start := page * releasePageSize
+		start := st.page * releasePageSize
 		end := start + releasePageSize
 		if end > len(items) {
 			end = len(items)
 		}
 
-		groupLabel := curGroup
+		groupLabel := st.group
 		if groupLabel == "" {
 			groupLabel = "All"
 		}
-		fmt.Printf("\n  %d releases   [%s]  %s   page %d/%d\n\n", len(items), groupLabel, curSort, page+1, totalPages)
+		fmt.Printf("\n  %d releases   [%s]  %s   page %d/%d\n\n", len(items), groupLabel, st.sort, st.page+1, totalPages)
 		for i := start; i < end; i++ {
 			fmt.Printf("  %2d) %s\n", i+1, renderReleaseLine(items[i]))
 		}
@@ -386,27 +395,27 @@ func browseReleases(all []*Release, group, sortName string, useFzf bool) (*Relea
 		case "q":
 			return nil, errCancelled
 		case "n":
-			if page+1 < totalPages {
-				page++
+			if st.page+1 < totalPages {
+				st.page++
 			}
 		case "p":
-			if page > 0 {
-				page--
+			if st.page > 0 {
+				st.page--
 			}
 		case "g":
-			g, err := pickGroup(distinctGroups(all), curGroup, useFzf)
+			g, err := pickGroup(distinctGroups(all), st.group, useFzf)
 			if err != nil {
 				return nil, err
 			}
-			curGroup = g
-			page = 0
+			st.group = g
+			st.page = 0
 		case "s":
-			s, err := pickSort(curSort, useFzf)
+			s, err := pickSort(st.sort, useFzf)
 			if err != nil {
 				return nil, err
 			}
-			curSort = s
-			page = 0
+			st.sort = s
+			st.page = 0
 		default:
 			n, perr := strconv.Atoi(in)
 			if perr != nil || n < start+1 || n > end {

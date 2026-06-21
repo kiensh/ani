@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -44,6 +45,9 @@ func intersperseFlags(args []string) []string {
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		if errors.Is(err, errCancelled) {
+			return // user hit q — clean exit
+		}
 		fmt.Fprintln(os.Stderr, "ani:", err)
 		os.Exit(1)
 	}
@@ -111,20 +115,29 @@ func run(args []string) error {
 	}
 
 	fmt.Printf("\n%s — %d releases\n", title, len(all))
-	pick, err := browseReleases(all, group, sortName, useFzf)
-	if err != nil {
-		return err
-	}
+	st := &browseState{group: group, sort: normalizeSort(sortName)}
+	for {
+		pick, err := browseReleases(all, st, useFzf)
+		if err != nil {
+			return err // q/cancel → exit
+		}
 
-	announcePick(pick)
-	action, err := promptAction()
-	if err != nil {
-		return err
+		announcePick(pick)
+		action, err := promptAction()
+		if err != nil {
+			return err
+		}
+		if action == "download" {
+			if err := runDownload(pick, dir); err != nil {
+				return err
+			}
+		} else {
+			if err := runPlay(pick, player); err != nil {
+				return err
+			}
+		}
+		// loop: return to the release picker for the next file
 	}
-	if action == "download" {
-		return runDownload(pick, dir)
-	}
-	return runPlay(pick, player)
 }
 
 // resolveAnime returns the chosen AniDB id + title. A numeric query is treated
