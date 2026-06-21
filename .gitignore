@@ -1,0 +1,12 @@
+# compiled binary
+/ani
+
+# test/coverage artifacts
+*.test
+*.out
+
+# Claude Code local settings
+.claude/
+
+# macOS
+.DS_Store
