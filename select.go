@@ -106,10 +106,11 @@ type AnimeCandidate struct {
 	Season       int
 	EpisodeCount int
 	TorrentCount int
+	PicURL       string // full cover URL, "" if unknown
 }
 
-// enrichAnime concurrently fetches clean title/year/episode_count per aid.
-// On per-aid error it keeps the search title with empty year.
+// enrichAnime concurrently fetches clean title/year/episode_count/picurl per
+// aid. On per-aid error it keeps the search title with empty year.
 func enrichAnime(in []SeriesSummary) []AnimeCandidate {
 	out := make([]AnimeCandidate, len(in))
 	var wg sync.WaitGroup
@@ -123,16 +124,51 @@ func enrichAnime(in []SeriesSummary) []AnimeCandidate {
 				TorrentCount: s.TorrentCount,
 				CleanTitle:   s.Title,
 			}
-			if title, year, eps, err := seriesMeta(s.AnidbAID); err == nil && title != "" {
+			if title, year, eps, pic, err := seriesMeta(s.AnidbAID); err == nil && title != "" {
 				c.CleanTitle = title
 				c.Year = year
 				c.EpisodeCount = eps
+				c.PicURL = pic
 			}
 			out[i] = c
 		}(i, in[i])
 	}
 	wg.Wait()
 	return out
+}
+
+// pickAnime shows the picker. With thumbnails enabled it prints each cover
+// above its numbered label; otherwise (or under fzf) it falls back to a plain
+// numbered list / fzf.
+func pickAnime(cands []AnimeCandidate, showThumbs, useFzf bool) (int, error) {
+	lines := make([]string, len(cands))
+	for i, c := range cands {
+		lines[i] = renderAnimeLine(c)
+	}
+	if useFzf && fzfAvailable() {
+		return pickIndex(lines, fmt.Sprintf("Anime (%d)", len(cands)), "Select anime", useFzf)
+	}
+	fmt.Printf("\nAnime (%d)\n\n", len(cands))
+	for i, c := range cands {
+		if showThumbs && c.PicURL != "" {
+			if err := printCover(c.PicURL); err == nil {
+				fmt.Println()
+			}
+		}
+		fmt.Printf("  %d) %s\n", i+1, lines[i])
+	}
+	for {
+		fmt.Printf("\nSelect anime [1-%d]: ", len(cands))
+		line, err := readLine()
+		if err != nil {
+			return 0, err
+		}
+		n, perr := strconv.Atoi(line)
+		if perr == nil && n >= 1 && n <= len(cands) {
+			return n - 1, nil
+		}
+		fmt.Printf("  invalid: %q\n", line)
+	}
 }
 
 func sortCandidatesByYear(c []AnimeCandidate) {

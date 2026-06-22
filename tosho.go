@@ -66,6 +66,7 @@ type seriesDetailResponse struct {
 		Title        string  `json:"title"`
 		Year         string  `json:"year"`
 		EpisodeCount int     `json:"episode_count"`
+		PicURL       string  `json:"picurl"`
 		Releases     []Entry `json:"releases"`
 	} `json:"data"`
 }
@@ -130,16 +131,23 @@ func searchSeries(query string) ([]SeriesSummary, error) {
 }
 
 // seriesMeta fetches light per-series metadata (clean title, year, episode
-// count) via the detail endpoint with limit=1 so the releases payload is tiny.
-func seriesMeta(aid int) (title, year string, episodes int, err error) {
+// count, cover picurl) via the detail endpoint with limit=1 so the releases
+// payload is tiny.
+func seriesMeta(aid int) (title, year string, episodes int, picURL string, err error) {
 	var resp seriesDetailResponse
 	if err := toshoGet(toshoAnidbPath+strconv.Itoa(aid), url.Values{
 		"limit": {"1"},
 	}, &resp); err != nil {
-		return "", "", 0, err
+		return "", "", 0, "", err
 	}
-	return resp.Data.Title, resp.Data.Year, resp.Data.EpisodeCount, nil
+	pic := resp.Data.PicURL
+	if pic != "" {
+		pic = toshoCoverBase + pic
+	}
+	return resp.Data.Title, resp.Data.Year, resp.Data.EpisodeCount, pic, nil
 }
+
+const toshoCoverBase = "https://animetosho.xyz/static/img/anidb_covers/"
 
 // seriesReleasesPage fetches one page of releases for an AniDB id.
 func seriesReleasesPage(aid, offset int) ([]Entry, error) {

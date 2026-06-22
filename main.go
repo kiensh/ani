@@ -59,10 +59,11 @@ func run(args []string) error {
 	var opt struct {
 		group  string
 		sort   string
-		player string
-		dir    string
-		fzf    bool
-		noFzf  bool
+		player   string
+		dir      string
+		fzf      bool
+		noFzf    bool
+		noThumbs bool
 	}
 	fs.StringVar(&opt.group, "group", "", "filter by release group (e.g. Erai-raws)")
 	fs.StringVar(&opt.sort, "sort", "", "newest|oldest|smallest|largest")
@@ -70,6 +71,7 @@ func run(args []string) error {
 	fs.StringVar(&opt.dir, "dir", "", "download directory (default cwd)")
 	fs.BoolVar(&opt.fzf, "fzf", false, "use fzf for menus")
 	fs.BoolVar(&opt.noFzf, "no-fzf", false, "disable fzf")
+	fs.BoolVar(&opt.noThumbs, "no-thumbs", false, "disable anime cover thumbnails")
 	if err := fs.Parse(intersperseFlags(args)); err != nil {
 		return err
 	}
@@ -93,8 +95,9 @@ func run(args []string) error {
 	}
 	dir := orDefault(opt.dir, cfg.Dir)
 	useFzf := !opt.noFzf && (opt.fzf || cfg.Fzf) && fzfAvailable()
+	showThumbs := !opt.noThumbs && kittyActive()
 
-	aid, title, err := resolveAnime(query, useFzf)
+	aid, title, err := resolveAnime(query, useFzf, showThumbs)
 	if err != nil {
 		return err
 	}
@@ -145,7 +148,7 @@ func run(args []string) error {
 // anidb id, enriches each candidate with clean title/year/episodes, and sorts
 // by year desc. If the raw query yields no distinct anime it retries once with
 // a shortened query (long official titles often return 0).
-func resolveAnime(query string, useFzf bool) (aid int, title string, err error) {
+func resolveAnime(query string, useFzf, showThumbs bool) (aid int, title string, err error) {
 	if n, perr := strconv.Atoi(query); perr == nil && n > 0 {
 		return n, "", nil
 	}
@@ -172,11 +175,7 @@ func resolveAnime(query string, useFzf bool) (aid int, title string, err error) 
 	cands := enrichAnime(series)
 	sortCandidatesByYear(cands)
 
-	lines := make([]string, len(cands))
-	for i, c := range cands {
-		lines[i] = renderAnimeLine(c)
-	}
-	idx, err := pickIndex(lines, fmt.Sprintf("Anime (%d)", len(cands)), "Select anime", useFzf)
+	idx, err := pickAnime(cands, showThumbs, useFzf)
 	if err != nil {
 		return 0, "", err
 	}
