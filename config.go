@@ -9,11 +9,10 @@ import (
 // Config lives at $XDG_CONFIG_HOME/ani/config.json (falls back to
 // ~/.config/ani/config.json on macOS via os.UserConfigDir). Missing file = defaults.
 type Config struct {
-	Group  string `json:"group"`  // default group filter, "" = All
+	Group  string `json:"group"`  // default group pre-filter, "" = All
 	Sort   string `json:"sort"`   // default sort: newest|oldest|smallest|largest
 	Player string `json:"player"` // streaming player, default mpv
 	Dir    string `json:"dir"`    // default download dir, "" = cwd
-	Fzf    bool   `json:"fzf"`    // use fzf for menus when on PATH
 }
 
 func defaultConfig() Config {

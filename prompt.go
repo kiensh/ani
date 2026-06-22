@@ -24,13 +24,6 @@ func readLine() (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
-// readCommand prints prompt and returns the user's trimmed input (number or
-// letter command like n/p/g/s/q).
-func readCommand(prompt string) (string, error) {
-	fmt.Print(prompt)
-	return readLine()
-}
-
 // promptAction asks play or download; Enter defaults to play.
 func promptAction() (string, error) {
 	for {

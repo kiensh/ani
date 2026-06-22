@@ -44,6 +44,11 @@ func intersperseFlags(args []string) []string {
 }
 
 func main() {
+	// Internal hidden subcommand: backing the release fzf --preview pane.
+	if len(os.Args) >= 4 && os.Args[1] == "preview-release" {
+		previewRelease(os.Args[2], os.Args[3])
+		return
+	}
 	if err := run(os.Args[1:]); err != nil {
 		if errors.Is(err, errCancelled) {
 			return // user hit q — clean exit
@@ -59,19 +64,15 @@ func run(args []string) error {
 	var opt struct {
 		group  string
 		sort   string
-		player   string
-		dir      string
-		fzf      bool
-		noFzf    bool
-		noThumbs bool
+		player string
+		dir    string
+		noFzf  bool
 	}
-	fs.StringVar(&opt.group, "group", "", "filter by release group (e.g. Erai-raws)")
-	fs.StringVar(&opt.sort, "sort", "", "newest|oldest|smallest|largest")
+	fs.StringVar(&opt.group, "group", "", "pre-filter by release group (e.g. Erai-raws)")
+	fs.StringVar(&opt.sort, "sort", "", "newest|oldest|smallest|largest (initial order)")
 	fs.StringVar(&opt.player, "player", "", "streaming player for play (mpv default)")
 	fs.StringVar(&opt.dir, "dir", "", "download directory (default cwd)")
-	fs.BoolVar(&opt.fzf, "fzf", false, "use fzf for menus")
-	fs.BoolVar(&opt.noFzf, "no-fzf", false, "disable fzf")
-	fs.BoolVar(&opt.noThumbs, "no-thumbs", false, "disable anime cover thumbnails")
+	fs.BoolVar(&opt.noFzf, "no-fzf", false, "disable fzf (use numbered menus)")
 	if err := fs.Parse(intersperseFlags(args)); err != nil {
 		return err
 	}
@@ -94,10 +95,9 @@ func run(args []string) error {
 		player = "mpv"
 	}
 	dir := orDefault(opt.dir, cfg.Dir)
-	useFzf := !opt.noFzf && (opt.fzf || cfg.Fzf) && fzfAvailable()
-	showThumbs := !opt.noThumbs && kittyActive()
+	useFzf := fzfAvailable() && !opt.noFzf
 
-	aid, title, err := resolveAnime(query, useFzf, showThumbs)
+	aid, title, err := resolveAnime(query, useFzf)
 	if err != nil {
 		return err
 	}
@@ -117,10 +117,9 @@ func run(args []string) error {
 		}
 	}
 
-	fmt.Printf("\n%s — %d releases\n", title, len(all))
-	st := &browseState{group: group, sort: normalizeSort(sortName)}
+	fmt.Fprintf(os.Stderr, "%s — %d releases\n", title, len(all))
 	for {
-		pick, err := browseReleases(all, st, useFzf)
+		pick, err := pickRelease(all, group, sortName, useFzf)
 		if err != nil {
 			return err // q/cancel → exit
 		}
@@ -148,7 +147,7 @@ func run(args []string) error {
 // anidb id, enriches each candidate with clean title/year/episodes, and sorts
 // by year desc. If the raw query yields no distinct anime it retries once with
 // a shortened query (long official titles often return 0).
-func resolveAnime(query string, useFzf, showThumbs bool) (aid int, title string, err error) {
+func resolveAnime(query string, useFzf bool) (aid int, title string, err error) {
 	if n, perr := strconv.Atoi(query); perr == nil && n > 0 {
 		return n, "", nil
 	}
@@ -175,11 +174,11 @@ func resolveAnime(query string, useFzf, showThumbs bool) (aid int, title string,
 	cands := enrichAnime(series)
 	sortCandidatesByYear(cands)
 
-	idx, err := pickAnime(cands, showThumbs, useFzf)
+	c, err := pickAnime(cands, useFzf)
 	if err != nil {
 		return 0, "", err
 	}
-	return cands[idx].Aid, cands[idx].CleanTitle, nil
+	return c.Aid, c.CleanTitle, nil
 }
 
 // shortenQuery reduces an over-long official title to its core, for the

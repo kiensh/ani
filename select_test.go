@@ -61,7 +61,7 @@ func TestSortedReleases(t *testing.T) {
 	}
 }
 
-func TestFilterByGroupAndDistinct(t *testing.T) {
+func TestFilterByGroup(t *testing.T) {
 	rs := mkReleases()
 	erai := filterByGroup(rs, "Erai-raws")
 	if len(erai) != 2 {
@@ -70,9 +70,8 @@ func TestFilterByGroupAndDistinct(t *testing.T) {
 	if len(filterByGroup(rs, "All")) != 3 {
 		t.Errorf("All should return everything")
 	}
-	groups := distinctGroups(rs)
-	if groups[0].Name != "All" || groups[0].Count != 3 {
-		t.Errorf("All entry wrong: %+v", groups[0])
+	if len(filterByGroup(rs, "")) != 3 {
+		t.Errorf("empty group should return everything")
 	}
 }
 

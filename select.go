@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -9,8 +11,6 @@ import (
 	"sync"
 	"time"
 )
-
-const releasePageSize = 20
 
 // Release is a thin, regex-free view over an Entry's API fields.
 type Release struct {
@@ -41,8 +41,7 @@ func toReleases(entries []Entry) []*Release {
 
 // dedupSeries collapses series entries that share an AniDB id (one id maps to
 // many title-keys), keeping the title with the most torrents. Season is derived
-// from that kept title only — scanning every title over-counts (stray batch /
-// cross-reference titles inject false season tokens). Insertion order is
+// from that kept title only — scanning every title over-counts. Insertion order
 // preserved; the caller sorts the enriched candidates.
 func dedupSeries(in []SeriesSummary) []SeriesSummary {
 	best := map[int]SeriesSummary{}
@@ -66,7 +65,6 @@ func dedupSeries(in []SeriesSummary) []SeriesSummary {
 }
 
 // detectSeason pulls a season ordinal out of a (messy) title via known tokens.
-// Returns 0 when no token is present.
 func detectSeason(title string) int {
 	var vals []int
 	for _, re := range seasonRes {
@@ -137,40 +135,6 @@ func enrichAnime(in []SeriesSummary) []AnimeCandidate {
 	return out
 }
 
-// pickAnime shows the picker. With thumbnails enabled it prints each cover
-// above its numbered label; otherwise (or under fzf) it falls back to a plain
-// numbered list / fzf.
-func pickAnime(cands []AnimeCandidate, showThumbs, useFzf bool) (int, error) {
-	lines := make([]string, len(cands))
-	for i, c := range cands {
-		lines[i] = renderAnimeLine(c)
-	}
-	if useFzf && fzfAvailable() {
-		return pickIndex(lines, fmt.Sprintf("Anime (%d)", len(cands)), "Select anime", useFzf)
-	}
-	fmt.Printf("\nAnime (%d)\n\n", len(cands))
-	for i, c := range cands {
-		if showThumbs && c.PicURL != "" {
-			if err := printCover(c.PicURL); err == nil {
-				fmt.Println()
-			}
-		}
-		fmt.Printf("  %d) %s\n", i+1, lines[i])
-	}
-	for {
-		fmt.Printf("\nSelect anime [1-%d]: ", len(cands))
-		line, err := readLine()
-		if err != nil {
-			return 0, err
-		}
-		n, perr := strconv.Atoi(line)
-		if perr == nil && n >= 1 && n <= len(cands) {
-			return n - 1, nil
-		}
-		fmt.Printf("  invalid: %q\n", line)
-	}
-}
-
 func sortCandidatesByYear(c []AnimeCandidate) {
 	sort.SliceStable(c, func(i, j int) bool {
 		yi := atoiSafe(c[i].Year)
@@ -220,7 +184,7 @@ func sortBySizeDesc(rs []*Release) {
 // sortedReleases returns a sorted copy of rs for the named sort order.
 func sortedReleases(rs []*Release, sortName string) []*Release {
 	cp := append([]*Release(nil), rs...)
-	switch sortName {
+	switch normalizeSort(sortName) {
 	case "oldest":
 		sortByDateAsc(cp)
 	case "smallest":
@@ -233,33 +197,15 @@ func sortedReleases(rs []*Release, sortName string) []*Release {
 	return cp
 }
 
-// ---- group filter ----
-
-type groupCount struct {
-	Name  string
-	Count int
+func normalizeSort(s string) string {
+	switch s {
+	case "newest", "oldest", "smallest", "largest":
+		return s
+	}
+	return "newest"
 }
 
-func distinctGroups(rs []*Release) []groupCount {
-	counts := map[string]int{}
-	for _, r := range rs {
-		name := r.Group
-		if name == "" {
-			name = "Unknown"
-		}
-		counts[name]++
-	}
-	names := make([]string, 0, len(counts))
-	for n := range counts {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	out := []groupCount{{Name: "All", Count: len(rs)}}
-	for _, n := range names {
-		out = append(out, groupCount{Name: n, Count: counts[n]})
-	}
-	return out
-}
+// ---- group pre-filter (--group; fzf fuzzy filter is also available) ----
 
 func filterByGroup(rs []*Release, group string) []*Release {
 	if group == "" || strings.EqualFold(group, "All") {
@@ -274,12 +220,19 @@ func filterByGroup(rs []*Release, group string) []*Release {
 	return out
 }
 
+func groupLabel(g string) string {
+	if g == "" {
+		return "All"
+	}
+	return g
+}
+
 // ---- rendering ----
 
-func renderReleaseLine(r *Release) string {
-	date := "?"
+func renderReleaseFzfLine(r *Release) string {
+	date := "??-??"
 	if t, err := time.Parse(time.RFC3339, r.Entry.DateAdded); err == nil {
-		date = t.Format("2006-01-02")
+		date = t.Format("06-01-02") // YY-MM-DD, leads the line (sorted by date)
 	}
 	grp := r.Group
 	if grp == "" {
@@ -295,9 +248,9 @@ func renderReleaseLine(r *Release) string {
 	} else if r.Episode > 0 {
 		eps = fmt.Sprintf("ep%d", r.Episode)
 	}
-	return fmt.Sprintf("%s %-15s %-5s %9s %-6s %5d↑ %4d↓  %s",
-		date, "["+truncate(grp, 13)+"]", res, humanSize(r.Entry.SizeBytes), eps,
-		r.Entry.Seeders, r.Entry.Leechers, truncate(r.Entry.Title, 50))
+	return fmt.Sprintf("%s [%s] %-5s %-5s %9s %5d↑ %3d↓",
+		date, truncate(grp, 14), res, eps, humanSize(r.Entry.SizeBytes),
+		r.Entry.Seeders, r.Entry.Leechers)
 }
 
 func humanSize(b int64) string {
@@ -324,149 +277,204 @@ func truncate(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-// ---- menus ----
+// ---- pickers (fzf with numbered fallback) ----
 
-var sortOptions = []struct {
-	name, label string
-}{
-	{"newest", "newest (date, newest first)"},
-	{"oldest", "oldest (date, oldest first)"},
-	{"smallest", "smallest (size, asc)"},
-	{"largest", "largest (size, desc)"},
-}
-
-func pickGroup(groups []groupCount, current string, useFzf bool) (string, error) {
-	lines := make([]string, len(groups))
-	for i, g := range groups {
-		mark := ""
-		if current != "" && strings.EqualFold(g.Name, current) {
-			mark = "  <="
+// runFzf launches fzf with args, feeds input, returns the selected (full) line.
+func runFzf(args []string, input string) (string, error) {
+	cmd := exec.Command("fzf", args...)
+	cmd.Stdin = strings.NewReader(input)
+	var out strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 130 {
+			return "", errCancelled
 		}
-		lines[i] = fmt.Sprintf("%-16s %5d%s", g.Name, g.Count, mark)
-	}
-	cur := current
-	if cur == "" {
-		cur = "All"
-	}
-	idx, err := pickIndex(lines, "Group (currently "+cur+")", "Select group", useFzf)
-	if err != nil {
 		return "", err
 	}
-	if strings.EqualFold(groups[idx].Name, "All") {
-		return "", nil
-	}
-	return groups[idx].Name, nil
+	return strings.TrimSpace(out.String()), nil
 }
 
-func pickSort(current string, useFzf bool) (string, error) {
-	lines := make([]string, len(sortOptions))
-	for i, o := range sortOptions {
-		mark := ""
-		if o.name == current {
-			mark = "  <="
-		}
-		lines[i] = o.label + mark
+// pickAnime chooses an anime via fzf (with cover preview in kitty) or a
+// numbered fallback.
+func pickAnime(cands []AnimeCandidate, useFzf bool) (*AnimeCandidate, error) {
+	if useFzf && fzfAvailable() {
+		return pickAnimeFzf(cands)
 	}
-	idx, err := pickIndex(lines, "Sort (currently "+current+")", "Select sort", useFzf)
+	return pickAnimeNumbered(cands)
+}
+
+func pickAnimeFzf(cands []AnimeCandidate) (*AnimeCandidate, error) {
+	var b strings.Builder
+	for _, c := range cands {
+		fmt.Fprintf(&b, "%d\t%s\t%s\n", c.Aid, renderAnimeLine(c), c.PicURL)
+	}
+	args := []string{
+		"--delimiter=\t", "--with-nth=2", "--cycle",
+		"--reverse", "--prompt=Anime> ",
+		"--header", fmt.Sprintf("%d anime — Enter to select", len(cands)),
+		"--preview-window=right:30%,border-vertical",
+	}
+	if kittyActive() {
+		args = append(args, "--preview=kitten icat --clear --transfer-mode=memory --stdin=no --scale-up --place=${FZF_PREVIEW_COLUMNS}x${FZF_PREVIEW_LINES}@0x0 {3}")
+	}
+	line, err := runFzf(args, b.String())
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return sortOptions[idx].name, nil
-}
-
-// ---- release browser (command loop) ----
-
-// browseState is the browser's mutable view state. It lives in the caller
-// (main.go's post-play loop) so the group filter, sort, and page persist across
-// play/download round-trips instead of resetting each re-entry.
-type browseState struct {
-	group string
-	sort  string
-	page  int
-}
-
-// browseReleases runs the paginated, filterable, sortable release list and
-// returns the user's chosen release. It mutates st so state survives re-entry.
-func browseReleases(all []*Release, st *browseState, useFzf bool) (*Release, error) {
-	if st.sort == "" {
-		st.sort = "newest"
-	}
-
-	for {
-		items := sortedReleases(filterByGroup(all, st.group), st.sort)
-		if len(items) == 0 {
-			return nil, fmt.Errorf("no releases for group %q", st.group)
-		}
-		totalPages := (len(items) + releasePageSize - 1) / releasePageSize
-		if st.page >= totalPages {
-			st.page = totalPages - 1
-		}
-		if st.page < 0 {
-			st.page = 0
-		}
-		start := st.page * releasePageSize
-		end := start + releasePageSize
-		if end > len(items) {
-			end = len(items)
-		}
-
-		groupLabel := st.group
-		if groupLabel == "" {
-			groupLabel = "All"
-		}
-		fmt.Printf("\n  %d releases   [%s]  %s   page %d/%d\n\n", len(items), groupLabel, st.sort, st.page+1, totalPages)
-		for i := start; i < end; i++ {
-			fmt.Printf("  %2d) %s\n", i+1, renderReleaseLine(items[i]))
-		}
-
-		in, err := readCommand(fmt.Sprintf("\n  select %d-%d | n next  p prev  g group  s sort  q quit: ", start+1, end))
-		if err != nil {
-			return nil, err
-		}
-		in = strings.TrimSpace(in)
-
-		switch in {
-		case "", "?":
-			continue
-		case "q":
-			return nil, errCancelled
-		case "n":
-			if st.page+1 < totalPages {
-				st.page++
-			}
-		case "p":
-			if st.page > 0 {
-				st.page--
-			}
-		case "g":
-			g, err := pickGroup(distinctGroups(all), st.group, useFzf)
-			if err != nil {
-				return nil, err
-			}
-			st.group = g
-			st.page = 0
-		case "s":
-			s, err := pickSort(st.sort, useFzf)
-			if err != nil {
-				return nil, err
-			}
-			st.sort = s
-			st.page = 0
-		default:
-			n, perr := strconv.Atoi(in)
-			if perr != nil || n < start+1 || n > end {
-				fmt.Printf("  invalid: %q (type a number %d-%d or n/p/g/s/q)\n", in, start+1, end)
-				continue
-			}
-			return items[n-1], nil
+	aid, _ := strconv.Atoi(strings.SplitN(line, "\t", 2)[0])
+	for i := range cands {
+		if cands[i].Aid == aid {
+			return &cands[i], nil
 		}
 	}
+	return nil, fmt.Errorf("selected aid %d not found", aid)
 }
 
-func normalizeSort(s string) string {
-	switch s {
-	case "newest", "oldest", "smallest", "largest":
+func pickAnimeNumbered(cands []AnimeCandidate) (*AnimeCandidate, error) {
+	lines := make([]string, len(cands))
+	for i, c := range cands {
+		lines[i] = renderAnimeLine(c)
+	}
+	idx, err := pickIndex(lines, fmt.Sprintf("Anime (%d)", len(cands)), "Select anime", false)
+	if err != nil {
+		return nil, err
+	}
+	return &cands[idx], nil
+}
+
+// pickRelease chooses a release via fzf (fuzzy filter, pre-sorted, group
+// pre-filtered) or a numbered fallback.
+func pickRelease(all []*Release, group, sortName string, useFzf bool) (*Release, error) {
+	view := sortedReleases(filterByGroup(all, group), sortName)
+	if len(view) == 0 {
+		return nil, fmt.Errorf("no releases for group %q", groupLabel(group))
+	}
+	if useFzf && fzfAvailable() {
+		return pickReleaseFzf(view, group, sortName)
+	}
+	return pickReleaseNumbered(view, group, sortName)
+}
+
+func pickReleaseFzf(view []*Release, group, sortName string) (*Release, error) {
+	var b strings.Builder
+	for i, r := range view {
+		// fields (tab-separated): 1=index, 2=concise display, 3=magnet, 4=title.
+		// --with-nth=2,4 shows concise and title joined by the tab delimiter.
+		fmt.Fprintf(&b, "%d\t%s\t%s\t%s\n", i, renderReleaseFzfLine(r), r.Entry.Magnet, r.Entry.Title)
+	}
+
+	args := []string{
+		"--delimiter=\t", "--with-nth=2,4", "--cycle",
+		"--reverse", "--prompt=Release> ",
+		"--header", fmt.Sprintf("%d releases  [%s]  %s — type to filter, Enter to select", len(view), groupLabel(group), normalizeSort(sortName)),
+		"--preview-window=right:30%,border-vertical",
+	}
+	// Text preview (full title + magnet) via a temp file + internal subcommand,
+	// so titles with quotes/spaces stay shell-safe.
+	if tmp, err := os.CreateTemp("", "ani-rel-*.tsv"); err == nil {
+		tmp.WriteString(b.String())
+		tmp.Close()
+		defer os.Remove(tmp.Name())
+		if exe, err := os.Executable(); err == nil {
+			args = append(args, fmt.Sprintf("--preview=%s preview-release %s {1}", exe, tmp.Name()))
+		}
+	}
+
+	line, err := runFzf(args, b.String())
+	if err != nil {
+		return nil, err
+	}
+	idx, _ := strconv.Atoi(strings.SplitN(line, "\t", 2)[0])
+	if idx < 0 || idx >= len(view) {
+		return nil, fmt.Errorf("selected release out of range")
+	}
+	return view[idx], nil
+}
+
+// previewRelease is the internal subcommand backing the fzf --preview pane: it
+// reads the temp TSV (same lines fed to fzf) and prints the full title +
+// concise detail + magnet for the line at index, word-wrapped to the pane.
+func previewRelease(file, indexStr string) {
+	idx, err := strconv.Atoi(indexStr)
+	if err != nil || idx < 0 {
+		return
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if idx >= len(lines) {
+		return
+	}
+	f := strings.SplitN(lines[idx], "\t", 4) // [index, concise, magnet, title]
+	if len(f) < 3 {
+		return
+	}
+	title := "(no title)"
+	if len(f) >= 4 && f[3] != "" {
+		title = f[3]
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Title:  %s\n", title)
+	fmt.Fprintf(&b, "Detail: %s\n", f[1])
+	if m := f[2]; m != "" {
+		if len([]rune(m)) > 56 {
+			m = string([]rune(m)[:56]) + "…"
+		}
+		fmt.Fprintf(&b, "Magnet: %s\n", m)
+	}
+	width := atoiSafe(os.Getenv("FZF_PREVIEW_COLUMNS"))
+	if width <= 0 {
+		width = 40
+	}
+	for _, line := range strings.Split(strings.TrimRight(b.String(), "\n"), "\n") {
+		fmt.Println(wrapLine(line, width))
+	}
+}
+
+// wrapLine breaks s to no more than width runes per line, preferring to break
+// after a space; long unbreakable tokens break at width. (Rune-based so CJK
+// titles wrap too.)
+func wrapLine(s string, width int) string {
+	runes := []rune(s)
+	if width <= 0 || len(runes) <= width {
 		return s
 	}
-	return "newest"
+	var b strings.Builder
+	for len(runes) > 0 {
+		end := width
+		if end > len(runes) {
+			end = len(runes)
+		}
+		if end < len(runes) {
+			// prefer breaking after the last space in (0, end), if not too early
+			for i := end - 1; i > width/2; i-- {
+				if runes[i] == ' ' {
+					end = i + 1
+					break
+				}
+			}
+		}
+		b.WriteString(string(runes[:end]))
+		runes = runes[end:]
+		if len(runes) > 0 {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+func pickReleaseNumbered(view []*Release, group, sortName string) (*Release, error) {
+	lines := make([]string, len(view))
+	for i, r := range view {
+		lines[i] = renderReleaseFzfLine(r)
+	}
+	header := fmt.Sprintf("%d releases  [%s]  %s", len(view), groupLabel(group), normalizeSort(sortName))
+	idx, err := pickIndex(lines, header, "Select release", false)
+	if err != nil {
+		return nil, err
+	}
+	return view[idx], nil
 }
