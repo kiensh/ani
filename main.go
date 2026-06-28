@@ -9,6 +9,10 @@ import (
 	"strings"
 )
 
+// debugMode is set by --debug. When true, fzf/exec are not run; their commands
+// and input data are printed to stderr instead (see runFzf, runWithSignals).
+var debugMode bool
+
 // valueFlags consume the following argument when not in --flag=value form,
 // so intersperseFlags can reorder flags/positionals (stdlib flag stops at the
 // first positional otherwise).
@@ -73,6 +77,7 @@ func run(args []string) error {
 	fs.StringVar(&opt.player, "player", "", "streaming player for play (mpv default)")
 	fs.StringVar(&opt.dir, "dir", "", "download directory (default cwd)")
 	fs.BoolVar(&opt.noFzf, "no-fzf", false, "disable fzf (use numbered menus)")
+	fs.BoolVar(&debugMode, "debug", false, "print fzf/exec commands + data without running them")
 	if err := fs.Parse(intersperseFlags(args)); err != nil {
 		return err
 	}
@@ -125,9 +130,12 @@ func run(args []string) error {
 		}
 
 		announcePick(pick)
-		action, err := promptAction()
-		if err != nil {
-			return err
+		action := "play"
+		if !debugMode {
+			action, err = promptAction()
+			if err != nil {
+				return err
+			}
 		}
 		if action == "download" {
 			if err := runDownload(pick, dir); err != nil {
@@ -137,6 +145,9 @@ func run(args []string) error {
 			if err := runPlay(pick, player); err != nil {
 				return err
 			}
+		}
+		if debugMode {
+			return nil // one iteration: print commands, then exit
 		}
 		// loop: return to the release picker for the next file
 	}

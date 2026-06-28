@@ -280,7 +280,19 @@ func truncate(s string, n int) string {
 // ---- pickers (fzf with numbered fallback) ----
 
 // runFzf launches fzf with args, feeds input, returns the selected (full) line.
+// In debug mode it prints the fzf command + input and auto-selects the first
+// line (no fzf process is started).
 func runFzf(args []string, input string) (string, error) {
+	if debugMode {
+		fmt.Fprintf(os.Stderr, "DEBUG fzf %s\n", shellQuote(append([]string{"fzf"}, args...)))
+		fmt.Fprintln(os.Stderr, "DEBUG input (tab-delimited):")
+		fmt.Fprintln(os.Stderr, input)
+		first := strings.SplitN(input, "\n", 2)[0]
+		if first == "" {
+			return "", errCancelled
+		}
+		return first, nil
+	}
 	cmd := exec.Command("fzf", args...)
 	cmd.Stdin = strings.NewReader(input)
 	var out strings.Builder
@@ -293,6 +305,21 @@ func runFzf(args []string, input string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(out.String()), nil
+}
+
+// shellQuote joins args into a single shell-quoted command line (each arg in
+// single quotes, inner ' escaped) so printed commands are copy-paste-runnable.
+func shellQuote(args []string) string {
+	var b strings.Builder
+	for i, a := range args {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteByte('\'')
+		b.WriteString(strings.ReplaceAll(a, "'", `'\''`))
+		b.WriteByte('\'')
+	}
+	return b.String()
 }
 
 // pickAnime chooses an anime via fzf (with cover preview in kitty) or a
