@@ -118,19 +118,18 @@ func TestDedupSeriesComputesSeason(t *testing.T) {
 	}
 }
 
-func TestSortCandidatesByYear(t *testing.T) {
-	c := []AnimeCandidate{
-		{Aid: 1, Year: "2019"},
-		{Aid: 2, Year: "2026"},
-		{Aid: 3, Year: ""},    // empty year sorts last
-		{Aid: 4, Year: "2022"},
+func TestRenderMALLine(t *testing.T) {
+	cases := []struct {
+		item MALItem
+		want string
+	}{
+		{MALItem{Title: "Frieren", TotalEps: 28, WatchedEps: 3, AirStatus: "currently_airing", Score: 9}, "Frieren  ep 3/28  [airing]  ★9"},
+		{MALItem{Title: "X", TotalEps: 12, WatchedEps: 12, AirStatus: "finished_airing"}, "X  ep 12/12  [done]"},
+		{MALItem{Title: "Y", AirStatus: "not_yet_aired"}, "Y  [unaired]"},
 	}
-	sortCandidatesByYear(c)
-	got := []int{c[0].Aid, c[1].Aid, c[2].Aid, c[3].Aid}
-	want := []int{2, 4, 1, 3} // 2026, 2022, 2019, (none)
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("order = %v, want %v", got, want)
+	for _, c := range cases {
+		if got := renderMALLine(c.item); got != c.want {
+			t.Errorf("renderMALLine(%+v) = %q, want %q", c.item, got, c.want)
 		}
 	}
 }

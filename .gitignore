@@ -8,5 +8,8 @@
 # Claude Code local settings
 .claude/
 
+# secrets (MAL client_id/secret)
+.env
+
 # macOS
 .DS_Store

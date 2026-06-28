@@ -65,7 +65,7 @@ func pickMagnet(r *Release) string {
 // Ctrl-C tears down webtorrent/aria2c cleanly. In debug mode it just prints
 // the command and returns without running it.
 func runWithSignals(cmd *exec.Cmd) error {
-	if debugMode {
+	if dryRunMode {
 		fmt.Fprintf(os.Stderr, "DEBUG exec %s\n", shellQuote(cmd.Args))
 		return nil
 	}

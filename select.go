@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -95,75 +94,129 @@ func atoiSafe(s string) int {
 	return n
 }
 
-// ---- anime candidate (dedup'd + enriched for the picker) ----
+// ---- MAL anime picker ----
 
-type AnimeCandidate struct {
-	Aid          int
-	CleanTitle   string
-	Year         string
-	Season       int
-	EpisodeCount int
-	TorrentCount int
-	PicURL       string // full cover URL, "" if unknown
+func renderMALLine(m MALItem) string {
+	var b strings.Builder
+	b.WriteString(truncate(m.Title, 48))
+	switch {
+	case m.TotalEps > 0:
+		fmt.Fprintf(&b, "  ep %d/%d", m.WatchedEps, m.TotalEps)
+	case m.WatchedEps > 0:
+		fmt.Fprintf(&b, "  ep %d", m.WatchedEps)
+	}
+	if a := malAirShort(m.AirStatus); a != "" {
+		fmt.Fprintf(&b, "  [%s]", a)
+	}
+	if m.Score > 0 {
+		fmt.Fprintf(&b, "  ★%d", m.Score)
+	}
+	return b.String()
 }
 
-// enrichAnime concurrently fetches clean title/year/episode_count/picurl per
-// aid. On per-aid error it keeps the search title with empty year.
-func enrichAnime(in []SeriesSummary) []AnimeCandidate {
-	out := make([]AnimeCandidate, len(in))
-	var wg sync.WaitGroup
-	for i := range in {
-		wg.Add(1)
-		go func(i int, s SeriesSummary) {
-			defer wg.Done()
-			c := AnimeCandidate{
-				Aid:          s.AnidbAID,
-				Season:       s.Season,
-				TorrentCount: s.TorrentCount,
-				CleanTitle:   s.Title,
-			}
-			if title, year, eps, pic, err := seriesMeta(s.AnidbAID); err == nil && title != "" {
-				c.CleanTitle = title
-				c.Year = year
-				c.EpisodeCount = eps
-				c.PicURL = pic
-			}
-			out[i] = c
-		}(i, in[i])
+func malAirShort(s string) string {
+	switch s {
+	case "currently_airing":
+		return "airing"
+	case "finished_airing":
+		return "done"
+	case "not_yet_aired":
+		return "unaired"
 	}
-	wg.Wait()
+	return s
+}
+
+// pickMALAnime chooses an anime via fzf (cover preview in kitty) or numbered.
+func pickMALAnime(items []MALItem, useFzf bool) (*MALItem, error) {
+	if useFzf && fzfAvailable() {
+		return pickMALAnimeFzf(items)
+	}
+	return pickMALAnimeNumbered(items)
+}
+
+func pickMALAnimeFzf(items []MALItem) (*MALItem, error) {
+	var b strings.Builder
+	for _, m := range items {
+		fmt.Fprintf(&b, "%d\t%s\t%s\n", m.MalID, renderMALLine(m), m.CoverURL)
+	}
+	args := []string{
+		"--delimiter=\t", "--with-nth=2", "--cycle",
+		"--reverse", "--prompt=Anime> ",
+		"--header", fmt.Sprintf("%d anime — Enter to select", len(items)),
+		"--preview-window=right:30%,border-vertical",
+	}
+	if kittyActive() {
+		args = append(args, "--preview=kitten icat --clear --transfer-mode=memory --stdin=no --scale-up --place=${FZF_PREVIEW_COLUMNS}x${FZF_PREVIEW_LINES}@0x0 {3}")
+	}
+	line, err := runFzf(args, b.String())
+	if err != nil {
+		return nil, err
+	}
+	id, _ := strconv.Atoi(strings.SplitN(line, "\t", 2)[0])
+	for i := range items {
+		if items[i].MalID == id {
+			return &items[i], nil
+		}
+	}
+	return nil, fmt.Errorf("selected mal id %d not found", id)
+}
+
+func pickMALAnimeNumbered(items []MALItem) (*MALItem, error) {
+	lines := make([]string, len(items))
+	for i, m := range items {
+		lines[i] = renderMALLine(m)
+	}
+	idx, err := pickIndex(lines, fmt.Sprintf("Anime (%d)", len(items)), "Select anime", false)
+	if err != nil {
+		return nil, err
+	}
+	return &items[idx], nil
+}
+
+// fallbackAnidbByTitle searches animetosho by title (and shortened variants)
+// and returns the top anidb id (used when a MAL anime has no AniDB external
+// link). Returns 0 if none found.
+func fallbackAnidbByTitle(title string) int {
+	for _, candidate := range titleVariants(title) {
+		series, err := searchSeries(candidate)
+		if err != nil {
+			continue
+		}
+		series = dedupSeries(series)
+		if len(series) > 0 {
+			return series[0].AnidbAID
+		}
+	}
+	return 0
+}
+
+// titleVariants returns progressively shorter versions of a title for
+// fallback searching (animetosho indexes franchises under the base name).
+func titleVariants(title string) []string {
+	var out []string
+	out = append(out, title)
+	stripped := stripSeasonSuffix(title)
+	if stripped != title {
+		out = append(out, stripped)
+	}
+	words := strings.Fields(stripped)
+	if len(words) > 3 {
+		out = append(out, strings.Join(words[:3], " "))
+	}
 	return out
 }
 
-func sortCandidatesByYear(c []AnimeCandidate) {
-	sort.SliceStable(c, func(i, j int) bool {
-		yi := atoiSafe(c[i].Year)
-		yj := atoiSafe(c[j].Year)
-		if yi != yj {
-			return yi > yj
-		}
-		return c[i].TorrentCount > c[j].TorrentCount
-	})
+var seasonSuffixRes = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\s+\d+(?:st|nd|rd|th)\s+Season$`),
+	regexp.MustCompile(`(?i)\s+Season\s+\d+$`),
+	regexp.MustCompile(`(?i)\s+Part\s+\d+$`),
 }
 
-func renderAnimeLine(c AnimeCandidate) string {
-	title := c.CleanTitle
-	if title == "" {
-		title = "(unknown)"
+func stripSeasonSuffix(title string) string {
+	for _, re := range seasonSuffixRes {
+		title = re.ReplaceAllString(title, "")
 	}
-	var b strings.Builder
-	b.WriteString(truncate(title, 52))
-	if c.Year != "" {
-		fmt.Fprintf(&b, "  (%s)", c.Year)
-	}
-	if c.Season > 0 {
-		fmt.Fprintf(&b, "  S%d", c.Season)
-	}
-	if c.EpisodeCount > 0 {
-		fmt.Fprintf(&b, "  %dep", c.EpisodeCount)
-	}
-	fmt.Fprintf(&b, "  %d releases", c.TorrentCount)
-	return b.String()
+	return strings.TrimSpace(title)
 }
 
 // ---- sorting (client-side; the API ignores sort params) ----
@@ -283,7 +336,7 @@ func truncate(s string, n int) string {
 // In debug mode it prints the fzf command + input and auto-selects the first
 // line (no fzf process is started).
 func runFzf(args []string, input string) (string, error) {
-	if debugMode {
+	if dryRunMode {
 		fmt.Fprintf(os.Stderr, "DEBUG fzf %s\n", shellQuote(append([]string{"fzf"}, args...)))
 		fmt.Fprintln(os.Stderr, "DEBUG input (tab-delimited):")
 		fmt.Fprintln(os.Stderr, input)
@@ -320,54 +373,6 @@ func shellQuote(args []string) string {
 		b.WriteByte('\'')
 	}
 	return b.String()
-}
-
-// pickAnime chooses an anime via fzf (with cover preview in kitty) or a
-// numbered fallback.
-func pickAnime(cands []AnimeCandidate, useFzf bool) (*AnimeCandidate, error) {
-	if useFzf && fzfAvailable() {
-		return pickAnimeFzf(cands)
-	}
-	return pickAnimeNumbered(cands)
-}
-
-func pickAnimeFzf(cands []AnimeCandidate) (*AnimeCandidate, error) {
-	var b strings.Builder
-	for _, c := range cands {
-		fmt.Fprintf(&b, "%d\t%s\t%s\n", c.Aid, renderAnimeLine(c), c.PicURL)
-	}
-	args := []string{
-		"--delimiter=\t", "--with-nth=2", "--cycle",
-		"--reverse", "--prompt=Anime> ",
-		"--header", fmt.Sprintf("%d anime — Enter to select", len(cands)),
-		"--preview-window=right:30%,border-vertical",
-	}
-	if kittyActive() {
-		args = append(args, "--preview=kitten icat --clear --transfer-mode=memory --stdin=no --scale-up --place=${FZF_PREVIEW_COLUMNS}x${FZF_PREVIEW_LINES}@0x0 {3}")
-	}
-	line, err := runFzf(args, b.String())
-	if err != nil {
-		return nil, err
-	}
-	aid, _ := strconv.Atoi(strings.SplitN(line, "\t", 2)[0])
-	for i := range cands {
-		if cands[i].Aid == aid {
-			return &cands[i], nil
-		}
-	}
-	return nil, fmt.Errorf("selected aid %d not found", aid)
-}
-
-func pickAnimeNumbered(cands []AnimeCandidate) (*AnimeCandidate, error) {
-	lines := make([]string, len(cands))
-	for i, c := range cands {
-		lines[i] = renderAnimeLine(c)
-	}
-	idx, err := pickIndex(lines, fmt.Sprintf("Anime (%d)", len(cands)), "Select anime", false)
-	if err != nil {
-		return nil, err
-	}
-	return &cands[idx], nil
 }
 
 // pickRelease chooses a release via fzf (fuzzy filter, pre-sorted, group

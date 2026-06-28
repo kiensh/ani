@@ -7,11 +7,18 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/nstratos/go-myanimelist/mal"
 )
 
-// debugMode is set by --debug. When true, fzf/exec are not run; their commands
-// and input data are printed to stderr instead (see runFzf, runWithSignals).
+// debugMode is set by --debug. When true, verbose logs are printed (MAL request
+// URLs, PKCE info, raw responses). Tools still run normally.
 var debugMode bool
+
+// dryRunMode is set by --dry-run. When true, fzf/exec are not run; their
+// commands and input data are printed to stderr instead (see runFzf,
+// runWithSignals). The first fzf item is auto-picked and the loop runs once.
+var dryRunMode bool
 
 // valueFlags consume the following argument when not in --flag=value form,
 // so intersperseFlags can reorder flags/positionals (stdlib flag stops at the
@@ -70,26 +77,25 @@ func run(args []string) error {
 		sort   string
 		player string
 		dir    string
+		status string
 		noFzf  bool
 	}
 	fs.StringVar(&opt.group, "group", "", "pre-filter by release group (e.g. Erai-raws)")
 	fs.StringVar(&opt.sort, "sort", "", "newest|oldest|smallest|largest (initial order)")
 	fs.StringVar(&opt.player, "player", "", "streaming player for play (mpv default)")
 	fs.StringVar(&opt.dir, "dir", "", "download directory (default cwd)")
+	fs.StringVar(&opt.status, "status", "watching", "MAL list status: watching|completed|on_hold|dropped|plan_to_watch|all")
 	fs.BoolVar(&opt.noFzf, "no-fzf", false, "disable fzf (use numbered menus)")
-	fs.BoolVar(&debugMode, "debug", false, "print fzf/exec commands + data without running them")
+	fs.BoolVar(&debugMode, "debug", false, "verbose logging (MAL URLs, raw responses)")
+	fs.BoolVar(&dryRunMode, "dry-run", false, "auto-pick first fzf item and print exec commands without running them")
 	if err := fs.Parse(intersperseFlags(args)); err != nil {
 		return err
 	}
 
 	rest := fs.Args()
-	if len(rest) == 0 {
-		printUsage(os.Stdout)
-		return nil
-	}
-	query := rest[0]
-	if strings.TrimSpace(query) == "" {
-		return fmt.Errorf("query is empty")
+	query := ""
+	if len(rest) > 0 {
+		query = rest[0]
 	}
 
 	cfg := loadConfig()
@@ -102,7 +108,7 @@ func run(args []string) error {
 	dir := orDefault(opt.dir, cfg.Dir)
 	useFzf := fzfAvailable() && !opt.noFzf
 
-	aid, title, err := resolveAnime(query, useFzf)
+	aid, title, item, err := resolve(query, opt.status, useFzf)
 	if err != nil {
 		return err
 	}
@@ -116,7 +122,7 @@ func run(args []string) error {
 		return fmt.Errorf("no releases found for anidb %d", aid)
 	}
 	all := toReleases(entries)
-	if title == "" || strings.HasPrefix(title, "anidb:") {
+	if title == "" {
 		if t := entries[0].Series.Title; t != "" {
 			title = t
 		}
@@ -131,7 +137,7 @@ func run(args []string) error {
 
 		announcePick(pick)
 		action := "play"
-		if !debugMode {
+		if !dryRunMode {
 			action, err = promptAction()
 			if err != nil {
 				return err
@@ -146,67 +152,84 @@ func run(args []string) error {
 				return err
 			}
 		}
-		if debugMode {
+		malWriteBack(item, pick)
+		if dryRunMode {
 			return nil // one iteration: print commands, then exit
 		}
 		// loop: return to the release picker for the next file
 	}
 }
 
-// resolveAnime returns the chosen AniDB id + title. A numeric query is treated
-// as a direct anidb id (skips the picker). Otherwise it searches, dedups by
-// anidb id, enriches each candidate with clean title/year/episodes, and sorts
-// by year desc. If the raw query yields no distinct anime it retries once with
-// a shortened query (long official titles often return 0).
-func resolveAnime(query string, useFzf bool) (aid int, title string, err error) {
+// resolve picks an anime via MyAnimeList and resolves the AniDB id.
+//   - numeric query  → direct anidb id (no MAL)
+//   - empty query     → user's MAL list (filtered by --status)
+//   - otherwise       → MAL text search
+// The AniDB id comes from MAL's external links, falling back to an animetosho
+// title search when a MAL anime has no AniDB link.
+func resolve(query, status string, useFzf bool) (aid int, title string, item *MALItem, err error) {
 	if n, perr := strconv.Atoi(query); perr == nil && n > 0 {
-		return n, "", nil
+		return n, "", nil, nil
 	}
 
-	series, err := searchSeries(query)
+	var items []MALItem
+	if query == "" {
+		fmt.Fprintf(os.Stderr, "Loading MAL list (%s)…\n", status)
+		items, err = malMyList(mapStatus(status))
+	} else {
+		fmt.Fprintf(os.Stderr, "Searching MAL for %q…\n", query)
+		items, err = malSearch(query)
+	}
 	if err != nil {
-		return 0, "", err
+		return 0, "", nil, err
 	}
-	series = dedupSeries(series)
-	if len(series) == 0 {
-		if short := shortenQuery(query); short != "" && short != query {
-			series, err = searchSeries(short)
-			if err != nil {
-				return 0, "", err
-			}
-			series = dedupSeries(series)
-		}
-	}
-	if len(series) == 0 {
-		return 0, "", fmt.Errorf("no anime found for %q", query)
+	if len(items) == 0 {
+		return 0, "", nil, fmt.Errorf("no anime found")
 	}
 
-	fmt.Fprintf(os.Stderr, "Resolving %d anime…\n", len(series))
-	cands := enrichAnime(series)
-	sortCandidatesByYear(cands)
-
-	c, err := pickAnime(cands, useFzf)
+	item, err = pickMALAnime(items, useFzf)
 	if err != nil {
-		return 0, "", err
+		return 0, "", nil, err
 	}
-	return c.Aid, c.CleanTitle, nil
+
+	aid, aerr := malAnidbAid(item.MalID)
+	if aerr == nil && aid == 0 {
+		fmt.Fprintf(os.Stderr, "No AniDB link on MAL for %q — searching animetosho…\n", item.Title)
+		aid = fallbackAnidbByTitle(item.Title)
+	}
+	if aid == 0 {
+		return 0, "", nil, fmt.Errorf("could not resolve an AniDB id for %q", item.Title)
+	}
+	return aid, item.Title, item, nil
 }
 
-// shortenQuery reduces an over-long official title to its core, for the
-// retry-on-empty fallback. Tries the part before the first ':'/'-', else the
-// first three whitespace words.
-func shortenQuery(q string) string {
-	q = strings.TrimSpace(q)
-	for _, sep := range []string{":", " - ", " – "} {
-		if i := strings.Index(q, sep); i > 1 {
-			return strings.TrimSpace(q[:i])
-		}
+func mapStatus(s string) mal.AnimeStatus {
+	switch s {
+	case "watching":
+		return mal.AnimeStatusWatching
+	case "completed":
+		return mal.AnimeStatusCompleted
+	case "on_hold":
+		return mal.AnimeStatusOnHold
+	case "dropped":
+		return mal.AnimeStatusDropped
+	case "plan_to_watch":
+		return mal.AnimeStatusPlanToWatch
 	}
-	words := strings.Fields(q)
-	if len(words) > 3 {
-		return strings.Join(words[:3], " ")
+	return "" // "all" / unknown → no status filter
+}
+
+// malWriteBack updates MAL progress after a play/download (best-effort).
+func malWriteBack(item *MALItem, pick *Release) {
+	if item == nil || pick.IsBatch {
+		return
 	}
-	return q
+	watched := item.WatchedEps + 1
+	if pick.Episode > item.WatchedEps {
+		watched = pick.Episode
+	}
+	if err := malUpdateProgress(item.MalID, watched); err != nil {
+		fmt.Fprintf(os.Stderr, "MAL update failed: %v\n", err)
+	}
 }
 
 func announcePick(r *Release) {
