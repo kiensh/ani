@@ -347,7 +347,8 @@ func animeToItem(a mal.Anime) MALItem {
 	if cover == "" {
 		cover = a.MainPicture.Medium
 	}
-	return MALItem{MalID: a.ID, Title: a.Title, CoverURL: cover, TotalEps: a.NumEpisodes, AirStatus: a.Status}
+	return MALItem{MalID: a.ID, Title: a.Title, CoverURL: cover, TotalEps: a.NumEpisodes, AirStatus: a.Status,
+		WatchedEps: a.MyListStatus.NumEpisodesWatched, Score: a.MyListStatus.Score}
 }
 
 // ---- operations ----
@@ -395,7 +396,7 @@ func malSearch(q string) ([]MALItem, error) {
 		fmt.Fprintf(os.Stderr, "DEBUG MAL GET /anime?q=%s\n", q)
 	}
 	anime, _, err := c.Anime.List(context.Background(), q,
-		mal.Fields{"title", "main_picture", "num_episodes", "status"}, mal.Limit(20))
+		mal.Fields{"title", "main_picture", "num_episodes", "status", "my_list_status"}, mal.Limit(20))
 	if err != nil {
 		return nil, err
 	}
