@@ -577,21 +577,22 @@ func previewRelease(file, indexStr string) {
 	if len(f) >= 4 && f[3] != "" {
 		title = f[3]
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "Title:  %s\n", title)
-	fmt.Fprintf(&b, "Detail: %s\n", f[1])
-	if m := f[2]; m != "" {
-		if len([]rune(m)) > 56 {
-			m = string([]rune(m)[:56]) + "…"
-		}
-		fmt.Fprintf(&b, "Magnet: %s\n", m)
-	}
 	width := atoiSafe(os.Getenv("FZF_PREVIEW_COLUMNS"))
 	if width <= 0 {
 		width = 40
 	}
-	for _, line := range strings.Split(strings.TrimRight(b.String(), "\n"), "\n") {
-		fmt.Println(wrapLine(line, width))
+	cprint := func(color, text string) {
+		for _, line := range strings.Split(wrapLine(text, width), "\n") {
+			fmt.Printf("%s%s\033[0m\n", color, line)
+		}
+	}
+	cprint("\033[1;36m", title)
+	cprint("\033[33m", f[1])
+	if m := f[2]; m != "" {
+		if len([]rune(m)) > 56 {
+			m = string([]rune(m)[:56]) + "…"
+		}
+		cprint("\033[2m", "Magnet: "+m)
 	}
 }
 
