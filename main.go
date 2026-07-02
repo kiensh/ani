@@ -60,6 +60,10 @@ func main() {
 		previewRelease(os.Args[2], os.Args[3])
 		return
 	}
+	if len(os.Args) >= 4 && os.Args[1] == "preview-anime" {
+		previewAnime(os.Args[2], os.Args[3])
+		return
+	}
 	if err := run(os.Args[1:]); err != nil {
 		if errors.Is(err, errCancelled) {
 			return // user hit q — clean exit

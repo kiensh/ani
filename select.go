@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -98,7 +99,7 @@ func atoiSafe(s string) int {
 
 func renderMALLine(m MALItem) string {
 	var b strings.Builder
-	b.WriteString(truncate(m.Title, 48))
+	b.WriteString(truncate(m.Title, 40))
 	switch {
 	case m.TotalEps > 0:
 		fmt.Fprintf(&b, "  ep %d/%d", m.WatchedEps, m.TotalEps)
@@ -137,7 +138,7 @@ func pickMALAnime(items []MALItem, useFzf bool) (*MALItem, error) {
 func pickMALAnimeFzf(items []MALItem) (*MALItem, error) {
 	var b strings.Builder
 	for _, m := range items {
-		fmt.Fprintf(&b, "%d\t%s\t%s\n", m.MalID, renderMALLine(m), m.CoverURL)
+		fmt.Fprintf(&b, "%d\t%s\n", m.MalID, renderMALLine(m))
 	}
 	args := []string{
 		"--delimiter=\t", "--with-nth=2", "--cycle",
@@ -145,8 +146,16 @@ func pickMALAnimeFzf(items []MALItem) (*MALItem, error) {
 		"--header", fmt.Sprintf("%d anime — Enter to select", len(items)),
 		"--preview-window=right:30%,border-vertical",
 	}
-	if kittyActive() {
-		args = append(args, "--preview=kitten icat --clear --transfer-mode=memory --stdin=no --scale-up --place=${FZF_PREVIEW_COLUMNS}x${FZF_PREVIEW_LINES}@0x0 {3}")
+	// Write items to a temp JSON for the preview subcommand (cover + info text).
+	if tmp, err := os.CreateTemp("", "ani-anime-*.json"); err == nil {
+		if data, err := json.Marshal(items); err == nil {
+			tmp.Write(data)
+		}
+		tmp.Close()
+		defer os.Remove(tmp.Name())
+		if exe, err := os.Executable(); err == nil {
+			args = append(args, fmt.Sprintf("--preview=%s preview-anime %s {1}", exe, tmp.Name()))
+		}
 	}
 	line, err := runFzf(args, b.String())
 	if err != nil {
@@ -159,6 +168,126 @@ func pickMALAnimeFzf(items []MALItem) (*MALItem, error) {
 		}
 	}
 	return nil, fmt.Errorf("selected mal id %d not found", id)
+}
+
+// previewAnime is the internal subcommand backing the fzf --preview pane for
+// the anime picker: renders the cover image (kitty) then info text below.
+func previewAnime(tmpfile, malIDStr string) {
+	data, err := os.ReadFile(tmpfile)
+	if err != nil {
+		return
+	}
+	var items []MALItem
+	if err := json.Unmarshal(data, &items); err != nil {
+		return
+	}
+	malID, _ := strconv.Atoi(malIDStr)
+	var m *MALItem
+	for i := range items {
+		if items[i].MalID == malID {
+			m = &items[i]
+			break
+		}
+	}
+	if m == nil {
+		return
+	}
+
+	// Cover image (top ~40% of the preview pane).
+	cols, lines := atoiSafe(os.Getenv("FZF_PREVIEW_COLUMNS")), atoiSafe(os.Getenv("FZF_PREVIEW_LINES"))
+	if cols <= 0 {
+		cols = 40
+	}
+	if lines <= 0 {
+		lines = 20
+	}
+	if m.CoverURL != "" {
+		imageRows := lines * 40 / 100
+		if imageRows < 4 {
+			imageRows = 4
+		}
+		if imageRows > 14 {
+			imageRows = 14
+		}
+		cmd := exec.Command("kitten", "icat", "--clear", "--transfer-mode=memory",
+			"--stdin=no", "--scale-up",
+			fmt.Sprintf("--place=%dx%d@0x0", cols, imageRows), m.CoverURL)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Run()
+		fmt.Println()
+	}
+
+	// Text info below the cover (each field colored for readability).
+	cprint := func(color, text string) {
+		for _, line := range strings.Split(wrapLine(text, cols), "\n") {
+			fmt.Printf("%s%s\033[0m\n", color, line)
+		}
+	}
+
+	cprint("\033[1;36m", m.Title) // bold cyan: title
+
+	progress := ""
+	switch {
+	case m.TotalEps > 0:
+		progress = fmt.Sprintf("ep %d/%d", m.WatchedEps, m.TotalEps)
+	default:
+		progress = fmt.Sprintf("ep %d", m.WatchedEps)
+	}
+	if a := malAirShort(m.AirStatus); a != "" {
+		progress += "  [" + a + "]"
+	}
+	cprint("\033[33m", progress) // yellow: progress
+
+	if m.MeanScore > 0 {
+		s := fmt.Sprintf("★ %.2f", m.MeanScore)
+		if m.Score > 0 {
+			s += fmt.Sprintf("   (your: %d)", m.Score)
+		}
+		cprint("\033[35m", s) // magenta: score
+	} else if m.Score > 0 {
+		cprint("\033[35m", fmt.Sprintf("your score: %d", m.Score))
+	}
+
+	if m.Genres != "" {
+		cprint("\033[32m", "Genres: "+m.Genres) // green
+	}
+	if m.Studios != "" {
+		cprint("\033[34m", "Studios: "+m.Studios) // blue
+	}
+	seasonType := ""
+	if m.StartSeason != "" {
+		seasonType = "Season: " + m.StartSeason
+		if m.MediaType != "" {
+			seasonType += "  (" + strings.ToUpper(m.MediaType) + ")"
+		}
+	} else if m.MediaType != "" {
+		seasonType = "Type: " + strings.ToUpper(m.MediaType)
+	}
+	if seasonType != "" {
+		cprint("\033[2m", seasonType) // dim: season/type
+	}
+
+	if m.Rank > 0 || m.Members > 0 {
+		parts := []string{}
+		if m.Rank > 0 {
+			parts = append(parts, fmt.Sprintf("Rank #%d", m.Rank))
+		}
+		if m.Members > 0 {
+			parts = append(parts, fmt.Sprintf("%s members", humanCount(m.Members)))
+		}
+		cprint("\033[2m", strings.Join(parts, "  ")) // dim: rank/members
+	}
+}
+
+func humanCount(n int) string {
+	if n >= 1_000_000 {
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+	if n >= 1000 {
+		return fmt.Sprintf("%.0fK", float64(n)/1000)
+	}
+	return strconv.Itoa(n)
 }
 
 func pickMALAnimeNumbered(items []MALItem) (*MALItem, error) {

@@ -316,39 +316,75 @@ func malClient() (*mal.Client, error) {
 // ---- MAL item model ----
 
 type MALItem struct {
-	MalID      int
-	Title      string
-	CoverURL   string
-	TotalEps   int
-	WatchedEps int
-	AirStatus  string
-	Score      int
+	MalID       int
+	Title       string
+	CoverURL    string
+	TotalEps    int
+	WatchedEps  int
+	AirStatus   string
+	Score       int
+	Genres      string
+	MeanScore   float64
+	Studios     string
+	StartSeason string
+	MediaType   string
+	Rank        int
+	Members     int
 }
 
 func userAnimeToItem(ua mal.UserAnime) MALItem {
-	a := ua.Anime
-	cover := a.MainPicture.Large
-	if cover == "" {
-		cover = a.MainPicture.Medium
-	}
-	return MALItem{
-		MalID:      a.ID,
-		Title:      a.Title,
-		CoverURL:   cover,
-		TotalEps:   a.NumEpisodes,
-		AirStatus:  a.Status,
-		WatchedEps: ua.Status.NumEpisodesWatched,
-		Score:      ua.Status.Score,
-	}
+	return animeFieldsToItem(ua.Anime, ua.Status.NumEpisodesWatched, ua.Status.Score)
 }
 
 func animeToItem(a mal.Anime) MALItem {
+	return animeFieldsToItem(a, a.MyListStatus.NumEpisodesWatched, a.MyListStatus.Score)
+}
+
+func animeFieldsToItem(a mal.Anime, watchedEps, score int) MALItem {
 	cover := a.MainPicture.Large
 	if cover == "" {
 		cover = a.MainPicture.Medium
 	}
-	return MALItem{MalID: a.ID, Title: a.Title, CoverURL: cover, TotalEps: a.NumEpisodes, AirStatus: a.Status,
-		WatchedEps: a.MyListStatus.NumEpisodesWatched, Score: a.MyListStatus.Score}
+	var genres, studios []string
+	for _, g := range a.Genres {
+		genres = append(genres, g.Name)
+	}
+	for _, s := range a.Studios {
+		studios = append(studios, s.Name)
+	}
+	season := ""
+	if a.StartSeason.Year > 0 {
+		season = fmt.Sprintf("%s %d", titleCase(a.StartSeason.Season), a.StartSeason.Year)
+	}
+	return MALItem{
+		MalID:       a.ID,
+		Title:       a.Title,
+		CoverURL:    cover,
+		TotalEps:    a.NumEpisodes,
+		AirStatus:   a.Status,
+		WatchedEps:  watchedEps,
+		Score:       score,
+		Genres:      strings.Join(genres, ", "),
+		MeanScore:   a.Mean,
+		Studios:     strings.Join(studios, ", "),
+		StartSeason: season,
+		MediaType:   a.MediaType,
+		Rank:        a.Rank,
+		Members:     a.NumListUsers,
+	}
+}
+
+func titleCase(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// extraMALFields are the MAL API fields needed for the preview pane.
+var extraMALFields = mal.Fields{
+	"title", "main_picture", "num_episodes", "status", "my_list_status",
+	"genres", "mean", "studios", "start_season", "media_type", "rank", "num_list_users",
 }
 
 // ---- operations ----
@@ -361,7 +397,7 @@ func malMyList(status mal.AnimeStatus) ([]MALItem, error) {
 	ctx := context.Background()
 	const pageSize = 1000
 	base := []mal.AnimeListOption{
-		mal.Fields{"title", "main_picture", "num_episodes", "status", "my_list_status"},
+		extraMALFields,
 		mal.NSFW(true),
 		mal.Limit(pageSize),
 	}
@@ -396,7 +432,7 @@ func malSearch(q string) ([]MALItem, error) {
 		fmt.Fprintf(os.Stderr, "DEBUG MAL GET /anime?q=%s\n", q)
 	}
 	anime, _, err := c.Anime.List(context.Background(), q,
-		mal.Fields{"title", "main_picture", "num_episodes", "status", "my_list_status"}, mal.Limit(20))
+		extraMALFields, mal.Limit(20))
 	if err != nil {
 		return nil, err
 	}
