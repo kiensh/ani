@@ -134,7 +134,7 @@ func run(args []string) error {
 
 	fmt.Fprintf(os.Stderr, "%s — %d releases\n", title, len(all))
 	for {
-		pick, err := pickRelease(all, group, sortName, useFzf)
+		pick, err := pickRelease(all, group, sortName, useFzf, item)
 		if err != nil {
 			return err // q/cancel → exit
 		}
@@ -227,28 +227,37 @@ func malWriteBack(item *MALItem, pick *Release) {
 	if item == nil || pick.IsBatch {
 		return
 	}
-	// Use the release's episode number if known (even if lower than current —
-	// re-watching an earlier episode should update MAL to that episode).
 	watched := item.WatchedEps
 	if pick.Episode > 0 {
 		watched = pick.Episode
 	}
-	// Prompt to mark completed if this was the last episode.
-	if item.TotalEps > 0 && watched >= item.TotalEps &&
-		(item.ListStatus == "watching" || item.ListStatus == "") && !dryRunMode {
-		fmt.Print("\n  Mark as completed on MAL? [Y/n] ")
-		answer, _ := readLine()
-		if answer == "" || strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes") {
-			if err := malUpdateCompleted(item.MalID, watched); err != nil {
-				fmt.Fprintf(os.Stderr, "MAL update failed: %v\n", err)
+
+	// Determine the status to send. Default: keep current status.
+	// Only change to "watching" if not in the list yet or plan_to_watch.
+	status := mal.AnimeStatus(item.ListStatus)
+	if status == "" || status == mal.AnimeStatusPlanToWatch {
+		status = mal.AnimeStatusWatching
+	}
+
+	// Prompt to mark completed when the last episode is reached
+	// and status is not already "completed" (covers dropped, on_hold, etc).
+	if item.TotalEps > 0 && watched >= item.TotalEps && status != mal.AnimeStatusCompleted {
+		if dryRunMode {
+			fmt.Fprintf(os.Stderr, "DRY-RUN: would prompt to mark completed\n")
+		} else {
+			fmt.Print("\n  Mark as completed on MAL? [Y/n] ")
+			answer, _ := readLine()
+			if answer == "" || strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes") {
+				status = mal.AnimeStatusCompleted
+				fmt.Fprintln(os.Stderr, "  Marked as completed on MAL.")
 			}
-			fmt.Fprintln(os.Stderr, "  Marked as completed on MAL.")
-			return
 		}
 	}
-	if err := malUpdateProgress(item.MalID, watched); err != nil {
+
+	if err := malUpdate(item.MalID, watched, status); err != nil {
 		fmt.Fprintf(os.Stderr, "MAL update failed: %v\n", err)
 	}
+	malRefreshItem(item)
 }
 
 func announcePick(r *Release) {

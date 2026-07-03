@@ -513,9 +513,9 @@ func parseAnidbAidFromURL(rawurl string) int {
 
 // malUpdateProgress increments the watched-episode count on MAL and sets status
 // to watching. Skipped (printed only) in debug mode.
-func malUpdateProgress(malID, watchedEps int) error {
+func malUpdate(malID, watchedEps int, status mal.AnimeStatus) error {
 	if dryRunMode {
-		fmt.Fprintf(os.Stderr, "DRY-RUN: MAL PATCH /anime/%d num_episodes_watched=%d status=watching (not sent)\n", malID, watchedEps)
+		fmt.Fprintf(os.Stderr, "DRY-RUN: MAL PATCH /anime/%d num_episodes_watched=%d status=%s (not sent)\n", malID, watchedEps, status)
 		return nil
 	}
 	c, err := malClient()
@@ -523,20 +523,27 @@ func malUpdateProgress(malID, watchedEps int) error {
 		return err
 	}
 	_, _, err = c.Anime.UpdateMyListStatus(context.Background(), malID,
-		mal.AnimeStatusWatching, mal.NumEpisodesWatched(watchedEps))
+		status, mal.NumEpisodesWatched(watchedEps))
 	return err
 }
 
-func malUpdateCompleted(malID, watchedEps int) error {
-	if dryRunMode {
-		fmt.Fprintf(os.Stderr, "DRY-RUN: MAL PATCH /anime/%d num_episodes_watched=%d status=completed (not sent)\n", malID, watchedEps)
-		return nil
+// malRefreshItem re-fetches the anime from MAL and updates item in-place,
+// so the fzf header reflects the real state after a write-back.
+func malRefreshItem(item *MALItem) {
+	if item == nil || dryRunMode {
+		return
 	}
 	c, err := malClient()
 	if err != nil {
-		return err
+		return
 	}
-	_, _, err = c.Anime.UpdateMyListStatus(context.Background(), malID,
-		mal.AnimeStatusCompleted, mal.NumEpisodesWatched(watchedEps))
-	return err
+	if debugMode {
+		fmt.Fprintf(os.Stderr, "DEBUG MAL refresh anime/%d\n", item.MalID)
+	}
+	a, _, err := c.Anime.Details(context.Background(), item.MalID, extraMALFields)
+	if err != nil {
+		return
+	}
+	refreshed := animeFieldsToItem(*a, a.MyListStatus.NumEpisodesWatched, a.MyListStatus.Score, a.MyListStatus.Status)
+	*item = refreshed
 }

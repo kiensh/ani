@@ -527,18 +527,42 @@ func shellQuote(args []string) string {
 
 // pickRelease chooses a release via fzf (fuzzy filter, pre-sorted, group
 // pre-filtered) or a numbered fallback.
-func pickRelease(all []*Release, group, sortName string, useFzf bool) (*Release, error) {
+func pickRelease(all []*Release, group, sortName string, useFzf bool, item *MALItem) (*Release, error) {
 	view := sortedReleases(filterByGroup(all, group), sortName)
 	if len(view) == 0 {
 		return nil, fmt.Errorf("no releases for group %q", groupLabel(group))
 	}
 	if useFzf && fzfAvailable() {
-		return pickReleaseFzf(view, group, sortName)
+		return pickReleaseFzf(view, group, sortName, item)
 	}
-	return pickReleaseNumbered(view, group, sortName)
+	return pickReleaseNumbered(view, group, sortName, item)
 }
 
-func pickReleaseFzf(view []*Release, group, sortName string) (*Release, error) {
+func malItemHeader(item *MALItem) string {
+	if item == nil {
+		return ""
+	}
+	s := ""
+	if item.TotalEps > 0 {
+		s = fmt.Sprintf("ep %d/%d", item.WatchedEps, item.TotalEps)
+	} else if item.WatchedEps > 0 {
+		s = fmt.Sprintf("ep %d", item.WatchedEps)
+	}
+	if ls := malListStatusShort(item.ListStatus); ls != "" {
+		if s != "" {
+			s += "  —  "
+		}
+		s += ls
+	} else if item.WatchedEps > 0 {
+		if s != "" {
+			s += "  —  "
+		}
+		s += "Watching"
+	}
+	return s
+}
+
+func pickReleaseFzf(view []*Release, group, sortName string, item *MALItem) (*Release, error) {
 	var b strings.Builder
 	for i, r := range view {
 		// fields (tab-separated): 1=index, 2=concise display, 3=magnet, 4=title.
@@ -546,10 +570,16 @@ func pickReleaseFzf(view []*Release, group, sortName string) (*Release, error) {
 		fmt.Fprintf(&b, "%d\t%s\t%s\t%s\n", i, renderReleaseFzfLine(r), r.Entry.Magnet, r.Entry.Title)
 	}
 
+	headerParts := []string{}
+	if info := malItemHeader(item); info != "" {
+		headerParts = append(headerParts, info)
+	}
+	headerParts = append(headerParts, fmt.Sprintf("%d releases  [%s]  %s — type to filter, Enter to select", len(view), groupLabel(group), normalizeSort(sortName)))
+
 	args := []string{
 		"--delimiter=\t", "--with-nth=2,4", "--cycle",
 		"--reverse", "--prompt=Release> ",
-		"--header", fmt.Sprintf("%d releases  [%s]  %s — type to filter, Enter to select", len(view), groupLabel(group), normalizeSort(sortName)),
+		"--header", strings.Join(headerParts, "  ·  "),
 		"--preview-window=right:30%,border-vertical",
 	}
 	// Text preview (full title + magnet) via a temp file + internal subcommand,
@@ -649,12 +679,17 @@ func wrapLine(s string, width int) string {
 	return b.String()
 }
 
-func pickReleaseNumbered(view []*Release, group, sortName string) (*Release, error) {
+func pickReleaseNumbered(view []*Release, group, sortName string, item *MALItem) (*Release, error) {
 	lines := make([]string, len(view))
 	for i, r := range view {
 		lines[i] = renderReleaseFzfLine(r)
 	}
-	header := fmt.Sprintf("%d releases  [%s]  %s", len(view), groupLabel(group), normalizeSort(sortName))
+	parts := []string{}
+	if info := malItemHeader(item); info != "" {
+		parts = append(parts, info)
+	}
+	parts = append(parts, fmt.Sprintf("%d releases  [%s]  %s", len(view), groupLabel(group), normalizeSort(sortName)))
+	header := strings.Join(parts, "  ·  ")
 	idx, err := pickIndex(lines, header, "Select release", false)
 	if err != nil {
 		return nil, err
