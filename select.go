@@ -115,6 +115,22 @@ func renderMALLine(m MALItem) string {
 	return b.String()
 }
 
+func malListStatusShort(s string) string {
+	switch s {
+	case "watching":
+		return "Watching"
+	case "completed":
+		return "Completed"
+	case "on_hold":
+		return "On Hold"
+	case "dropped":
+		return "Dropped"
+	case "plan_to_watch":
+		return "Plan to Watch"
+	}
+	return titleCase(s)
+}
+
 func malAirShort(s string) string {
 	switch s {
 	case "currently_airing":
@@ -237,7 +253,12 @@ func previewAnime(tmpfile, malIDStr string) {
 	if a := malAirShort(m.AirStatus); a != "" {
 		progress += "  [" + a + "]"
 	}
-	cprint("\033[33m", progress) // yellow: progress
+	if m.ListStatus != "" {
+		progress += "  —  " + malListStatusShort(m.ListStatus)
+	} else if m.WatchedEps > 0 {
+		progress += "  ·  Watching"
+	}
+	cprint("\033[33m", progress) // yellow: progress + status
 
 	if m.MeanScore > 0 {
 		s := fmt.Sprintf("★ %.2f", m.MeanScore)

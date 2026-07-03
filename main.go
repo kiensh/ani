@@ -227,9 +227,24 @@ func malWriteBack(item *MALItem, pick *Release) {
 	if item == nil || pick.IsBatch {
 		return
 	}
-	watched := item.WatchedEps + 1
-	if pick.Episode > item.WatchedEps {
+	// Use the release's episode number if known (even if lower than current —
+	// re-watching an earlier episode should update MAL to that episode).
+	watched := item.WatchedEps
+	if pick.Episode > 0 {
 		watched = pick.Episode
+	}
+	// Prompt to mark completed if this was the last episode.
+	if item.TotalEps > 0 && watched >= item.TotalEps &&
+		(item.ListStatus == "watching" || item.ListStatus == "") && !dryRunMode {
+		fmt.Print("\n  Mark as completed on MAL? [Y/n] ")
+		answer, _ := readLine()
+		if answer == "" || strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes") {
+			if err := malUpdateCompleted(item.MalID, watched); err != nil {
+				fmt.Fprintf(os.Stderr, "MAL update failed: %v\n", err)
+			}
+			fmt.Fprintln(os.Stderr, "  Marked as completed on MAL.")
+			return
+		}
 	}
 	if err := malUpdateProgress(item.MalID, watched); err != nil {
 		fmt.Fprintf(os.Stderr, "MAL update failed: %v\n", err)

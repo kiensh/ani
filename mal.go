@@ -322,6 +322,7 @@ type MALItem struct {
 	TotalEps    int
 	WatchedEps  int
 	AirStatus   string
+	ListStatus  string
 	Score       int
 	Genres      string
 	MeanScore   float64
@@ -333,14 +334,14 @@ type MALItem struct {
 }
 
 func userAnimeToItem(ua mal.UserAnime) MALItem {
-	return animeFieldsToItem(ua.Anime, ua.Status.NumEpisodesWatched, ua.Status.Score)
+	return animeFieldsToItem(ua.Anime, ua.Status.NumEpisodesWatched, ua.Status.Score, ua.Status.Status)
 }
 
 func animeToItem(a mal.Anime) MALItem {
-	return animeFieldsToItem(a, a.MyListStatus.NumEpisodesWatched, a.MyListStatus.Score)
+	return animeFieldsToItem(a, a.MyListStatus.NumEpisodesWatched, a.MyListStatus.Score, a.MyListStatus.Status)
 }
 
-func animeFieldsToItem(a mal.Anime, watchedEps, score int) MALItem {
+func animeFieldsToItem(a mal.Anime, watchedEps, score int, listStatus mal.AnimeStatus) MALItem {
 	cover := a.MainPicture.Large
 	if cover == "" {
 		cover = a.MainPicture.Medium
@@ -362,6 +363,7 @@ func animeFieldsToItem(a mal.Anime, watchedEps, score int) MALItem {
 		CoverURL:    cover,
 		TotalEps:    a.NumEpisodes,
 		AirStatus:   a.Status,
+		ListStatus:  string(listStatus),
 		WatchedEps:  watchedEps,
 		Score:       score,
 		Genres:      strings.Join(genres, ", "),
@@ -522,5 +524,19 @@ func malUpdateProgress(malID, watchedEps int) error {
 	}
 	_, _, err = c.Anime.UpdateMyListStatus(context.Background(), malID,
 		mal.AnimeStatusWatching, mal.NumEpisodesWatched(watchedEps))
+	return err
+}
+
+func malUpdateCompleted(malID, watchedEps int) error {
+	if dryRunMode {
+		fmt.Fprintf(os.Stderr, "DRY-RUN: MAL PATCH /anime/%d num_episodes_watched=%d status=completed (not sent)\n", malID, watchedEps)
+		return nil
+	}
+	c, err := malClient()
+	if err != nil {
+		return err
+	}
+	_, _, err = c.Anime.UpdateMyListStatus(context.Background(), malID,
+		mal.AnimeStatusCompleted, mal.NumEpisodesWatched(watchedEps))
 	return err
 }
