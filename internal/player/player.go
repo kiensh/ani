@@ -1,40 +1,41 @@
-package main
+// Package player runs the streaming player (webtorrent) and downloader (aria2c).
+package player
 
 import (
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 )
 
-// runPlay streams the release via webtorrent into the given player.
+// RunPlay streams the release via webtorrent into the given player.
 // --not-on-top stops webtorrent from forcing the player window on top.
 // For mpv, the window/media title is set to the release title via a temp
 // include file (webtorrent splits --player-args on spaces, so the spaced title
 // can't be passed directly).
-func runPlay(r *Release, player string) error {
+func RunPlay(magnet, title, player string, dryRun bool) error {
 	if player == "" {
 		player = "mpv"
 	}
-	magnet := pickMagnet(r)
 	if magnet == "" {
 		return fmt.Errorf("release has no magnet URI")
 	}
 	args := []string{"--not-on-top", "--" + player}
-	if player == "mpv" && r.Entry.Title != "" {
-		if p, cleanup, ok := writeMpvTitleConfig(r.Entry.Title); ok {
+	if player == "mpv" && title != "" {
+		if p, cleanup, ok := WriteMpvTitleConfig(title); ok {
 			defer cleanup()
 			args = append(args, "--player-args=--include="+p)
 		}
 	}
 	args = append(args, magnet)
-	return runWithSignals(exec.Command("webtorrent", args...))
+	return RunWithSignals(exec.Command("webtorrent", args...), dryRun)
 }
 
-// writeMpvTitleConfig writes an mpv include file setting the window and media
+// WriteMpvTitleConfig writes an mpv include file setting the window and media
 // title. Returns the path and a cleanup func.
-func writeMpvTitleConfig(title string) (path string, cleanup func(), ok bool) {
+func WriteMpvTitleConfig(title string) (path string, cleanup func(), ok bool) {
 	f, err := os.CreateTemp("", "ani-mpv-*.conf")
 	if err != nil {
 		return "", nil, false
@@ -44,29 +45,24 @@ func writeMpvTitleConfig(title string) (path string, cleanup func(), ok bool) {
 	return f.Name(), func() { os.Remove(f.Name()) }, true
 }
 
-// runDownload fetches the release via aria2c, exiting after download (--seed-time=0).
-func runDownload(r *Release, dir string) error {
+// RunDownload fetches the release via aria2c, exiting after download (--seed-time=0).
+func RunDownload(magnet, dir string, dryRun bool) error {
 	if dir == "" {
 		dir = "."
 	}
-	magnet := pickMagnet(r)
 	if magnet == "" {
 		return fmt.Errorf("release has no magnet URI")
 	}
 	cmd := exec.Command("aria2c", "--seed-time=0", "--dir="+dir, "--summary-interval=0", magnet)
-	return runWithSignals(cmd)
+	return RunWithSignals(cmd, dryRun)
 }
 
-func pickMagnet(r *Release) string {
-	return r.Entry.Magnet
-}
-
-// runWithSignals runs cmd with inherited stdio and forwards SIGINT/SIGTERM so
-// Ctrl-C tears down webtorrent/aria2c cleanly. In debug mode it just prints
-// the command and returns without running it.
-func runWithSignals(cmd *exec.Cmd) error {
-	if dryRunMode {
-		fmt.Fprintf(os.Stderr, "DEBUG exec %s\n", shellQuote(cmd.Args))
+// RunWithSignals runs cmd with inherited stdio and forwards SIGINT/SIGTERM so
+// Ctrl-C tears down webtorrent/aria2c cleanly. When dryRun is true it prints
+// the command (quoted) and returns without running it.
+func RunWithSignals(cmd *exec.Cmd, dryRun bool) error {
+	if dryRun {
+		fmt.Fprintf(os.Stderr, "DEBUG exec %s\n", ShellQuote(cmd.Args))
 		return nil
 	}
 	cmd.Stdin = os.Stdin
@@ -88,4 +84,19 @@ func runWithSignals(cmd *exec.Cmd) error {
 	case err := <-done:
 		return err
 	}
+}
+
+// ShellQuote joins args into a single shell-quoted command line (each arg in
+// single quotes, inner ' escaped) so printed commands are copy-paste-runnable.
+func ShellQuote(args []string) string {
+	var b strings.Builder
+	for i, a := range args {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteByte('\'')
+		b.WriteString(strings.ReplaceAll(a, "'", `'\''`))
+		b.WriteByte('\'')
+	}
+	return b.String()
 }

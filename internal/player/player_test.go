@@ -1,4 +1,4 @@
-package main
+package player
 
 import (
 	"os"
@@ -8,9 +8,9 @@ import (
 
 func TestWriteMpvTitleConfig(t *testing.T) {
 	title := "[Erai-raws] Sousou no Frieren 2nd Season - 06 [1080p]"
-	path, cleanup, ok := writeMpvTitleConfig(title)
+	path, cleanup, ok := WriteMpvTitleConfig(title)
 	if !ok {
-		t.Fatal("writeMpvTitleConfig returned ok=false")
+		t.Fatal("WriteMpvTitleConfig returned ok=false")
 	}
 	defer cleanup()
 

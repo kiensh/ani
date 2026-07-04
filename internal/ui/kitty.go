@@ -1,14 +1,14 @@
-package main
+package ui
 
 import (
 	"os"
 	"os/exec"
 )
 
-// kittyActive reports whether we're running inside kitty with the kitten CLI
+// KittyActive reports whether we're running inside kitty with the kitten CLI
 // available and stdout attached to a terminal. Used to gate fzf's image
 // preview (kitten icat) in the anime picker.
-func kittyActive() bool {
+func KittyActive() bool {
 	if os.Getenv("KITTY_WINDOW_ID") == "" && os.Getenv("KITTY_PID") == "" {
 		return false
 	}

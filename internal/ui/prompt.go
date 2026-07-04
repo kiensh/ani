@@ -1,4 +1,4 @@
-package main
+package ui
 
 import (
 	"bufio"
@@ -10,13 +10,12 @@ import (
 	"strings"
 )
 
-var errCancelled = errors.New("cancelled")
-
 // One shared reader so the menu picker, command loop, and action prompt don't
 // each buffer ahead of each other on the same stdin.
 var stdin = bufio.NewReader(os.Stdin)
 
-func readLine() (string, error) {
+// ReadLine reads one trimmed line from the shared stdin.
+func ReadLine() (string, error) {
 	line, err := stdin.ReadString('\n')
 	if err != nil {
 		return "", err
@@ -24,11 +23,11 @@ func readLine() (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
-// promptAction asks play or download; Enter defaults to play.
-func promptAction() (string, error) {
+// PromptAction asks play or download; Enter defaults to play.
+func PromptAction() (string, error) {
 	for {
 		fmt.Print("\n  [p] play in mpv   [d] download via aria2c  (default p): ")
-		line, err := readLine()
+		line, err := ReadLine()
 		if err != nil {
 			return "", err
 		}
@@ -42,25 +41,20 @@ func promptAction() (string, error) {
 	}
 }
 
-// pickIndex presents items as a numbered list (or fzf when available) and
-// returns the chosen 0-based index.
-func pickIndex(items []string, header, prompt string, useFzf bool) (int, error) {
+// PickIndex presents items as a numbered list (or fzf when useFzf) and returns
+// the chosen 0-based index.
+func PickIndex(items []string, header, prompt string, useFzf bool) (int, error) {
 	if len(items) == 0 {
 		return 0, errors.New("nothing to select")
 	}
-	if useFzf && fzfAvailable() {
+	if useFzf && FzfAvailable() {
 		if idx, err := pickFzf(items, header); err == nil {
 			return idx, nil
-		} else if errors.Is(err, errCancelled) {
+		} else if errors.Is(err, ErrCancelled) {
 			return 0, err
 		}
 	}
 	return pickNumbered(items, header, prompt)
-}
-
-func fzfAvailable() bool {
-	_, err := exec.LookPath("fzf")
-	return err == nil
 }
 
 func pickFzf(items []string, header string) (int, error) {
@@ -83,13 +77,13 @@ func pickFzf(items []string, header string) (int, error) {
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 130 {
-			return 0, errCancelled
+			return 0, ErrCancelled
 		}
 		return 0, err
 	}
 	line := strings.TrimSpace(out.String())
 	if line == "" {
-		return 0, errCancelled
+		return 0, ErrCancelled
 	}
 	idxField := strings.SplitN(line, "\t", 2)[0]
 	idx, err := strconv.Atoi(idxField)
@@ -112,7 +106,7 @@ func pickNumbered(items []string, header, prompt string) (int, error) {
 	}
 	for {
 		fmt.Printf("\n%s [1-%d]: ", prompt, len(items))
-		line, err := readLine()
+		line, err := ReadLine()
 		if err != nil {
 			return 0, err
 		}
