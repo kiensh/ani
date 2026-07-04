@@ -84,8 +84,11 @@ func animeFieldsToItem(a mal.Anime, watchedEps, score int, listStatus mal.AnimeS
 }
 
 // ExtraFields are the MAL API fields needed for the preview pane.
+// Includes both "my_list_status" (search/details) and "list_status"
+// (user list) since the two endpoints use different field names.
 var ExtraFields = mal.Fields{
-	"title", "main_picture", "num_episodes", "status", "my_list_status",
+	"title", "main_picture", "num_episodes", "status",
+	"my_list_status", "list_status",
 	"genres", "mean", "studios", "start_season", "media_type", "rank", "num_list_users",
 }
 
