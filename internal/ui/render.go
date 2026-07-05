@@ -79,7 +79,11 @@ func RenderReleaseLine(r *animetosho.Release) string {
 	} else if r.Episode > 0 {
 		eps = fmt.Sprintf("ep%d", r.Episode)
 	}
-	return fmt.Sprintf("%s [%s] %-5s %-5s %9s %5d↑ %3d↓",
+	// Every field is a fixed rune-width so the columns line up across rows.
+	// %-14s pads the group to 14 runes (Truncate caps it at 14); the brackets
+	// then form a fixed 16-wide column. res/eps %-5s, size %9s, seeders %5d,
+	// leechers %3d round out the line.
+	return fmt.Sprintf("%s [%-14s] %-5s %-5s %9s %5d↑ %3d↓",
 		date, Truncate(grp, 14), res, eps, HumanSize(r.Entry.SizeBytes),
 		r.Entry.Seeders, r.Entry.Leechers)
 }

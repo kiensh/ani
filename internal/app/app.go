@@ -3,50 +3,63 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
 	"ani/internal/animetosho"
+	"ani/internal/config"
+	"ani/internal/mal"
 	"ani/internal/player"
+	"ani/internal/tui"
 	"ani/internal/ui"
 
 	gomal "github.com/nstratos/go-myanimelist/mal"
 )
 
+// errBackToAnime is returned by the release picker flow when the user presses
+// Esc to go back to anime selection. Run handles it by re-running the anime
+// picker instead of exiting.
+var errBackToAnime = errors.New("back to anime selection")
+
 // Run is the main flow: resolve an anime → load releases → pick → play or
 // download → write back to MAL, looping until cancelled.
+//
+// The UI is the bubbletea TUI by default; set Options.UseFzf to use the
+// legacy fzf/numbered menus instead. In the TUI, pressing Esc in the release
+// picker returns to anime selection (Bug 9).
 func Run(opt *Options) error {
-	aid, title, item, err := Resolve(opt.Query, opt.Status, opt.UseFzf, opt.DryRun, opt.Debug)
+	resolveResult, err := resolveForReleases(opt)
 	if err != nil {
 		return err
 	}
+	all, item := resolveResult.all, resolveResult.item
 
-	fmt.Fprintf(os.Stderr, "Loading releases (anidb %d)…\n", aid)
-	entries, err := animetosho.FetchSeriesReleases(aid)
-	if err != nil {
-		return err
-	}
-	if len(entries) == 0 {
-		return fmt.Errorf("no releases found for anidb %d", aid)
-	}
-	all := animetosho.ToReleases(entries)
-	if title == "" {
-		if t := entries[0].Series.Title; t != "" {
-			title = t
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "%s — %d releases\n", title, len(all))
 	for {
-		pick, err := ui.PickRelease(all, opt.Group, opt.Sort, opt.UseFzf, item, opt.DryRun)
+		var pick *animetosho.Release
+		if opt.UseFzf {
+			pick, err = ui.PickRelease(all, opt.Group, opt.Sort, opt.UseFzf, item, opt.DryRun)
+		} else {
+			pick, err = pickReleaseTUI(all, item, opt)
+		}
 		if err != nil {
+			if errors.Is(err, errBackToAnime) {
+				// User pressed Esc in the release picker → restart at anime
+				// selection. (Bug 9)
+				resolveResult, err = resolveForReleases(opt)
+				if err != nil {
+					return err
+				}
+				all, item = resolveResult.all, resolveResult.item
+				continue
+			}
 			return err // q/cancel → exit
 		}
 
 		AnnouncePick(pick)
 		action := "play"
 		if !opt.DryRun {
-			action, err = ui.PromptAction()
+			action, err = promptAction(pick.Entry.Title, opt.UseFzf)
 			if err != nil {
 				return err
 			}
@@ -66,6 +79,76 @@ func Run(opt *Options) error {
 		}
 		// loop: return to the release picker for the next file
 	}
+}
+
+// resolveOutcome bundles the outputs of the resolve+fetch step so Run can
+// re-run it on a "back to anime selection" without duplicating logic.
+type resolveOutcome struct {
+	all  []*animetosho.Release
+	item *mal.Item
+}
+
+// resolveForReleases runs the anime picker, fetches releases, and returns the
+// full release set plus the selected anime item.
+func resolveForReleases(opt *Options) (*resolveOutcome, error) {
+	aid, title, item, err := Resolve(opt)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(os.Stderr, "Loading releases (anidb %d)…\n", aid)
+	entries, err := animetosho.FetchSeriesReleases(aid)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("no releases found for anidb %d", aid)
+	}
+	all := animetosho.ToReleases(entries)
+	if title == "" {
+		if t := entries[0].Series.Title; t != "" {
+			title = t
+		}
+	}
+	fmt.Fprintf(os.Stderr, "%s — %d releases\n", title, len(all))
+	return &resolveOutcome{all: all, item: item}, nil
+}
+
+// pickReleaseTUI drives the bubbletea release picker. dry-run auto-picks the
+// first release so the exec commands can still be printed without a TUI.
+func pickReleaseTUI(all []*animetosho.Release, item *mal.Item, opt *Options) (*animetosho.Release, error) {
+	if opt.DryRun {
+		view := ui.SortedReleases(ui.FilterByGroup(all, opt.Group), opt.Sort)
+		if len(view) == 0 {
+			return nil, fmt.Errorf("no releases for group %q", ui.GroupLabel(opt.Group))
+		}
+		fmt.Fprintf(os.Stderr, "DRY-RUN: TUI would show %d releases, auto-picking first\n", len(view))
+		return view[0], nil
+	}
+	res, err := tui.RunReleasePicker(all, item, opt.Group, opt.Quality, opt.Sort, opt.Debug)
+	if err != nil {
+		return nil, err
+	}
+	if res != nil && res.Back {
+		// Esc in the release picker → go back to anime selection (Bug 9).
+		return nil, errBackToAnime
+	}
+	if res == nil || res.Quit || res.Release == nil {
+		return nil, errors.New("cancelled")
+	}
+	// Persist the user's filter preferences for next session.
+	if res.FilterGroup != "" || res.FilterQuality != "" || res.FilterSort != "" {
+		config.SaveFilters(res.FilterGroup, res.FilterQuality, res.FilterSort)
+	}
+	return res.Release, nil
+}
+
+// promptAction asks play or download via the TUI (bubbletea) or the legacy
+// readline prompt for the fzf flow.
+func promptAction(releaseTitle string, useFzf bool) (string, error) {
+	if useFzf {
+		return ui.PromptAction()
+	}
+	return tui.RunActionPrompt(releaseTitle)
 }
 
 // AnnouncePick prints the chosen release to stdout.
@@ -100,7 +183,7 @@ Flags:
   --sort ORDER        newest (default) | oldest | smallest | largest
   --player NAME       streaming player for play (mpv default)
   --dir PATH          download directory (default cwd)
-  --fzf / --no-fzf    toggle fzf menus
+  --fzf               use the legacy fzf UI instead of the bubbletea TUI
 
 Flow: pick anime -> browse releases (n/p/g/s/q) -> pick -> play or download
 

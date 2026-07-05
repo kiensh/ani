@@ -6,12 +6,13 @@ package app
 type Options struct {
 	Debug  bool
 	DryRun bool
-	UseFzf bool
+	UseFzf bool // true → use the legacy fzf UI; false → use the bubbletea TUI
 
-	Player string
-	Dir    string
-	Group  string
-	Sort   string
-	Status string
-	Query  string
+	Player  string
+	Dir     string
+	Group   string
+	Quality string
+	Sort    string
+	Status  string
+	Query   string
 }

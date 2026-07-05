@@ -8,6 +8,7 @@ import (
 
 	"ani/internal/animetosho"
 	"ani/internal/mal"
+	"ani/internal/tui"
 	"ani/internal/ui"
 
 	gomal "github.com/nstratos/go-myanimelist/mal"
@@ -19,19 +20,20 @@ import (
 //   - otherwise       → MAL text search
 //
 // The AniDB id comes from MAL's external links, falling back to an animetosho
-// title search when a MAL anime has no AniDB link.
-func Resolve(query, status string, useFzf, dryRun, debug bool) (aid int, title string, item *mal.Item, err error) {
-	if n, perr := strconv.Atoi(query); perr == nil && n > 0 {
+// title search when a MAL anime has no AniDB link. When opt.UseFzf is true the
+// legacy fzf picker is used; otherwise the bubbletea TUI is used.
+func Resolve(opt *Options) (aid int, title string, item *mal.Item, err error) {
+	if n, perr := strconv.Atoi(opt.Query); perr == nil && n > 0 {
 		return n, "", nil, nil
 	}
 
 	var items []mal.Item
-	if query == "" {
-		fmt.Fprintf(os.Stderr, "Loading MAL list (%s)…\n", status)
-		items, err = mal.MyList(mapStatus(status), debug)
+	if opt.Query == "" {
+		fmt.Fprintf(os.Stderr, "Loading MAL list (%s)…\n", opt.Status)
+		items, err = mal.MyList(mapStatus(opt.Status), opt.Debug)
 	} else {
-		fmt.Fprintf(os.Stderr, "Searching MAL for %q…\n", query)
-		items, err = mal.Search(query, debug)
+		fmt.Fprintf(os.Stderr, "Searching MAL for %q…\n", opt.Query)
+		items, err = mal.Search(opt.Query, opt.Debug)
 	}
 	if err != nil {
 		return 0, "", nil, err
@@ -40,12 +42,29 @@ func Resolve(query, status string, useFzf, dryRun, debug bool) (aid int, title s
 		return 0, "", nil, fmt.Errorf("no anime found")
 	}
 
-	item, err = ui.PickMALAnime(items, useFzf, dryRun)
-	if err != nil {
-		return 0, "", nil, err
+	if opt.UseFzf {
+		item, err = ui.PickMALAnime(items, opt.UseFzf, opt.DryRun)
+		if err != nil {
+			return 0, "", nil, err
+		}
+	} else {
+		mode := tui.AnimeModeList
+		query := ""
+		if opt.Query != "" {
+			mode = tui.AnimeModeSearch
+			query = opt.Query
+		}
+		res, perr := tui.RunAnimePicker(items, mode, query, opt.Debug)
+		if perr != nil {
+			return 0, "", nil, perr
+		}
+		if res == nil || res.Quit || res.Anime == nil {
+			return 0, "", nil, fmt.Errorf("cancelled")
+		}
+		item = res.Anime
 	}
 
-	aid, aerr := mal.AnidbAID(item.MalID, debug)
+	aid, aerr := mal.AnidbAID(item.MalID, opt.Debug)
 	if aerr == nil && aid == 0 {
 		fmt.Fprintf(os.Stderr, "No AniDB link on MAL for %q — searching animetosho…\n", item.Title)
 		aid = ui.FallbackAnidbByTitle(item.Title)
@@ -65,6 +84,11 @@ func MalWriteBack(item *mal.Item, pick *animetosho.Release, opt *Options) {
 	if pick.Episode > 0 {
 		watched = pick.Episode
 	}
+	// For movies/specials (TotalEps == 1), the release has no episode number,
+	// so just set watched to 1 (watched the whole thing).
+	if item.TotalEps == 1 && pick.Episode == 0 {
+		watched = 1
+	}
 
 	// Determine the status to send. Default: keep current status.
 	// Only change to "watching" if not in the list yet or plan_to_watch.
@@ -79,9 +103,8 @@ func MalWriteBack(item *mal.Item, pick *animetosho.Release, opt *Options) {
 		if opt.DryRun {
 			fmt.Fprintf(os.Stderr, "DRY-RUN: would prompt to mark completed\n")
 		} else {
-			fmt.Print("\n  Mark as completed on MAL? [Y/n] ")
-			answer, _ := ui.ReadLine()
-			if answer == "" || strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes") {
+			markCompleted := promptCompleted(item.Title, opt.UseFzf)
+			if markCompleted {
 				status = gomal.AnimeStatusCompleted
 				fmt.Fprintln(os.Stderr, "  Marked as completed on MAL.")
 			}
@@ -92,4 +115,19 @@ func MalWriteBack(item *mal.Item, pick *animetosho.Release, opt *Options) {
 		fmt.Fprintf(os.Stderr, "MAL update failed: %v\n", err)
 	}
 	mal.RefreshItem(item, opt.DryRun, opt.Debug)
+}
+
+// promptCompleted asks the user whether to mark the anime completed. Uses the
+// bubbletea prompt by default, or the plain readline prompt for the fzf flow.
+func promptCompleted(title string, useFzf bool) bool {
+	if useFzf {
+		fmt.Print("\n  Mark as completed on MAL? [Y/n] ")
+		answer, _ := ui.ReadLine()
+		return answer == "" || strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes")
+	}
+	ok, err := tui.RunCompletedPrompt(title)
+	if err != nil {
+		return false
+	}
+	return ok
 }

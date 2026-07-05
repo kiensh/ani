@@ -74,7 +74,7 @@ func run(args []string) error {
 		player string
 		dir    string
 		status string
-		noFzf  bool
+		fzf    bool
 		debug  bool
 		dryRun bool
 	}
@@ -83,9 +83,9 @@ func run(args []string) error {
 	fs.StringVar(&opt.player, "player", "", "streaming player for play (mpv default)")
 	fs.StringVar(&opt.dir, "dir", "", "download directory (default cwd)")
 	fs.StringVar(&opt.status, "status", "watching", "MAL list status: watching|completed|on_hold|dropped|plan_to_watch|all")
-	fs.BoolVar(&opt.noFzf, "no-fzf", false, "disable fzf (use numbered menus)")
+	fs.BoolVar(&opt.fzf, "fzf", false, "use the legacy fzf UI instead of the bubbletea TUI")
 	fs.BoolVar(&opt.debug, "debug", false, "verbose logging (MAL URLs, raw responses)")
-	fs.BoolVar(&opt.dryRun, "dry-run", false, "auto-pick first fzf item and print exec commands without running them")
+	fs.BoolVar(&opt.dryRun, "dry-run", false, "auto-pick first item and print exec commands without running them")
 	if err := fs.Parse(intersperseFlags(args)); err != nil {
 		return err
 	}
@@ -98,15 +98,16 @@ func run(args []string) error {
 
 	cfg := config.Load()
 	o := &app.Options{
-		Debug:  opt.debug,
-		DryRun: opt.dryRun,
-		Group:  app.OrDefault(opt.group, cfg.Group),
-		Sort:   ui.NormalizeSort(app.OrDefault(opt.sort, cfg.Sort)),
-		Player: app.OrDefault(opt.player, cfg.Player),
-		Dir:    app.OrDefault(opt.dir, cfg.Dir),
-		Status: opt.status,
-		Query:  query,
-		UseFzf: ui.FzfAvailable() && !opt.noFzf,
+		Debug:   opt.debug,
+		DryRun:  opt.dryRun,
+		Group:   app.OrDefault(opt.group, cfg.Group),
+		Quality: cfg.Quality,
+		Sort:    ui.NormalizeSort(app.OrDefault(opt.sort, cfg.Sort)),
+		Player:  app.OrDefault(opt.player, cfg.Player),
+		Dir:     app.OrDefault(opt.dir, cfg.Dir),
+		Status:  opt.status,
+		Query:   query,
+		UseFzf:  opt.fzf && ui.FzfAvailable(),
 	}
 	if o.Player == "" {
 		o.Player = "mpv"

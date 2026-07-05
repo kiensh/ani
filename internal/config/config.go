@@ -12,10 +12,11 @@ import (
 // Config lives at $XDG_CONFIG_HOME/ani/config.json (falls back to
 // ~/.config/ani/config.json on macOS via os.UserConfigDir). Missing file = defaults.
 type Config struct {
-	Group  string `json:"group"`  // default group pre-filter, "" = All
-	Sort   string `json:"sort"`   // default sort: newest|oldest|smallest|largest
-	Player string `json:"player"` // streaming player, default mpv
-	Dir    string `json:"dir"`    // default download dir, "" = cwd
+	Group   string `json:"group"`   // default group pre-filter, "" = All
+	Quality string `json:"quality"` // default quality filter, "" = All
+	Sort    string `json:"sort"`    // default sort: newest|oldest|smallest|largest
+	Player  string `json:"player"`  // streaming player, default mpv
+	Dir     string `json:"dir"`     // default download dir, "" = cwd
 }
 
 // Default returns the built-in default config.
@@ -50,6 +51,24 @@ func Load() Config {
 		cfg.Sort = "newest"
 	}
 	return cfg
+}
+
+// SaveFilters persists the user's release filter preferences to config.json.
+func SaveFilters(group, quality, sort string) {
+	cfg := Load()
+	cfg.Group = group
+	cfg.Quality = quality
+	cfg.Sort = sort
+	p, err := configPath()
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(p), 0o700)
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(p, data, 0o600)
 }
 
 // ---- .env loader (no external dependency) ----
