@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	"ani/internal/animetosho"
 	"ani/internal/config"
@@ -22,8 +23,9 @@ import (
 // picker instead of exiting.
 var errBackToAnime = errors.New("back to anime selection")
 
-// Run is the main flow: resolve an anime → load releases → pick → play or
-// download → write back to MAL, looping until cancelled.
+// Run is the main flow: resolve an anime → pick releases (fetched on demand,
+// scoped to the chosen episode) → play or download → write back to MAL,
+// looping until cancelled.
 //
 // The UI is the bubbletea TUI by default; set Options.UseFzf to use the
 // legacy fzf/numbered menus instead. In the TUI, pressing Esc in the release
@@ -33,24 +35,30 @@ func Run(opt *Options) error {
 	if err != nil {
 		return err
 	}
-	all, item := resolveResult.all, resolveResult.item
+	aid, item := resolveResult.aid, resolveResult.item
+	cache := &episodeCache{data: map[int][]*animetosho.Release{}}
+	fetch := cachedFetch(aid, cache)
 
 	for {
 		var pick *animetosho.Release
 		if opt.UseFzf {
+			// Legacy fzf UI: fetch the default episode's releases (scoped + cached).
+			all := fetch(tui.DefaultEpisode(item.WatchedEps, item.TotalEps))
 			pick, err = ui.PickRelease(all, opt.Group, opt.Sort, opt.UseFzf, item, opt.DryRun)
 		} else {
-			pick, err = pickReleaseTUI(all, item, opt)
+			pick, err = pickReleaseTUI(item, opt, fetch)
 		}
 		if err != nil {
 			if errors.Is(err, errBackToAnime) {
 				// User pressed Esc in the release picker → restart at anime
-				// selection. (Bug 9)
+				// selection with a fresh cache. (Bug 9)
 				resolveResult, err = resolveForReleases(opt)
 				if err != nil {
 					return err
 				}
-				all, item = resolveResult.all, resolveResult.item
+				aid, item = resolveResult.aid, resolveResult.item
+				cache = &episodeCache{data: map[int][]*animetosho.Release{}}
+				fetch = cachedFetch(aid, cache)
 				continue
 			}
 			return err // q/cancel → exit
@@ -77,46 +85,69 @@ func Run(opt *Options) error {
 		if opt.DryRun {
 			return nil // one iteration: print commands, then exit
 		}
-		// loop: return to the release picker for the next file
+		// loop: return to the release picker for the next file. The cache (and
+		// its prefetched ep+1) carry over, so the next episode loads instantly.
 	}
 }
 
-// resolveOutcome bundles the outputs of the resolve+fetch step so Run can
-// re-run it on a "back to anime selection" without duplicating logic.
+// resolveOutcome bundles the outputs of the resolve step so Run can re-run it
+// on a "back to anime selection" without duplicating logic.
 type resolveOutcome struct {
-	all  []*animetosho.Release
+	aid  int
 	item *mal.Item
 }
 
-// resolveForReleases runs the anime picker, fetches releases, and returns the
-// full release set plus the selected anime item.
+// resolveForReleases runs the anime picker and returns the AniDB id + selected
+// anime item. Releases are NOT fetched here — the release picker fetches them
+// on demand, scoped to the chosen episode (fast even for huge series).
 func resolveForReleases(opt *Options) (*resolveOutcome, error) {
-	aid, title, item, err := Resolve(opt)
+	aid, _, item, err := Resolve(opt)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Fprintf(os.Stderr, "Loading releases (anidb %d)…\n", aid)
-	entries, err := animetosho.FetchSeriesReleases(aid)
-	if err != nil {
-		return nil, err
-	}
-	if len(entries) == 0 {
-		return nil, fmt.Errorf("no releases found for anidb %d", aid)
-	}
-	all := animetosho.ToReleases(entries)
-	if title == "" {
-		if t := entries[0].Series.Title; t != "" {
-			title = t
-		}
-	}
-	fmt.Fprintf(os.Stderr, "%s — %d releases\n", title, len(all))
-	return &resolveOutcome{all: all, item: item}, nil
+	return &resolveOutcome{aid: aid, item: item}, nil
 }
 
-// pickReleaseTUI drives the bubbletea release picker. dry-run auto-picks the
-// first release so the exec commands can still be printed without a TUI.
-func pickReleaseTUI(all []*animetosho.Release, item *mal.Item, opt *Options) (*animetosho.Release, error) {
+// episodeCache memoizes fetched releases per episode for the current anime so
+// re-visiting an episode (or the prefetched next one) is instant. Keyed by
+// episode number (0 = "all"). Not safe to share across animes — Run allocates
+// a fresh one per anime.
+type episodeCache struct {
+	mu   sync.Mutex
+	data map[int][]*animetosho.Release
+}
+
+func (c *episodeCache) get(ep int) []*animetosho.Release {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.data[ep]
+}
+
+func (c *episodeCache) put(ep int, r []*animetosho.Release) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data[ep] = r
+}
+
+// cachedFetch returns an episode fetch func that serves from the cache, falling
+// back to animetosho.FetchReleases(aid, ep) and caching the result.
+func cachedFetch(aid int, cache *episodeCache) func(int) []*animetosho.Release {
+	return func(ep int) []*animetosho.Release {
+		if r := cache.get(ep); r != nil {
+			return r
+		}
+		r, _ := animetosho.FetchReleases(aid, ep)
+		cache.put(ep, r)
+		return r
+	}
+}
+
+// pickReleaseTUI drives the bubbletea release picker, fetching releases on
+// demand via the cached fetch func. dry-run auto-picks the first release of the
+// default episode so the exec commands can still be printed without a TUI.
+func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*animetosho.Release) (*animetosho.Release, error) {
 	if opt.DryRun {
+		all := fetch(tui.DefaultEpisode(item.WatchedEps, item.TotalEps))
 		view := ui.SortedReleases(ui.FilterByGroup(all, opt.Group), opt.Sort)
 		if len(view) == 0 {
 			return nil, fmt.Errorf("no releases for group %q", ui.GroupLabel(opt.Group))
@@ -124,7 +155,7 @@ func pickReleaseTUI(all []*animetosho.Release, item *mal.Item, opt *Options) (*a
 		fmt.Fprintf(os.Stderr, "DRY-RUN: TUI would show %d releases, auto-picking first\n", len(view))
 		return view[0], nil
 	}
-	res, err := tui.RunReleasePicker(all, item, opt.Group, opt.Quality, opt.Sort, opt.Debug)
+	res, err := tui.RunReleasePicker(item, opt.Group, opt.Quality, opt.Sort, fetch, opt.Debug)
 	if err != nil {
 		return nil, err
 	}

@@ -56,12 +56,15 @@ func RunAnimePicker(items []mal.Item, mode AnimeMode, query string, debug bool) 
 }
 
 // RunReleasePicker launches the TUI for release selection. item provides the
-// anime info shown in the header; group and sortName seed the initial filter.
-func RunReleasePicker(all []*animetosho.Release, item *mal.Item, group, quality, sortName string, debug bool) (*Result, error) {
-	if len(all) == 0 {
+// anime info shown in the header; group/quality/sortName seed the initial
+// filter. fetch returns the releases for a given episode (cached + scoped by
+// the caller) and is invoked on demand: initially for the default episode, and
+// again whenever the user changes the episode filter.
+func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, debug bool) (*Result, error) {
+	if item == nil || fetch == nil {
 		return &Result{Quit: true}, nil
 	}
-	m := newReleasePicker(all, item, group, quality, sortName, debug)
+	m := newReleasePicker(item, group, quality, sortName, fetch, debug)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
 	closeDebug()

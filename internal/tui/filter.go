@@ -219,10 +219,11 @@ const (
 // text-input pop-up for the episode filter. When its kind != overlayNone it
 // captures all key input in the release picker.
 type filterOverlay struct {
-	kind   overlayKind
-	items  []string // selectable options (group / quality overlays)
-	cursor int
-	text   string // episode input
+	kind        overlayKind
+	items       []string // selectable options (group / quality overlays)
+	cursor      int
+	text        string // episode input
+	prevEpisode int     // episode before the overlay opened; Esc restores it (cancel)
 }
 
 // active reports whether the overlay is currently capturing input.
@@ -264,11 +265,13 @@ func (o *filterOverlay) openQuality(qualities []string, current string) {
 }
 
 // openEpisode starts the episode text-input overlay, seeded with the current
-// episode value (rendered as "" when it's 0/all).
+// episode value (rendered as "" when it's 0/all). The current value is also
+// saved as prevEpisode so Esc can cancel (restore) instead of clearing.
 func (o *filterOverlay) openEpisode(current int) {
 	o.kind = overlayEpisode
 	o.items = nil
 	o.cursor = 0
+	o.prevEpisode = current
 	if current > 0 {
 		o.text = strconv.Itoa(current)
 	} else {

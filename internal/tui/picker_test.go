@@ -21,6 +21,24 @@ func upMsg() tea.KeyMsg    { return tea.KeyMsg{Type: tea.KeyUp} }
 func enterMsg() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyEnter} }
 func escMsg() tea.KeyMsg   { return tea.KeyMsg{Type: tea.KeyEscape} }
 
+// fetchAll returns a fetch func that always returns the given releases
+// regardless of episode — lets tests inject a fixed release set.
+func fetchAll(all []*animetosho.Release) func(int) []*animetosho.Release {
+	return func(int) []*animetosho.Release { return all }
+}
+
+// loadReleases seeds a picker as if a fetch completed for its current filter
+// episode (mirrors applyLoaded without the prefetch cmd), so tests can drive
+// filters/overlays/navigation against a populated list.
+func loadReleases(m *releasePicker, all []*animetosho.Release) {
+	m.all = all
+	m.groups = DistinctGroups(all)
+	m.qualities = DistinctQualities(all)
+	m.fetching = false
+	m.cursor = 0
+	m.applyFilter()
+}
+
 // TestAnimePickerRender exercises the anime picker model end-to-end without a
 // real terminal: it drives Update with a WindowSizeMsg and then calls View,
 // catching panics in the layout/render code (fixed pane heights, cover area,
@@ -112,7 +130,8 @@ func TestReleasePickerRender(t *testing.T) {
 		mkRel("EMBER", "720p", 1, false),
 	}
 	item := &mal.Item{Title: "Frieren", TotalEps: 28, WatchedEps: 11}
-	m := newReleasePicker(all, item, "", "", "newest", false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false)
+	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
 	out := m.View()
@@ -138,7 +157,8 @@ func TestReleasePickerDefaultFilters(t *testing.T) {
 		mkRel("d", "1080p", 4, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 10}
-	m := newReleasePicker(all, item, "", "", "newest", false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false)
+	loadReleases(m, all)
 	rp := m
 	if rp.filter.Quality != "" {
 		t.Errorf("default quality = %q, want \"\" (all)", rp.filter.Quality)
@@ -155,7 +175,8 @@ func TestReleasePickerDefaultEpisodeFinished(t *testing.T) {
 		mkRel("a", "1080p", 12, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 12}
-	m := newReleasePicker(all, item, "", "", "newest", false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false)
+	loadReleases(m, all)
 	if m.filter.Episode != 0 {
 		t.Errorf("default episode (finished) = %d, want 0", m.filter.Episode)
 	}
@@ -168,7 +189,8 @@ func TestReleasePickerOverlayGroup(t *testing.T) {
 		mkRel("SubsPlease", "1080p", 2, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(all, item, "", "", "newest", false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false)
+	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
 	m.Update(keyMsg('g'))
@@ -198,7 +220,8 @@ func TestReleasePickerOverlayQuality(t *testing.T) {
 		mkRel("b", "720p", 2, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(all, item, "", "", "newest", false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false)
+	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
 	m.Update(keyMsg('r'))
@@ -221,7 +244,8 @@ func TestReleasePickerOverlayEpisodeEnter(t *testing.T) {
 		mkRel("c", "1080p", 5, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(all, item, "", "", "newest", false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false)
+	loadReleases(m, all)
 	// Clear the default episode filter so we start from all episodes.
 	m.filter.Episode = 0
 	m.applyFilter()
@@ -233,29 +257,35 @@ func TestReleasePickerOverlayEpisodeEnter(t *testing.T) {
 	if m.filter.Episode != 5 {
 		t.Errorf("Episode = %d, want 5", m.filter.Episode)
 	}
-	// The view should now only contain ep-5 releases (2 of them).
+	// Enter kicks off an async re-fetch; simulate it completing for ep 5 (the
+	// injected fetch returns `all`), then the view holds only ep-5 releases.
+	m.Update(releasesLoadedMsg{releases: all, ep: 5})
 	if len(m.view) != 2 {
 		t.Errorf("after ep=5 filter, view len = %d, want 2", len(m.view))
 	}
 }
 
-// TestReleasePickerOverlayEpisodeEscClears verifies Esc in the episode overlay
-// sets the episode filter to "all" (0).
-func TestReleasePickerOverlayEpisodeEscClears(t *testing.T) {
+// TestReleasePickerOverlayEpisodeEscCancels verifies Esc in the episode overlay
+// cancels — restoring the pre-overlay episode even after typing a new number
+// (Esc no longer clears to "all"; that's now Enter on an empty input).
+func TestReleasePickerOverlayEpisodeEscCancels(t *testing.T) {
 	all := []*animetosho.Release{
-		mkRel("a", "1080p", 1, false),
+		mkRel("a", "1080p", 6, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 5}
-	m := newReleasePicker(all, item, "", "", "newest", false)
-	// Default episode is 6 (WatchedEps+1). Open overlay and Esc → cleared.
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false)
+	loadReleases(m, all)
+	// Default episode is 6 (WatchedEps+1).
 	if m.filter.Episode != 6 {
 		t.Fatalf("setup: default episode = %d, want 6", m.filter.Episode)
 	}
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.Update(keyMsg('e'))
+	m.Update(keyMsg('1'))
+	m.Update(keyMsg('0'))
 	m.Update(escMsg())
-	if m.filter.Episode != 0 {
-		t.Errorf("Esc in episode overlay: Episode = %d, want 0 (all)", m.filter.Episode)
+	if m.filter.Episode != 6 {
+		t.Errorf("Esc after typing: Episode = %d, want 6 (cancel restores)", m.filter.Episode)
 	}
 }
 
@@ -265,7 +295,8 @@ func TestReleasePickerSortCycle(t *testing.T) {
 		mkRel("a", "1080p", 1, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(all, item, "", "", "newest", false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false)
+	loadReleases(m, all)
 	first := m.filter.Sort
 	m.Update(keyMsg('s'))
 	if m.filter.Sort == first {
@@ -277,7 +308,8 @@ func TestReleasePickerSortCycle(t *testing.T) {
 func TestReleasePickerEscBack(t *testing.T) {
 	all := []*animetosho.Release{mkRel("a", "1080p", 1, false)}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(all, item, "", "", "newest", false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false)
+	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.Update(escMsg())
 	if !m.result.Back {
@@ -290,7 +322,8 @@ func TestReleasePickerEscBack(t *testing.T) {
 func TestReleasePickerEscInOverlayCancels(t *testing.T) {
 	all := []*animetosho.Release{mkRel("a", "1080p", 1, false)}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(all, item, "", "", "newest", false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false)
+	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.Update(keyMsg('g'))
 	m.Update(escMsg())

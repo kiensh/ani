@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"time"
 )
@@ -180,32 +179,46 @@ func SeriesMeta(aid int) (title, year string, episodes int, picURL string, err e
 	return resp.Data.Title, resp.Data.Year, resp.Data.EpisodeCount, pic, nil
 }
 
-// SeriesReleasesPage fetches one page of releases for an AniDB id.
-func SeriesReleasesPage(aid, offset int) ([]Entry, error) {
-	var resp seriesDetailResponse
-	if err := toshoGet(toshoAnidbPath+strconv.Itoa(aid), url.Values{
+// SeriesReleasesPage fetches one page of releases for an AniDB id. When ep > 0
+// the server filters to just that episode (verified: ?ep=N returns only
+// episode-N releases), which keeps long series fast.
+func SeriesReleasesPage(aid, offset, ep int) ([]Entry, error) {
+	params := url.Values{
 		"limit":  {strconv.Itoa(pageLimit)},
 		"offset": {strconv.Itoa(offset)},
-	}, &resp); err != nil {
+	}
+	if ep > 0 {
+		params.Set("ep", strconv.Itoa(ep))
+	}
+	var resp seriesDetailResponse
+	if err := toshoGet(toshoAnidbPath+strconv.Itoa(aid), params, &resp); err != nil {
 		return nil, err
 	}
 	return resp.Data.Releases, nil
 }
 
-// FetchSeriesReleases paginates /series/anidb/{aid} until a page is short.
-func FetchSeriesReleases(aid int) ([]Entry, error) {
-	var all []Entry
+// allReleasesCap bounds the "all episodes" (ep == 0) fetch so huge series like
+// One Piece (~10k releases) don't paginate forever. Episode-scoped fetches
+// (ep > 0) are already small (a single episode's releases) so they're uncapped.
+const allReleasesCap = 500
+
+// FetchReleases paginates releases for an AniDB id. With ep > 0 it returns just
+// that episode's releases (fast); with ep == 0 ("all") it returns the whole
+// series capped at allReleasesCap newest.
+func FetchReleases(aid, ep int) ([]*Release, error) {
+	var entries []Entry
 	for offset := 0; ; offset += pageLimit {
-		page, err := SeriesReleasesPage(aid, offset)
+		page, err := SeriesReleasesPage(aid, offset, ep)
 		if err != nil {
 			return nil, err
 		}
-		all = append(all, page...)
-		fmt.Fprintf(os.Stderr, "\rfetching releases… %d", len(all))
+		entries = append(entries, page...)
+		if ep == 0 && len(entries) >= allReleasesCap {
+			break
+		}
 		if len(page) < pageLimit {
 			break
 		}
 	}
-	fmt.Fprintln(os.Stderr)
-	return all, nil
+	return ToReleases(entries), nil
 }

@@ -28,6 +28,12 @@ type releasePicker struct {
 	item      *mal.Item
 	debug     bool
 
+	// fetch returns the releases for a given episode (cached + scoped by the
+	// caller). Invoked on demand: initially for the default episode, and again
+	// whenever the user changes the episode filter.
+	fetch    func(int) []*animetosho.Release
+	fetching bool // a fetch is in flight; show "Loading…" in the list area
+
 	filter  Filter
 	overlay filterOverlay
 
@@ -40,14 +46,13 @@ type releasePicker struct {
 	result *Result
 }
 
-func newReleasePicker(all []*animetosho.Release, item *mal.Item, group, quality, sortName string, debug bool) *releasePicker {
+func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, debug bool) *releasePicker {
 	rp := &releasePicker{
-		all:       all,
-		groups:    DistinctGroups(all),
-		qualities: DistinctQualities(all),
-		item:      item,
-		debug:     debug,
-		result:    &Result{},
+		item:     item,
+		debug:    debug,
+		fetch:    fetch,
+		fetching: true, // the initial episode fetch is kicked off by Init
+		result:   &Result{},
 	}
 	rp.filter.Group = group
 	rp.filter.Quality = quality
@@ -56,11 +61,25 @@ func newReleasePicker(all []*animetosho.Release, item *mal.Item, group, quality,
 	if rp.filter.Episode == 0 && item != nil {
 		rp.filter.Episode = DefaultEpisode(item.WatchedEps, item.TotalEps)
 	}
-	rp.applyFilter()
 	return rp
 }
 
-func (m *releasePicker) Init() tea.Cmd { return nil }
+// releasesLoadedMsg carries the releases for one episode fetch. ep lets Update
+// discard stale results when the user changed the episode again mid-fetch.
+type releasesLoadedMsg struct {
+	releases []*animetosho.Release
+	ep       int
+}
+
+// fetchCmd returns a tea.Cmd that fetches the given episode's releases.
+func (m *releasePicker) fetchCmd(ep int) tea.Cmd {
+	fetch := m.fetch
+	return func() tea.Msg {
+		return releasesLoadedMsg{releases: fetch(ep), ep: ep}
+	}
+}
+
+func (m *releasePicker) Init() tea.Cmd { return m.fetchCmd(m.filter.Episode) }
 
 func (m *releasePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -68,6 +87,9 @@ func (m *releasePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.fixScroll()
 		return m, nil
+
+	case releasesLoadedMsg:
+		return m.applyLoaded(msg)
 
 	case tea.KeyMsg:
 		if m.overlay.active() {
@@ -77,6 +99,30 @@ func (m *releasePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleFilterKey(msg)
 		}
 		return m.handleKey(msg)
+	}
+	return m, nil
+}
+
+// applyLoaded ingests a fetched episode's releases: populate all/groups/
+// qualities, clear the loading state, and kick off a background prefetch of the
+// next episode (so the post-play loop is instant). Stale results (the user
+// changed the episode again before this fetch returned) are discarded.
+func (m *releasePicker) applyLoaded(msg releasesLoadedMsg) (tea.Model, tea.Cmd) {
+	if msg.ep != m.filter.Episode {
+		return m, nil
+	}
+	m.all = msg.releases
+	m.groups = DistinctGroups(m.all)
+	m.qualities = DistinctQualities(m.all)
+	m.fetching = false
+	m.cursor = 0
+	m.topItem = 0
+	m.applyFilter()
+	// Prefetch ep+1 into the session cache (no UI effect) so advancing is instant.
+	if msg.ep > 0 {
+		fetch := m.fetch
+		next := msg.ep + 1
+		return m, func() tea.Msg { fetch(next); return nil }
 	}
 	return m, nil
 }
@@ -151,16 +197,17 @@ func (m *releasePicker) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case overlayEpisode:
 		switch msg.String() {
 		case "esc", "ctrl+c":
-			// Esc in the episode overlay clears the filter to "all" (0).
-			m.filter.Episode = 0
+			// Esc cancels: restore the episode to its pre-overlay value. The
+			// loaded set already matches it, so no re-fetch is needed.
+			m.filter.Episode = m.overlay.prevEpisode
 			m.overlay.close()
 			m.applyFilter()
 			return m, nil
 		case "enter":
 			m.overlay.applySelected(&m.filter)
 			m.overlay.close()
-			m.applyFilter()
-			return m, nil
+			m.fetching = true
+			return m, m.fetchCmd(m.filter.Episode)
 		default:
 			m.overlay.handleEpisodeKey(msg.String())
 			return m, nil
@@ -320,16 +367,22 @@ func (m *releasePicker) View() string {
 	// Header line 2: filter badges. (FIXED)
 	h2 := m.renderBadges()
 
-	// List area: scrolls WITHIN a fixed height, bordered. When an overlay is
-	// active it replaces the whole list region (border included) so the fixed
-	// header/preview/help stay put and the overlay sits exactly over the list.
+	// List area: scrolls WITHIN a fixed height, bordered. While a fetch is in
+	// flight show a "Loading…" state; an overlay replaces the whole list region
+	// (border included) so the fixed header/preview/help stay put.
 	var listArea string
-	if m.overlay.active() {
+	switch {
+	case m.fetching:
+		listArea = ListBorderStyle.
+			Width(m.width).
+			Height(m.listHeight()).
+			Render(m.loadingText())
+	case m.overlay.active():
 		listArea = OverlayBorderStyle.
 			Width(m.width).
 			Height(m.listHeight()).
 			Render(m.renderOverlayContent())
-	} else {
+	default:
 		listArea = ListBorderStyle.
 			Width(m.width).
 			Height(m.listHeight()).
@@ -342,6 +395,15 @@ func (m *releasePicker) View() string {
 	help := HelpStyle.Render(rpHelpText)
 
 	return lipgloss.JoinVertical(lipgloss.Left, h1, h2, listArea, preview, help)
+}
+
+// loadingText is the message shown in the list area while an episode fetch is
+// in flight.
+func (m *releasePicker) loadingText() string {
+	if m.filter.Episode > 0 {
+		return FaintStyle.Render(fmt.Sprintf("Loading episode %d…", m.filter.Episode))
+	}
+	return FaintStyle.Render("Loading releases…")
 }
 
 // renderBadges renders the active-filter badges line: group / quality / episode
