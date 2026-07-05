@@ -128,16 +128,23 @@ func pickReleaseTUI(all []*animetosho.Release, item *mal.Item, opt *Options) (*a
 	if err != nil {
 		return nil, err
 	}
+	// Thread the user's filter choices back into opt and persist them to disk on
+	// EVERY exit — including quit and Esc-back — so they survive the post-play
+	// loop, back-navigation, and the next session. (Previously this only ran on
+	// release selection, so quitting lost any filter changes and config.json
+	// was never written.)
+	if res != nil {
+		opt.Group = res.FilterGroup
+		opt.Quality = res.FilterQuality
+		opt.Sort = res.FilterSort
+		config.SaveFilters(res.FilterGroup, res.FilterQuality, res.FilterSort)
+	}
 	if res != nil && res.Back {
 		// Esc in the release picker → go back to anime selection (Bug 9).
 		return nil, errBackToAnime
 	}
 	if res == nil || res.Quit || res.Release == nil {
 		return nil, errors.New("cancelled")
-	}
-	// Persist the user's filter preferences for next session.
-	if res.FilterGroup != "" || res.FilterQuality != "" || res.FilterSort != "" {
-		config.SaveFilters(res.FilterGroup, res.FilterQuality, res.FilterSort)
 	}
 	return res.Release, nil
 }
