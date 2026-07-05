@@ -1,13 +1,13 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -17,10 +17,6 @@ import (
 // coverMu serializes kitten icat calls so a fast cursor move doesn't let two
 // image writes interleave on /dev/tty (which leaves the cover half-cleared).
 var coverMu sync.Mutex
-
-// coverRenderedMsg is emitted when a cover render completes (or fails). It
-// carries no data — the model re-renders from its own state.
-type coverRenderedMsg struct{}
 
 // coverReadyMsg is emitted once by the CoverCache when all requested URLs have
 // been downloaded (or failed). The model re-renders on it so a previously
@@ -167,115 +163,111 @@ func (c *CoverCache) Cleanup() {
 	os.RemoveAll(c.dir)
 }
 
-// RenderCover returns a tea.Cmd that draws the cover image at the LOCAL file
-// (looked up from the cache by url) into the terminal cell region described by
-// place (a kitten icat --place argument). The draw happens against /dev/tty
-// (not stdout) so it survives bubbletea's per-frame full-screen redraws.
-//
-// Before placing the new image, it emits a targeted kitty graphics delete for
-// just the cover cell region (a=d,c=cols,r=rows) — this is pane-local and
-// works under tmux, unlike --clear (which can't see tmux panes) or --clear-all
-// (which clears images in ALL panes).
-//
-// If the url is empty or its file isn't cached yet, the Cmd is a no-op.
-func RenderCover(cache *CoverCache, url, place string) tea.Cmd {
-	return func() tea.Msg {
-		if url == "" || place == "" {
-			return coverRenderedMsg{}
+// splitPassthrough divides kitten's output into the upload segments (image
+// data, to write to /dev/tty) and the remaining placeholder text (to render in
+// the View). The upload is the kitty APC: under tmux it's wrapped in a DCS
+// passthrough (\x1bPtmux;...\x1b\\, ESCs doubled inside); outside tmux it's a
+// raw APC (\x1b_G...\x1b\\). Both are terminated by a lone \x1b\\ (ST).
+func splitPassthrough(data []byte) (segments [][]byte, rest []byte) {
+	var r bytes.Buffer
+	for i := 0; i < len(data); {
+		if data[i] == 0x1b && i+1 < len(data) && (data[i+1] == 'P' || data[i+1] == '_') {
+			j := i + 2
+			for j < len(data)-1 {
+				if data[j] == 0x1b && data[j+1] == 0x1b { // doubled ESC (passthrough data)
+					j += 2
+					continue
+				}
+				if data[j] == 0x1b && data[j+1] == '\\' { // ST terminator
+					break
+				}
+				j++
+			}
+			end := j + 2
+			if end > len(data) {
+				end = len(data)
+			}
+			segments = append(segments, data[i:end])
+			i = end
+			continue
 		}
-		path := cache.Get(url)
-		if path == "" {
-			return coverRenderedMsg{}
-		}
-		coverMu.Lock()
-		defer coverMu.Unlock()
-		tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
-		if err != nil {
-			coverDebugf("open /dev/tty failed: %v", err)
-			return coverRenderedMsg{}
-		}
-		defer tty.Close()
-		// No --clear or --clear-all during navigation — neither works reliably
-		// in tmux. The --place overwrites the same cell region; any leftover
-		// from a different-aspect cover is cosmetic. ClearCover (--clear-all)
-		// runs on screen exit (quit/select) when we leave the alt screen.
-		cmd := exec.Command("kitten", "icat",
-			"--stdin=no", "--scale-up", "--place="+place, path)
-		var stderrBuf strings.Builder
-		cmd.Stdout = tty
-		cmd.Stderr = &stderrBuf
-		err = cmd.Run()
-		coverDebugf("place=%s url=%s file=%s exit=%v stderr=%q",
-			place, url, path, err, strings.TrimSpace(stderrBuf.String()))
-		return coverRenderedMsg{}
+		r.WriteByte(data[i])
+		i++
 	}
+	return segments, r.Bytes()
 }
 
-// ClearCover returns a tea.Cmd that clears the cover image in the given region.
-// Used on screen transitions (quit/select). Uses a targeted cell-region delete
-// (pane-local, tmux-safe) instead of --clear-all (which clears all panes).
-func ClearCover(place string) tea.Cmd {
-	return func() tea.Msg {
-		if place == "" {
-			return coverRenderedMsg{}
+// stripCursorMoves keeps SGR color codes (\x1b[..m), the U+10EEEE placeholder
+// chars + their combining diacritics, and newlines; drops cursor moves, CR, and
+// DECSC/DECRC so the text renders cleanly inline in bubbletea's View.
+func stripCursorMoves(data []byte) string {
+	var b bytes.Buffer
+	for i := 0; i < len(data); {
+		c := data[i]
+		if c == 0x1b && i+1 < len(data) {
+			if data[i+1] == '[' { // CSI: read to final byte 0x40-0x7e
+				j := i + 2
+				for j < len(data) && (data[j] < 0x40 || data[j] > 0x7e) {
+					j++
+				}
+				if j < len(data) && data[j] == 'm' { // keep SGR (color)
+					b.Write(data[i : j+1])
+				}
+				i = j + 1
+				continue
+			}
+			// non-CSI ESC (DECSC \x1b7, DECRC \x1b8, ...): drop
+			i += 2
+			continue
 		}
-		coverMu.Lock()
-		defer coverMu.Unlock()
-		tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
-		if err != nil {
-			return coverRenderedMsg{}
+		if c == '\r' { // drop CR
+			i++
+			continue
 		}
-		defer tty.Close()
-		// On full screen transitions (quit/select) we're leaving the alt
-		// screen, so --clear-all is fine.
-		cmd := exec.Command("kitten", "icat", "--clear-all")
-		cmd.Stdout = tty
-		cmd.Run()
-		return coverRenderedMsg{}
+		b.WriteByte(c)
+		i++
 	}
+	return b.String()
 }
 
-// deleteCoverRegion parses a place string ("WxH@XxY"), moves the cursor to
-// (X,Y), and emits a kitty graphics delete at that position (a=d,x=1,y=1).
-// The pixel offset (1,1) is within the cursor cell, so it deletes images
-// overlapping that cell. This is pane-local — works in tmux, doesn't touch
-// other panes' images.
-//
-// We loop over each row of the cover area and delete at each row to cover
-// the full region, since a=d,x,y only deletes images overlapping the single
-// pixel at cursor+offset.
-func deleteCoverRegion(w io.Writer, place string) {
-	_, rows, col, row, ok := parsePlace(place)
-	if !ok {
+// RenderCoverPlaceholder runs kitten in unicode-placeholder mode for the cached
+// cover file and returns the passthrough upload segments (write via WriteUpload)
+// and the placeholder text (render in the View). With unicode placeholders the
+// image anchors to wherever the text is rendered, so there are no absolute
+// coordinates — clearing is automatic when the text changes. Requires tmux
+// `allow-passthrough on` (raw APC reaches kitty unwrapped).
+func RenderCoverPlaceholder(path string, cols, rows int) (upload [][]byte, text string, err error) {
+	var out bytes.Buffer
+	place := fmt.Sprintf("%dx%d@1x1", cols, rows)
+	// --unicode-placeholder anchors the image to text (tmux-safe, auto-clears).
+	// --passthrough defaults to "detect": wraps in tmux passthrough inside tmux,
+	// raw APC outside — splitPassthrough handles both.
+	c := exec.Command("kitten", "icat", "--unicode-placeholder",
+		"--silent", "--stdin=no", "--place="+place, path)
+	c.Stdout = &out
+	var stderr bytes.Buffer
+	c.Stderr = &stderr
+	if rerr := c.Run(); rerr != nil {
+		return nil, "", fmt.Errorf("%v: %s", rerr, stderr.String())
+	}
+	segs, rest := splitPassthrough(out.Bytes())
+	coverDebugf("placeholder place=%s file=%s segs=%d text=%dB",
+		place, path, len(segs), len(rest))
+	return segs, stripCursorMoves(rest), nil
+}
+
+// WriteUpload writes passthrough segments (the image upload) to /dev/tty under
+// the cover mutex so concurrent draws don't interleave.
+func WriteUpload(segments [][]byte) {
+	coverMu.Lock()
+	defer coverMu.Unlock()
+	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
+	if err != nil {
+		coverDebugf("open /dev/tty failed: %v", err)
 		return
 	}
-	for r := row; r < row+rows; r++ {
-		fmt.Fprintf(w, "\x1b[%d;%dH", r, col)
-		fmt.Fprintf(w, "\x1b_Ga=d,x=1,y=1\x1b\\")
+	defer tty.Close()
+	for _, s := range segments {
+		tty.Write(s)
 	}
-}
-
-// parsePlace extracts cols, rows, col, row from a "WxH@XxY" string.
-func parsePlace(place string) (cols, rows, col, row int, ok bool) {
-	var w, h, x, y int
-	n, err := fmt.Sscanf(place, "%dx%d@%dx%d", &w, &h, &x, &y)
-	if err != nil || n != 4 || w <= 0 || h <= 0 {
-		return 0, 0, 0, 0, false
-	}
-	return w, h, x, y, true
-}
-
-// CoverPlace computes the kitten icat --place argument ("WxH@XxY") for the
-// cover image. W,H are cell dimensions; X,Y is the top-left cell of the cover
-// region. The coordinates MUST match the blank-space cover area the caller
-// renders (otherwise the image lands on top of metadata text). cols and rows
-// are the exact cell size of that blank area.
-func CoverPlace(cols, rows, col, row int) string {
-	if cols < 1 {
-		cols = 1
-	}
-	if rows < 1 {
-		rows = 1
-	}
-	return fmt.Sprintf("%dx%d@%dx%d", cols, rows, col, row)
 }

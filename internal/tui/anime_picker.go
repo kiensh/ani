@@ -36,7 +36,8 @@ type animePicker struct {
 	topItem  int    // first visible row in the list
 	debug    bool
 
-	cover *CoverCache
+	cover     *CoverCache
+	coverText string // unicode-placeholder text for the current item's cover
 
 	width, height int
 
@@ -86,13 +87,16 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.recomputeLayout()
 		m.fixScroll()
-		return m, m.renderCoverCmd()
+		return m, m.loadCoverCmd()
 
 	case coverReadyMsg:
-		// All downloads finished — re-render so any skipped cover now draws.
-		return m, m.renderCoverCmd()
+		// All downloads finished — load the cover for the current item.
+		return m, m.loadCoverCmd()
 
-	case coverRenderedMsg:
+	case coverTextMsg:
+		// Placeholder text for the current cover arrived: store it so View()
+		// renders it (the image anchors to it; the old image auto-clears).
+		m.coverText = msg.text
 		return m, nil
 
 	case tea.KeyMsg:
@@ -108,20 +112,20 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "esc", "ctrl+c":
 		m.result.Quit = true
-		// ClearCover on exit so the graphics-layer image doesn't persist on
-		// the real screen after the alt-screen is torn down.
+		// quitCmd cleans the cover temp dir. The cover image auto-clears when
+		// the alt screen tears down (its placeholder chars vanish).
 		return m, tea.Batch(tea.Quit, m.quitCmd())
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
 			m.fixScroll()
-			return m, m.renderCoverCmd()
+			return m, m.loadCoverCmd()
 		}
 	case "down", "j":
 		if m.cursor < len(m.filtered)-1 {
 			m.cursor++
 			m.fixScroll()
-			return m, m.renderCoverCmd()
+			return m, m.loadCoverCmd()
 		}
 	case "/":
 		m.filtering = true
@@ -137,16 +141,17 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// quitCmd clears the placed cover and the temp dir. Used on every screen
-// transition out of the anime picker (quit/select).
+// quitCmd cleans the cover temp dir. The cover image itself auto-clears when
+// the alt screen is torn down (its placeholder chars vanish), so no explicit
+// clear is needed.
 func (m *animePicker) quitCmd() tea.Cmd {
 	cache := m.cover
-	return tea.Batch(func() tea.Msg {
+	return func() tea.Msg {
 		if cache != nil {
 			cache.Cleanup()
 		}
-		return coverRenderedMsg{}
-	}, ClearCover(m.coverPlace()))
+		return nil
+	}
 }
 
 func (m *animePicker) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -168,19 +173,19 @@ func (m *animePicker) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(tea.Quit, m.quitCmd())
 			}
 		}
-		return m, m.renderCoverCmd()
+		return m, m.loadCoverCmd()
 	case "up":
 		if m.cursor > 0 {
 			m.cursor--
 			m.fixScroll()
-			return m, m.renderCoverCmd()
+			return m, m.loadCoverCmd()
 		}
 		return m, nil
 	case "down":
 		if m.cursor < len(m.filtered)-1 {
 			m.cursor++
 			m.fixScroll()
-			return m, m.renderCoverCmd()
+			return m, m.loadCoverCmd()
 		}
 		return m, nil
 	case "backspace":
@@ -189,21 +194,21 @@ func (m *animePicker) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.filterText = string(r[:len(r)-1])
 			m.applyFilter()
 			m.fixScroll()
-			return m, m.renderCoverCmd()
+			return m, m.loadCoverCmd()
 		}
 		m.filtering = false
-		return m, m.renderCoverCmd()
+		return m, m.loadCoverCmd()
 	case " ", "tab":
 		m.filterText += " "
 		m.applyFilter()
 		m.fixScroll()
-		return m, m.renderCoverCmd()
+		return m, m.loadCoverCmd()
 	default:
 		if isPrintable(msg) {
 			m.filterText += msg.String()
 			m.applyFilter()
 			m.fixScroll()
-			return m, m.renderCoverCmd()
+			return m, m.loadCoverCmd()
 		}
 	}
 	return m, nil
@@ -300,11 +305,6 @@ func (m *animePicker) recomputeLayout() {
 	m.coverRows = coverRows
 }
 
-// coverPlace returns the current kitten --place string for the cover image.
-func (m *animePicker) coverPlace() string {
-	return CoverPlace(m.coverCols, m.coverRows, m.coverCol, m.coverRow)
-}
-
 // pageSize is the number of list rows that fit inside the LEFT pane (its
 // content height, minus title and border rows). The left pane renders a title
 // line at its top, so reserve 1 for the title.
@@ -334,16 +334,36 @@ func (m *animePicker) fixScroll() {
 	}
 }
 
-func (m *animePicker) renderCoverCmd() tea.Cmd {
+// coverTextMsg carries the unicode-placeholder text for a cover (or "" when
+// there is no cover / it isn't cached yet). View() renders it; the image
+// anchors to it and clears automatically when the text changes.
+type coverTextMsg struct{ text string }
+
+// loadCoverCmd runs kitten for the current item's cached cover in unicode-
+// placeholder mode, writes the image upload to /dev/tty, and returns the
+// placeholder text. When the text changes on navigation, bubbletea's diff
+// drops the old placeholders and kitty clears the old image automatically — no
+// --clear, no coordinates. Returns "" if there's no cover or it isn't cached
+// yet (the next coverReadyMsg retries).
+func (m *animePicker) loadCoverCmd() tea.Cmd {
 	cur := m.currentItem()
-	if cur == nil || cur.CoverURL == "" {
-		// No cover to draw. Don't clear on every navigation (ClearCover runs
-		// only on exit/select); the blank cover area in View() prevents stale
-		// text from leaking through.
-		return nil
+	if cur == nil || cur.CoverURL == "" || m.cover == nil {
+		return func() tea.Msg { return coverTextMsg{text: ""} }
 	}
-	place := CoverPlace(m.coverCols, m.coverRows, m.coverCol, m.coverRow)
-	return RenderCover(m.cover, cur.CoverURL, place)
+	path := m.cover.Get(cur.CoverURL)
+	cols, rows := m.coverCols, m.coverRows
+	if path == "" {
+		return func() tea.Msg { return coverTextMsg{text: ""} }
+	}
+	return func() tea.Msg {
+		upload, text, err := RenderCoverPlaceholder(path, cols, rows)
+		if err != nil {
+			coverDebugf("load cover %s: %v", cur.CoverURL, err)
+			return coverTextMsg{text: ""}
+		}
+		WriteUpload(upload)
+		return coverTextMsg{text: text}
+	}
 }
 
 // headerText renders the 1-line header for the current mode.
@@ -425,26 +445,27 @@ func (m *animePicker) renderList() string {
 	return b.String()
 }
 
-// renderMetadata builds the right pane content. The TOP region is exactly
-// `coverRows` lines of `coverCols` blank spaces — this is where kitten icat
-// paints the cover, and its dimensions MUST match the RenderCover --place
-// argument (same X/Y/W/H). Below the cover region comes the colored metadata
-// text. No text may live inside the cover region, otherwise the image overlaps
-// the text.
+// renderMetadata builds the right pane content. The TOP region is the unicode-
+// placeholder text for the current cover (m.coverText): kitty anchors the image
+// to those chars wherever they're rendered, so there are no absolute
+// coordinates and the image clears automatically when the text changes. Below
+// it comes the colored metadata text.
 func (m *animePicker) renderMetadata() string {
 	cur := m.currentItem()
 
-	// Always emit the cover area first. Use explicit background color so the
-	// text layer covers any stale kitty graphics image from a previous item.
-	// The new image is placed AFTER View() via a tea.Cmd, so it renders on top.
-	coverRows := m.coverRows
-	coverCols := m.coverCols
-	blank := strings.Repeat(" ", coverCols)
-	// Background style to cover the old image (kitty renders images behind text bg).
-	coverBlank := CoverBlankStyle.Render(blank)
-	lines := make([]string, 0, coverRows+8)
-	for i := 0; i < coverRows; i++ {
-		lines = append(lines, coverBlank)
+	lines := make([]string, 0, m.coverRows+8)
+	if m.coverText != "" {
+		// Unicode-placeholder text for the current cover. kitty anchors the
+		// image to these chars (rendered wherever this text lands), so there
+		// are no absolute coordinates and clearing is automatic when the text
+		// changes. Reset SGR after so the image-id color doesn't bleed.
+		lines = append(lines, strings.Split(m.coverText+"\x1b[0m", "\n")...)
+	} else {
+		// No cover yet (loading / none): blank area.
+		blank := strings.Repeat(" ", m.coverCols)
+		for i := 0; i < m.coverRows; i++ {
+			lines = append(lines, CoverBlankStyle.Render(blank))
+		}
 	}
 
 	if cur == nil {
