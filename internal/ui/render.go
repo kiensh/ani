@@ -80,11 +80,11 @@ func RenderReleaseLine(r *animetosho.Release) string {
 		eps = fmt.Sprintf("ep%d", r.Episode)
 	}
 	// Every field is a fixed rune-width so the columns line up across rows.
-	// %-14s pads the group to 14 runes (Truncate caps it at 14); the brackets
-	// then form a fixed 16-wide column. res/eps %-5s, size %9s, seeders %5d,
-	// leechers %3d round out the line.
-	return fmt.Sprintf("%s [%-14s] %-5s %-5s %9s %5d↑ %3d↓",
-		date, Truncate(grp, 14), res, eps, HumanSize(r.Entry.SizeBytes),
+	// The group is bracketed at its natural width, then padded as a whole to
+	// 16 runes so the padding sits OUTSIDE the brackets: "[erai-raw]      ".
+	// Truncate caps the group at 14 runes so "[grp]" never exceeds 16.
+	return fmt.Sprintf("%s %-16s %-5s %-5s %9s %5d↑ %3d↓",
+		date, "["+Truncate(grp, 14)+"]", res, eps, HumanSize(r.Entry.SizeBytes),
 		r.Entry.Seeders, r.Entry.Leechers)
 }
 
