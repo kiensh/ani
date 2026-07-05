@@ -352,7 +352,7 @@ func (m *releasePicker) renderBadges() string {
 		conditionalBadge("group:"+group, m.filter.Group != ""),
 	}
 	qLabel := qualityLabel(m.filter.Quality)
-	parts = append(parts, conditionalBadge("q:"+qLabel, m.filter.Quality != ""))
+	parts = append(parts, conditionalBadge("resolution:"+qLabel, m.filter.Quality != ""))
 	if m.filter.Episode > 0 {
 		parts = append(parts, conditionalBadge(fmt.Sprintf("ep:%d", m.filter.Episode), true))
 	} else {
