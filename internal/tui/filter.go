@@ -193,14 +193,12 @@ func DefaultQuality(all []*animetosho.Release) string {
 }
 
 // DefaultEpisode returns the next-unwatched episode for an anime item, or 0
-// (all) if there's no clear "next" episode.
+// (all) if the series is finished. When the total is unknown we can't tell if
+// we're done, so default to the next episode (watched+1) rather than "all".
 func DefaultEpisode(watchedEps, totalEps int) int {
-	if totalEps <= 0 {
-		return 0
-	}
 	next := watchedEps + 1
-	if next > totalEps {
-		return 0
+	if totalEps > 0 && next > totalEps {
+		return 0 // reached/passed the known total → "all"
 	}
 	return next
 }

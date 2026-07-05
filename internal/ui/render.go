@@ -18,7 +18,7 @@ func RenderMALLine(m mal.Item) string {
 	case m.TotalEps > 0:
 		fmt.Fprintf(&b, "  ep %d/%d", m.WatchedEps, m.TotalEps)
 	case m.WatchedEps > 0:
-		fmt.Fprintf(&b, "  ep %d", m.WatchedEps)
+		fmt.Fprintf(&b, "  ep %d/?", m.WatchedEps)
 	}
 	if a := MALAirShort(m.AirStatus); a != "" {
 		fmt.Fprintf(&b, "  [%s]", a)
@@ -174,7 +174,7 @@ func MALItemHeader(item *mal.Item) string {
 	if item.TotalEps > 0 {
 		s = fmt.Sprintf("ep %d/%d", item.WatchedEps, item.TotalEps)
 	} else if item.WatchedEps > 0 {
-		s = fmt.Sprintf("ep %d", item.WatchedEps)
+		s = fmt.Sprintf("ep %d/?", item.WatchedEps)
 	}
 	if ls := MALListStatusShort(item.ListStatus); ls != "" {
 		if s != "" {

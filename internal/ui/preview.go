@@ -105,7 +105,7 @@ func PreviewAnime(tmpfile, malIDStr string) {
 	case m.TotalEps > 0:
 		progress = fmt.Sprintf("ep %d/%d", m.WatchedEps, m.TotalEps)
 	default:
-		progress = fmt.Sprintf("ep %d", m.WatchedEps)
+		progress = fmt.Sprintf("ep %d/?", m.WatchedEps)
 	}
 	if a := MALAirShort(m.AirStatus); a != "" {
 		progress += "  [" + a + "]"

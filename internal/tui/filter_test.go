@@ -93,7 +93,8 @@ func TestDefaultEpisode(t *testing.T) {
 		{3, 12, 4},   // next unwatched
 		{11, 12, 12}, // last episode
 		{12, 12, 0},  // finished → all
-		{5, 0, 0},    // unknown total → all
+		{5, 0, 6},    // unknown total → next episode (watched+1)
+		{0, 0, 1},    // unknown total, nothing watched → episode 1
 		{0, 24, 1},   // just started
 		{24, 24, 0},  // finished
 	}

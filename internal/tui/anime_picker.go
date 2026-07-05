@@ -487,7 +487,7 @@ func (m *animePicker) renderMetadata() string {
 	case cur.TotalEps > 0:
 		progress = fmt.Sprintf("ep %d/%d", cur.WatchedEps, cur.TotalEps)
 	default:
-		progress = fmt.Sprintf("ep %d", cur.WatchedEps)
+		progress = fmt.Sprintf("ep %d/?", cur.WatchedEps)
 	}
 	if a := ui.MALAirShort(cur.AirStatus); a != "" {
 		progress += "  [" + a + "]"
