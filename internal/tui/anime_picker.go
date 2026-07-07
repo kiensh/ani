@@ -358,7 +358,6 @@ func (m *animePicker) loadCoverCmd() tea.Cmd {
 	return func() tea.Msg {
 		upload, text, err := RenderCoverPlaceholder(path, cols, rows)
 		if err != nil {
-			coverDebugf("load cover %s: %v", cur.CoverURL, err)
 			return coverTextMsg{text: ""}
 		}
 		WriteUpload(upload)

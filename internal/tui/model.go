@@ -9,9 +9,6 @@
 package tui
 
 import (
-	"fmt"
-	"os"
-
 	tea "github.com/charmbracelet/bubbletea"
 
 	"ani/internal/animetosho"
@@ -45,7 +42,6 @@ func RunAnimePicker(items []mal.Item, mode AnimeMode, query string, debug bool) 
 	m := newAnimePicker(items, mode, query, debug)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
-	closeDebug()
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +63,6 @@ func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch fun
 	m := newReleasePicker(item, group, quality, sortName, fetch, debug)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
-	closeDebug()
 	if err != nil {
 		return nil, err
 	}
@@ -78,21 +73,4 @@ func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch fun
 		return rp.result, nil
 	}
 	return &Result{Quit: true}, nil
-}
-
-// debugf writes a line to stderr when debug is on. The TUI owns stdout (it's
-// in the alt screen), so diagnostics must not go there.
-func debugf(debug bool, format string, args ...any) {
-	if !debug {
-		return
-	}
-	// Log to file, not stderr — stderr corrupts the bubbletea TUI.
-	if coverDebugFile == nil {
-		f, err := os.OpenFile("/tmp/ani-tui-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			return
-		}
-		coverDebugFile = f
-	}
-	fmt.Fprintf(coverDebugFile, "DEBUG "+format+"\n", args...)
 }

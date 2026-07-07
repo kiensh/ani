@@ -36,31 +36,6 @@ type CoverCache struct {
 	mu   sync.RWMutex
 }
 
-// coverDebugf writes cover diagnostics to a log file, not stderr — stderr
-// would corrupt the bubbletea TUI during rendering. Logs go to
-// /tmp/ani-tui-debug.log; print the path on exit for diagnosis.
-var coverDebugFile *os.File
-
-func coverDebugf(format string, args ...any) {
-	if coverDebugFile == nil {
-		f, err := os.OpenFile("/tmp/ani-tui-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			return
-		}
-		coverDebugFile = f
-	}
-	fmt.Fprintf(coverDebugFile, "DEBUG cover: "+format+"\n", args...)
-}
-
-// closeDebug flushes/closes the debug log file and tells the user where to find it.
-func closeDebug() {
-	if coverDebugFile != nil {
-		coverDebugFile.Close()
-		coverDebugFile = nil
-		fmt.Fprintln(os.Stderr, "Debug log: /tmp/ani-tui-debug.log")
-	}
-}
-
 // NewCoverCache creates a cache backed by a fresh temp directory and returns a
 // tea.Cmd that downloads every distinct URL concurrently. Get returns "" until
 // a given URL's download finishes, so callers should re-render on coverReadyMsg.
@@ -68,7 +43,6 @@ func closeDebug() {
 func NewCoverCache(urls []string) (tea.Cmd, *CoverCache) {
 	dir, err := os.MkdirTemp("", coverCacheDirName)
 	if err != nil {
-		coverDebugf("mkdir failed: %v", err)
 		return func() tea.Msg { return coverReadyMsg{} }, &CoverCache{maps: map[string]string{}}
 	}
 	c := &CoverCache{dir: dir, maps: map[string]string{}}
@@ -97,7 +71,6 @@ func (c *CoverCache) downloadAll(urls []string) tea.Cmd {
 				defer wg.Done()
 				path, err := c.downloadOne(url)
 				if err != nil {
-					coverDebugf("download %s failed: %v", url, err)
 					return
 				}
 				c.mu.Lock()
@@ -251,8 +224,6 @@ func RenderCoverPlaceholder(path string, cols, rows int) (upload [][]byte, text 
 		return nil, "", fmt.Errorf("%v: %s", rerr, stderr.String())
 	}
 	segs, rest := splitPassthrough(out.Bytes())
-	coverDebugf("placeholder place=%s file=%s segs=%d text=%dB",
-		place, path, len(segs), len(rest))
 	return segs, stripCursorMoves(rest), nil
 }
 
@@ -263,7 +234,6 @@ func WriteUpload(segments [][]byte) {
 	defer coverMu.Unlock()
 	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
 	if err != nil {
-		coverDebugf("open /dev/tty failed: %v", err)
 		return
 	}
 	defer tty.Close()

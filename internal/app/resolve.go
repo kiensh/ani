@@ -24,7 +24,14 @@ import (
 // legacy fzf picker is used; otherwise the bubbletea TUI is used.
 func Resolve(opt *Options) (aid int, title string, item *mal.Item, err error) {
 	if n, perr := strconv.Atoi(opt.Query); perr == nil && n > 0 {
-		return n, "", nil, nil
+		// Direct AniDB id: there's no MAL anime, so build a minimal item (title
+		// + episode count, best-effort from animetosho) for the release pickers.
+		// MalID stays 0 so MalWriteBack skips the non-existent MAL update.
+		title, _, totalEps, _, _ := animetosho.SeriesMeta(n)
+		if title == "" {
+			title = fmt.Sprintf("anidb/%d", n)
+		}
+		return n, title, &mal.Item{Title: title, TotalEps: totalEps}, nil
 	}
 
 	var items []mal.Item
@@ -87,7 +94,7 @@ func Resolve(opt *Options) (aid int, title string, item *mal.Item, err error) {
 
 // MalWriteBack updates MAL progress after a play/download (best-effort).
 func MalWriteBack(item *mal.Item, pick *animetosho.Release, opt *Options) {
-	if item == nil || pick.IsBatch {
+	if item == nil || item.MalID == 0 || pick.IsBatch {
 		return
 	}
 	watched := item.WatchedEps
