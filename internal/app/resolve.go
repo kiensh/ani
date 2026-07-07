@@ -64,8 +64,18 @@ func Resolve(opt *Options) (aid int, title string, item *mal.Item, err error) {
 		item = res.Anime
 	}
 
+	// Prefer the Fribb offline mapping (exact MAL→AniDB, independent of Jikan) —
+	// near-complete coverage from a 7.4 MB one-time cached map refreshed weekly.
+	if id, ok := mal.AnidbAIDViaFribb(item.MalID, opt.Debug); ok {
+		return id, item.Title, item, nil
+	}
+
 	aid, aerr := mal.AnidbAID(item.MalID, opt.Debug)
-	if aerr == nil && aid == 0 {
+	if aerr != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", aerr)
+		return 0, "", nil, aerr
+	}
+	if aid == 0 {
 		fmt.Fprintf(os.Stderr, "No AniDB link on MAL for %q — searching animetosho…\n", item.Title)
 		aid = ui.FallbackAnidbByTitle(item.Title)
 	}
