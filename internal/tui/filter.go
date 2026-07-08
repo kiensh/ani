@@ -233,6 +233,7 @@ const (
 	overlayQuality
 	overlayEpisode
 	overlaySort
+	overlayActions
 )
 
 // filterOverlay is a selectable pop-up used by the group/quality filters and a
@@ -343,6 +344,17 @@ func (o *filterOverlay) openSort(currentValue string) {
 			break
 		}
 	}
+}
+
+// releaseActions is the fixed actions-menu item list.
+var releaseActions = []string{"Play", "Download", "Copy Magnet URL"}
+
+// openActions opens the per-release actions menu (Play / Download / Copy Magnet).
+func (o *filterOverlay) openActions() {
+	o.kind = overlayActions
+	o.items = releaseActions
+	o.text = ""
+	o.cursor = 0
 }
 
 // applySelected writes the overlay's selection back into the filter. For group

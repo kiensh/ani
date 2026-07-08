@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -42,6 +43,15 @@ type releasePicker struct {
 	filter  Filter
 	overlay filterOverlay
 
+	// copyMagnet copies a magnet URI to the clipboard (nil disables Copy Magnet).
+	copyMagnet func(string) error
+	toast      string // transient confirmation line (e.g. "✓ Magnet copied")
+
+	// latestEpisode returns the latest aired episode for a MAL id (nil disables
+	// the "watched/aired/total" header). aired caches the result for m.item.
+	latestEpisode func(int) int
+	aired         int
+
 	view    []*animetosho.Release // filter.Apply(all)
 	cursor  int
 	topItem int
@@ -51,13 +61,15 @@ type releasePicker struct {
 	result *Result
 }
 
-func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode, debug bool) *releasePicker {
+func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(int) int, debug bool) *releasePicker {
 	rp := &releasePicker{
 		item:            item,
 		debug:           debug,
 		fetch:           fetch,
 		fetching:        true, // the initial episode fetch is kicked off by Init
 		episodeDisabled: disableEpisode,
+		copyMagnet:      copyMagnet,
+		latestEpisode:   latestEpisode,
 		result:          &Result{},
 	}
 	rp.filter.Group = group
@@ -86,7 +98,22 @@ func (m *releasePicker) fetchCmd(ep int) tea.Cmd {
 	}
 }
 
-func (m *releasePicker) Init() tea.Cmd { return m.fetchCmd(m.filter.Episode) }
+// latestEpMsg carries the latest aired episode for the header anime.
+type latestEpMsg struct {
+	malID int
+	aired int
+}
+
+func (m *releasePicker) Init() tea.Cmd {
+	cmds := []tea.Cmd{m.fetchCmd(m.filter.Episode)}
+	// Also fetch the latest aired episode for the "watched/aired/total" header.
+	if m.item != nil && m.item.MalID > 0 && m.latestEpisode != nil {
+		malID := m.item.MalID
+		fn := m.latestEpisode
+		cmds = append(cmds, func() tea.Msg { return latestEpMsg{malID: malID, aired: fn(malID)} })
+	}
+	return tea.Batch(cmds...)
+}
 
 func (m *releasePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -97,6 +124,16 @@ func (m *releasePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case releasesLoadedMsg:
 		return m.applyLoaded(msg)
+
+	case clearToastMsg:
+		m.toast = ""
+		return m, nil
+
+	case latestEpMsg:
+		if m.item != nil && msg.malID == m.item.MalID {
+			m.aired = msg.aired
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		if m.overlay.active() {
@@ -191,6 +228,12 @@ func (m *releasePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filter.Filtering = true
 		m.filter.FuzzyText = ""
 		return m, nil
+	case " ":
+		// Open the per-release actions menu (Play / Download / Copy Magnet).
+		if m.currentRelease() != nil {
+			m.overlay.openActions()
+			return m, nil
+		}
 	case "enter":
 		// Enter plays immediately (no separate play/download prompt).
 		if cur := m.currentRelease(); cur != nil {
@@ -233,12 +276,16 @@ func (m *releasePicker) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// List overlays (group / quality).
+	// List overlays (group / quality / sort / actions).
 	switch msg.String() {
 	case "esc", "ctrl+c":
 		m.overlay.close()
 		return m, nil
 	case "enter":
+		// The actions menu doesn't go through applySelected — it picks an action.
+		if m.overlay.kind == overlayActions {
+			return m.applyAction()
+		}
 		m.overlay.applySelected(&m.filter)
 		m.overlay.close()
 		m.applyFilter()
@@ -252,6 +299,44 @@ func (m *releasePicker) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "end":
 		if n := len(m.overlay.items); n > 0 {
 			m.overlay.cursor = n - 1
+		}
+	}
+	return m, nil
+}
+
+// toastHold is how long the copy-magnet confirmation stays on screen.
+const toastHold = 1200 * time.Millisecond
+
+// clearToastMsg clears the transient toast line.
+type clearToastMsg struct{}
+
+// applyAction runs the chosen actions-menu item. Play/Download select the release
+// and quit (same path as Enter/d); Copy Magnet copies to the clipboard and shows
+// a brief toast, then returns to the list.
+func (m *releasePicker) applyAction() (tea.Model, tea.Cmd) {
+	sel := ""
+	if m.overlay.cursor >= 0 && m.overlay.cursor < len(m.overlay.items) {
+		sel = m.overlay.items[m.overlay.cursor]
+	}
+	cur := m.currentRelease()
+	m.overlay.close()
+	if cur == nil {
+		return m, nil
+	}
+	switch sel {
+	case "Play":
+		m.result.Release = cur
+		m.result.Action = "play"
+		return m, tea.Quit
+	case "Download":
+		m.result.Release = cur
+		m.result.Action = "download"
+		return m, tea.Quit
+	case "Copy Magnet URL":
+		if m.copyMagnet != nil && cur.Entry.Magnet != "" {
+			m.copyMagnet(cur.Entry.Magnet)
+			m.toast = "✓ Magnet copied to clipboard"
+			return m, tea.Tick(toastHold, func(time.Time) tea.Msg { return clearToastMsg{} })
 		}
 	}
 	return m, nil
@@ -367,7 +452,7 @@ func (m *releasePicker) View() string {
 
 	// Header line 1: anime info + count. (FIXED)
 	var h1 string
-	if info := ui.MALItemHeader(m.item); info != "" {
+	if info := ui.MALItemHeader(m.item, m.aired); info != "" {
 		h1 = HeaderStyle.Render(info) + "  ·  "
 	}
 	h1 += FaintStyle.Render(fmt.Sprintf("%d rels", len(m.view)))
@@ -404,6 +489,10 @@ func (m *releasePicker) View() string {
 	preview := m.renderPreview()
 
 	help := HelpStyle.Render(rpHelpText)
+	if m.toast != "" {
+		// Transient confirmation (e.g. "✓ Magnet copied") in place of the help line.
+		help = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true).Render(m.toast)
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, h1, h2, listArea, preview, help)
 }
@@ -435,7 +524,7 @@ func (m *releasePicker) renderBadges() string {
 	return strings.Join(parts, " ")
 }
 
-const rpHelpText = "j/k nav  g group  r quality  e episode  s sort  / filter  Enter play  d download  Esc back  q quit"
+const rpHelpText = "j/k nav  g group  r quality  e episode  s sort  Space act  / filter  Enter play  d download  Esc back  q quit"
 
 // renderList draws the visible slice of the filtered list with a cursor glyph.
 // Each line is rendered independently with a full style reset so the selected
@@ -514,6 +603,8 @@ func (m *releasePicker) renderOverlayContent() string {
 		return renderListOverlayContent("Quality", m.overlay.items, m.overlay.cursor, max(1, m.pageSize()-1))
 	case overlaySort:
 		return renderListOverlayContent("Sort", m.overlay.items, m.overlay.cursor, max(1, m.pageSize()-1))
+	case overlayActions:
+		return renderListOverlayContent("Actions", m.overlay.items, m.overlay.cursor, max(1, m.pageSize()-1))
 	case overlayEpisode:
 		title := TitleStyle.Render("Episode (blank = all, Esc cancel)")
 		input := SelectedStyle.Render("▶ " + m.overlay.text + "▏")

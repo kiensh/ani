@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 )
@@ -55,6 +56,33 @@ func RunDownload(magnet, dir string, dryRun bool) error {
 	}
 	cmd := exec.Command("aria2c", "--seed-time=0", "--dir="+dir, "--summary-interval=0", magnet)
 	return RunWithSignals(cmd, dryRun)
+}
+
+// CopyToClipboard copies text to the system clipboard via the platform tool
+// (pbcopy on macOS, clip on Windows, xclip on Linux). Returns an error if the
+// tool is missing or the copy fails.
+func CopyToClipboard(text string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	case "windows":
+		cmd = exec.Command("clip")
+	default:
+		cmd = exec.Command("xclip", "-selection", "clipboard")
+	}
+	w, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("clipboard: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("clipboard: start %s: %w", cmd.Args[0], err)
+	}
+	if _, err := w.Write([]byte(text)); err != nil {
+		return fmt.Errorf("clipboard: write: %w", err)
+	}
+	w.Close()
+	return cmd.Wait()
 }
 
 // RunWithSignals runs cmd with inherited stdio and forwards SIGINT/SIGTERM so

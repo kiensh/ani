@@ -31,15 +31,16 @@ type Result struct {
 }
 
 // RunAnimePicker launches the TUI for anime selection. source is the initial
-// browse source (SourceList / SourceSeason); query non-empty means search. The
-// picker loads its own data via load for the (source, query, season) triple,
-// caching each. Returns the selected anime, or a Result with Quit=true when the
-// user cancels.
-func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, debug bool) (*Result, error) {
+// browse source (SourceList / SourceSeason); query non-empty means search. load
+// supplies items per (source, query, season); applyStatus applies a per-anime
+// set-status/remove action (nil disables the Space menu); latestEpisode backs
+// the "watched/aired/total" display for the focused airing anime (nil disables).
+// Returns the selected anime, or a Result with Quit=true when the user cancels.
+func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, latestEpisode func(int) int, debug bool) (*Result, error) {
 	if load == nil {
 		return &Result{Quit: true}, nil
 	}
-	m := newAnimePicker(source, query, load, debug)
+	m := newAnimePicker(source, query, load, applyStatus, latestEpisode, debug)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
 	if err != nil {
@@ -56,12 +57,14 @@ func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, debug bool
 // filter. fetch returns the releases for a given episode (cached + scoped by
 // the caller) and is invoked on demand: initially for the default episode, and
 // again whenever the user changes the episode filter. disableEpisode suppresses
-// the episode filter (for the latest-uploads landing screen).
-func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode, debug bool) (*Result, error) {
+// the episode filter (latest-uploads view). copyMagnet backs the Space menu's
+// "Copy Magnet URL"; latestEpisode backs the "watched/aired/total" header (nil
+// disables each).
+func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(int) int, debug bool) (*Result, error) {
 	if item == nil || fetch == nil {
 		return &Result{Quit: true}, nil
 	}
-	m := newReleasePicker(item, group, quality, sortName, fetch, disableEpisode, debug)
+	m := newReleasePicker(item, group, quality, sortName, fetch, disableEpisode, copyMagnet, latestEpisode, debug)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
 	if err != nil {

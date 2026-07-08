@@ -98,7 +98,17 @@ func resolveMal(opt *Options) (int, *mal.Item, error) {
 			return items
 		}
 	}
-	res, err := tui.RunAnimePicker(source, query, load, opt.Debug)
+	applyStatus := func(malID, watched int, act tui.StatusAction) bool {
+		var err error
+		if act.Remove {
+			err = mal.RemoveFromList(malID, opt.DryRun, opt.Debug)
+		} else {
+			err = mal.SetStatus(malID, watched, act.Status, opt.DryRun, opt.Debug)
+		}
+		return err == nil && !opt.DryRun
+	}
+	latestEpisode := func(malID int) int { n, _ := mal.LatestEpisode(malID, opt.Debug); return n }
+	res, err := tui.RunAnimePicker(source, query, load, applyStatus, latestEpisode, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -149,7 +159,7 @@ func resolveAnimetosho(opt *Options) (int, *mal.Item, error) {
 		return 0, nil, fmt.Errorf("no anime found")
 	}
 	load := func(tui.AnimeSource, string, string) []mal.Item { return items }
-	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, opt.Debug)
+	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -277,7 +287,9 @@ func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*animetosho.
 		fmt.Fprintf(os.Stderr, "DRY-RUN: TUI would show %d releases, auto-picking first\n", len(view))
 		return view[0], "play", nil
 	}
-	res, err := tui.RunReleasePicker(item, opt.Group, opt.Quality, opt.Sort, fetch, disableEpisode, opt.Debug)
+	res, err := tui.RunReleasePicker(item, opt.Group, opt.Quality, opt.Sort, fetch, disableEpisode, player.CopyToClipboard,
+		func(malID int) int { n, _ := mal.LatestEpisode(malID, opt.Debug); return n },
+		opt.Debug)
 	if err != nil {
 		return nil, "", err
 	}

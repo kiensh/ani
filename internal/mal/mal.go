@@ -250,6 +250,70 @@ func SeasonArchive(debug bool) []string {
 	return out
 }
 
+// jikanEpisode is one row of Jikan's /anime/{id}/episodes feed; mal_id is the
+// episode number (1-indexed, sequential).
+type jikanEpisode struct {
+	MalID int `json:"mal_id"`
+}
+
+// LatestEpisode returns the latest aired episode number for an anime via Jikan's
+// /anime/{id}/episodes: page 1 gives the page count, then the last page's last
+// entry's mal_id is the newest aired episode. Returns 0 if there are no episodes
+// (not yet aired / none) or on error. (MAL has no "episodes aired" field, so
+// this is the accurate source.)
+func LatestEpisode(malID int, debug bool) (int, error) {
+	first := fmt.Sprintf("https://api.jikan.moe/v4/anime/%d/episodes", malID)
+	if debug {
+		fmt.Fprintf(os.Stderr, "DEBUG Jikan GET %s\n", first)
+	}
+	var p1 struct {
+		Pagination struct {
+			LastVisiblePage int  `json:"last_visible_page"`
+			HasNext         bool `json:"has_next_page"`
+		} `json:"pagination"`
+		Data []jikanEpisode `json:"data"`
+	}
+	if err := jikanGet(first, &p1); err != nil {
+		return 0, err
+	}
+	if len(p1.Data) == 0 {
+		return 0, nil
+	}
+	if !p1.Pagination.HasNext {
+		return p1.Data[len(p1.Data)-1].MalID, nil
+	}
+	// Fetch the last page for the true latest episode.
+	last := fmt.Sprintf("%s?page=%d", first, p1.Pagination.LastVisiblePage)
+	if debug {
+		fmt.Fprintf(os.Stderr, "DEBUG Jikan GET %s\n", last)
+	}
+	var pn struct {
+		Data []jikanEpisode `json:"data"`
+	}
+	if err := jikanGet(last, &pn); err != nil || len(pn.Data) == 0 {
+		return p1.Data[len(p1.Data)-1].MalID, nil
+	}
+	return pn.Data[len(pn.Data)-1].MalID, nil
+}
+
+// jikanGet does an authenticated-less GET against Jikan and decodes JSON into
+// out. Returns an error on request failure or non-200.
+func jikanGet(u string, out any) error {
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("jikan: %s", resp.Status)
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
 // Seasonal returns the seasonal anime lineup for a given year/season (e.g.
 // summer 2026), sorted by MAL's default. Up to 100 titles; each carries
 // my_list_status when authenticated, so client-side status filtering works.
@@ -398,6 +462,30 @@ func Update(malID, watchedEps int, status mal.AnimeStatus, dryRun, debug bool) e
 	}
 	_, _, err = c.Anime.UpdateMyListStatus(context.Background(), malID,
 		status, mal.NumEpisodesWatched(watchedEps))
+	return err
+}
+
+// SetStatus sets watched-episode count and a string status on MAL. It's a thin
+// wrapper over Update so callers don't need the go-myanimelist AnimeStatus type.
+func SetStatus(malID, watchedEps int, status string, dryRun, debug bool) error {
+	return Update(malID, watchedEps, mal.AnimeStatus(status), dryRun, debug)
+}
+
+// RemoveFromList deletes the anime from the user's MAL list. When dryRun is true
+// the request is printed but not sent.
+func RemoveFromList(malID int, dryRun, debug bool) error {
+	if dryRun {
+		fmt.Fprintf(os.Stderr, "DRY-RUN: MAL DELETE /anime/%d/my_list_status (not sent)\n", malID)
+		return nil
+	}
+	c, err := Client(debug)
+	if err != nil {
+		return err
+	}
+	if debug {
+		fmt.Fprintf(os.Stderr, "DEBUG MAL DELETE /anime/%d/my_list_status\n", malID)
+	}
+	_, err = c.Anime.DeleteMyListItem(context.Background(), malID)
 	return err
 }
 

@@ -118,6 +118,58 @@ func statusKeeps(label, listStatus string) bool {
 	}
 }
 
+// StatusAction is a chosen per-anime action from the actions menu: set a status,
+// or remove the anime from the user's list.
+type StatusAction struct {
+	Remove bool
+	Status string // MAL status value (watching/completed/on_hold/plan_to_watch/dropped); valid when !Remove
+}
+
+// actionOption is one row of the per-anime actions menu (Space).
+type actionOption struct {
+	label   string
+	action  StatusAction
+	display string // human status name for the confirm text (empty for Remove)
+}
+
+// actionOptions is the actions menu, top to bottom. Set statuses first, Remove last.
+var actionOptions = []actionOption{
+	{"Set Watching", StatusAction{Status: "watching"}, "Watching"},
+	{"Set Completed", StatusAction{Status: "completed"}, "Completed"},
+	{"Set On-Hold", StatusAction{Status: "on_hold"}, "On-Hold"},
+	{"Set Plan to Watch", StatusAction{Status: "plan_to_watch"}, "Plan to Watch"},
+	{"Set Dropped", StatusAction{Status: "dropped"}, "Dropped"},
+	{"Remove from My List", StatusAction{Remove: true}, ""},
+}
+
+// actionLabelsFor returns the menu labels applicable to an item with the given
+// current ListStatus: the "Set <current>" option is dropped (already that
+// status — a no-op), and "Remove from My List" is dropped when the item isn't
+// on the list (empty status).
+func actionLabelsFor(listStatus string) []string {
+	out := make([]string, 0, len(actionOptions))
+	for _, o := range actionOptions {
+		if o.action.Remove && listStatus == "" {
+			continue
+		}
+		if !o.action.Remove && o.action.Status == listStatus {
+			continue
+		}
+		out = append(out, o.label)
+	}
+	return out
+}
+
+// actionByLabel resolves an overlay label to its action + display name.
+func actionByLabel(label string) (StatusAction, string, bool) {
+	for _, o := range actionOptions {
+		if o.label == label {
+			return o.action, o.display, true
+		}
+	}
+	return StatusAction{}, "", false
+}
+
 // seasonRank orders seasons within a year (winter < spring < summer < fall).
 func seasonRank(s mal.Season) int {
 	switch s {
@@ -205,12 +257,16 @@ const (
 	animeOverlayStatus
 	animeOverlaySeason
 	animeOverlaySort
+	animeOverlayActions // per-anime actions menu (set status / remove)
+	animeOverlayConfirm // centered y/n modal for an actions-menu choice
 )
 
 type animeOverlay struct {
-	kind   animeOverlayKind
-	items  []string
-	cursor int
+	kind          animeOverlayKind
+	items         []string
+	cursor        int
+	text          string        // confirm-modal question
+	pendingAction StatusAction  // action to apply on confirm
 }
 
 func (o *animeOverlay) active() bool { return o.kind != animeOverlayNone }
@@ -256,6 +312,8 @@ func (k animeOverlayKind) String() string {
 		return "Season"
 	case animeOverlaySort:
 		return "Sort"
+	case animeOverlayActions:
+		return "Set Status"
 	}
 	return ""
 }
@@ -285,6 +343,15 @@ type animePicker struct {
 
 	filter  AnimeFilter
 	overlay animeOverlay
+
+	// applyStatus applies a per-anime status action (set/remove) to MAL. nil in
+	// the AnimeTosho fallback (no MAL), where Space is a no-op.
+	applyStatus func(malID, watchedEps int, act StatusAction) bool
+
+	// latestEpisode returns the latest aired episode for a MAL id (nil disables
+	// the "watched/aired/total" display). aired caches results by malID.
+	latestEpisode func(malID int) int
+	aired         map[int]int
 
 	cursor  int
 	topItem int
@@ -330,12 +397,15 @@ func animeCacheKey(source AnimeSource, query, season string) string {
 	return fmt.Sprintf("%d|%s|%s", source, query, season)
 }
 
-func newAnimePicker(source AnimeSource, query string, load AnimeLoad, debug bool) *animePicker {
+func newAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, latestEpisode func(int) int, debug bool) *animePicker {
 	y, s, label := mal.CurrentSeason()
 	ap := &animePicker{
 		source:        source,
 		query:         query,
 		load:          load,
+		applyStatus:   applyStatus,
+		latestEpisode: latestEpisode,
+		aired:         map[int]int{},
 		cache:         &animeCache{m: map[string][]mal.Item{}},
 		loading:       true,
 		currentYear:   y,
@@ -346,6 +416,7 @@ func newAnimePicker(source AnimeSource, query string, load AnimeLoad, debug bool
 		result:        &Result{},
 	}
 	ap.season = ap.defaultSeason()
+	ap.filter.Status = ap.defaultStatus()
 	return ap
 }
 
@@ -356,6 +427,15 @@ func (m *animePicker) defaultSeason() string {
 		return m.currentLabel
 	}
 	return mal.SeasonAll
+}
+
+// defaultStatus is the status filter a source opens on: "My List" for Season
+// (browse) — your items this season first — and "All" otherwise.
+func (m *animePicker) defaultStatus() string {
+	if m.source == SourceSeason && m.query == "" {
+		return "My List"
+	}
+	return "All"
 }
 
 func (m *animePicker) Init() tea.Cmd { return m.loadCmd(m.source, m.query, m.season) }
@@ -389,13 +469,23 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.recomputeLayout()
 		m.fixScroll()
-		return m, m.loadCoverCmd()
+		return m, m.focusCmd()
 
 	case itemsLoadedMsg:
 		return m.applyLoaded(msg)
 
+	case statusAppliedMsg:
+		return m.applyStatusApplied(msg)
+
+	case latestEpMsg:
+		// Cache the latest aired episode for the focused anime's metadata display.
+		if m.latestEpisode != nil {
+			m.aired[msg.malID] = msg.aired
+		}
+		return m, nil
+
 	case coverReadyMsg:
-		return m, m.loadCoverCmd()
+		return m, m.focusCmd()
 
 	case coverTextMsg:
 		m.coverText = msg.text
@@ -457,7 +547,7 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.source = SourceList
 		}
 		m.season = m.defaultSeason()
-		m.filter.Status = "All"
+		m.filter.Status = m.defaultStatus()
 		m.loading = true
 		m.cursor = 0
 		m.topItem = 0
@@ -466,13 +556,13 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor > 0 {
 			m.cursor--
 			m.fixScroll()
-			return m, m.loadCoverCmd()
+			return m, m.focusCmd()
 		}
 	case "down", "j":
 		if m.cursor < len(m.view)-1 {
 			m.cursor++
 			m.fixScroll()
-			return m, m.loadCoverCmd()
+			return m, m.focusCmd()
 		}
 	case "t":
 		m.overlay.open(animeOverlayStatus, m.statusOptions(), m.filter.Status)
@@ -489,6 +579,19 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			labels[i] = o.label
 		}
 		m.overlay.open(animeOverlaySort, labels, sortLabel(m.filter.Sort))
+		return m, nil
+	case " ":
+		// Open the per-anime actions menu (set status / remove). No-op without a
+		// MAL item (AnimeTosho fallback) or an injected writer.
+		if m.applyStatus == nil {
+			return m, nil
+		}
+		it := m.currentItemCopy()
+		if it == nil || it.MalID == 0 {
+			return m, nil
+		}
+		// Only the actions that actually apply to this item's current status.
+		m.overlay.open(animeOverlayActions, actionLabelsFor(it.ListStatus), "")
 		return m, nil
 	case "/":
 		m.filter.Filtering = true
@@ -541,6 +644,24 @@ func (m *animePicker) seasonArchiveItems() []string {
 }
 
 func (m *animePicker) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Confirm modal: y/Enter applies the pending action; anything else cancels.
+	if m.overlay.kind == animeOverlayConfirm {
+		switch msg.String() {
+		case "y", "Y", "enter":
+			it := m.currentItemCopy()
+			act := m.overlay.pendingAction
+			m.overlay.close()
+			if it == nil || it.MalID == 0 {
+				return m, nil
+			}
+			return m, m.statusApplyCmd(it.MalID, it.WatchedEps, act)
+		default:
+			m.overlay.close()
+			return m, nil
+		}
+	}
+
+	// List overlays (status / season / sort / actions).
 	switch msg.String() {
 	case "esc", "ctrl+c":
 		m.overlay.close()
@@ -561,7 +682,9 @@ func (m *animePicker) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// applyOverlaySelection applies the overlay's selection and closes it.
+// applyOverlaySelection applies the overlay's selection and closes it. The
+// actions menu is special: it doesn't apply directly but switches to a confirm
+// modal first.
 func (m *animePicker) applyOverlaySelection() (tea.Model, tea.Cmd) {
 	sel := m.overlay.selected()
 	kind := m.overlay.kind
@@ -572,13 +695,13 @@ func (m *animePicker) applyOverlaySelection() (tea.Model, tea.Cmd) {
 			m.filter.Status = sel
 		}
 		m.applyFilter()
-		return m, m.loadCoverCmd()
+		return m, m.focusCmd()
 	case animeOverlaySort:
 		if v, ok := sortValue(sel); ok {
 			m.filter.Sort = v
 		}
 		m.applyFilter()
-		return m, m.loadCoverCmd()
+		return m, m.focusCmd()
 	case animeOverlaySeason:
 		if sel == "" {
 			return m, nil
@@ -588,8 +711,75 @@ func (m *animePicker) applyOverlaySelection() (tea.Model, tea.Cmd) {
 		m.cursor = 0
 		m.topItem = 0
 		return m, m.loadCmd(m.source, m.query, m.season)
+	case animeOverlayActions:
+		act, display, ok := actionByLabel(sel)
+		if !ok {
+			return m, nil
+		}
+		it := m.currentItemCopy()
+		if it == nil || it.MalID == 0 {
+			return m, nil
+		}
+		// Switch to the confirm modal (no write yet).
+		text := fmt.Sprintf("Set %q to %s?", it.Title, display)
+		if act.Remove {
+			text = fmt.Sprintf("Remove %q from your list?", it.Title)
+		}
+		m.overlay.kind = animeOverlayConfirm
+		m.overlay.items = nil
+		m.overlay.cursor = 0
+		m.overlay.text = text
+		m.overlay.pendingAction = act
+		return m, nil
 	}
 	return m, nil
+}
+
+// statusApplyCmd runs the per-anime action (set/remove) in the background.
+type statusAppliedMsg struct {
+	malID   int
+	act     StatusAction
+	applied bool
+}
+
+func (m *animePicker) statusApplyCmd(malID, watchedEps int, act StatusAction) tea.Cmd {
+	apply := m.applyStatus
+	return func() tea.Msg {
+		applied := false
+		if apply != nil {
+			applied = apply(malID, watchedEps, act)
+		}
+		return statusAppliedMsg{malID: malID, act: act, applied: applied}
+	}
+}
+
+// applyStatusApplied reflects a finished action in the local item set, then
+// re-filters (so e.g. a Completed item leaves a Watching filter, or a removed
+// item leaves the My List view).
+func (m *animePicker) applyStatusApplied(msg statusAppliedMsg) (tea.Model, tea.Cmd) {
+	if !msg.applied {
+		return m, nil
+	}
+	for i := range m.items {
+		if m.items[i].MalID != msg.malID {
+			continue
+		}
+		if msg.act.Remove {
+			if m.query == "" && m.source == SourceList {
+				// Removed from the list entirely → drop it from the cached set.
+				m.items = append(m.items[:i], m.items[i+1:]...)
+			} else {
+				m.items[i].ListStatus = ""
+			}
+			break
+		}
+		m.items[i].ListStatus = msg.act.Status
+		break
+	}
+	m.cursor = 0
+	m.topItem = 0
+	m.applyFilter()
+	return m, m.focusCmd()
 }
 
 func (m *animePicker) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -609,19 +799,19 @@ func (m *animePicker) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(tea.Quit, m.quitCmd())
 			}
 		}
-		return m, m.loadCoverCmd()
+		return m, m.focusCmd()
 	case "up":
 		if m.cursor > 0 {
 			m.cursor--
 			m.fixScroll()
-			return m, m.loadCoverCmd()
+			return m, m.focusCmd()
 		}
 		return m, nil
 	case "down":
 		if m.cursor < len(m.view)-1 {
 			m.cursor++
 			m.fixScroll()
-			return m, m.loadCoverCmd()
+			return m, m.focusCmd()
 		}
 		return m, nil
 	case "backspace":
@@ -630,22 +820,22 @@ func (m *animePicker) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.filter.FuzzyText = string(r[:len(r)-1])
 			m.applyFilter()
 			m.fixScroll()
-			return m, m.loadCoverCmd()
+			return m, m.focusCmd()
 		}
 		m.filter.Filtering = false
 		m.applyFilter()
-		return m, m.loadCoverCmd()
+		return m, m.focusCmd()
 	case " ", "tab":
 		m.filter.FuzzyText += " "
 		m.applyFilter()
 		m.fixScroll()
-		return m, m.loadCoverCmd()
+		return m, m.focusCmd()
 	default:
 		if isPrintable(msg) {
 			m.filter.FuzzyText += msg.String()
 			m.applyFilter()
 			m.fixScroll()
-			return m, m.loadCoverCmd()
+			return m, m.focusCmd()
 		}
 	}
 	return m, nil
@@ -795,6 +985,30 @@ func (m *animePicker) fixScroll() {
 // coverTextMsg carries the unicode-placeholder text for a cover.
 type coverTextMsg struct{ text string }
 
+// focusCmd batches the work done when the focused anime changes: load its cover
+// and (for airing anime) fetch its latest aired episode.
+func (m *animePicker) focusCmd() tea.Cmd {
+	return tea.Batch(m.loadCoverCmd(), m.latestEpisodeCmd())
+}
+
+// latestEpisodeCmd fetches the latest aired episode for the focused airing anime
+// (cached, nil-gated). Returns nil when there's nothing to fetch.
+func (m *animePicker) latestEpisodeCmd() tea.Cmd {
+	if m.latestEpisode == nil {
+		return nil
+	}
+	cur := m.currentItemCopy()
+	if cur == nil || cur.MalID == 0 || cur.AirStatus != "currently_airing" {
+		return nil
+	}
+	if _, ok := m.aired[cur.MalID]; ok {
+		return nil // cached
+	}
+	malID := cur.MalID
+	fn := m.latestEpisode
+	return func() tea.Msg { return latestEpMsg{malID: malID, aired: fn(malID)} }
+}
+
 func (m *animePicker) loadCoverCmd() tea.Cmd {
 	cur := m.currentItemCopy()
 	if cur == nil || cur.CoverURL == "" || m.cover == nil {
@@ -851,6 +1065,9 @@ func (m *animePicker) View() string {
 		}
 		return FaintStyle.Render(fmt.Sprintf("Loading %s…", label))
 	}
+	if m.overlay.kind == animeOverlayConfirm {
+		return m.renderConfirmModal()
+	}
 
 	// ---- LEFT pane (list / overlay) ----
 	var leftContent string
@@ -881,9 +1098,22 @@ func (m *animePicker) View() string {
 
 	header := m.headerText()
 	badges := m.renderBadges()
-	help := HelpStyle.Render("j/k nav  Tab source  t status  e season  s sort  / filter  Enter select  q quit")
+	help := HelpStyle.Render("j/k nav  Tab source  t status  e season  s sort  Space set  / filter  Enter select  q quit")
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
 	return lipgloss.JoinVertical(lipgloss.Left, header, badges, panes, help)
+}
+
+// renderConfirmModal draws the centered y/n modal for a per-anime action
+// (set status / remove). Replaces the panes while active.
+func (m *animePicker) renderConfirmModal() string {
+	questionColor := colorAccent
+	if m.overlay.pendingAction.Remove {
+		questionColor = lipgloss.Color("203") // salmon/red for destructive remove
+	}
+	question := lipgloss.NewStyle().Bold(true).Foreground(questionColor).Render(m.overlay.text)
+	hint := lipgloss.NewStyle().Render("[Y] yes   [n] no  (Esc = no)")
+	body := ModalBorderStyle.Render(lipgloss.JoinVertical(lipgloss.Center, question, "", hint))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
 }
 
 // renderBadges renders the source/status/season/sort badge line. The season
@@ -953,22 +1183,21 @@ func (m *animePicker) renderMetadata() string {
 
 	lines = append(lines, TitleStyle.Render(wrap(cur.Title, width)))
 
-	progress := ""
-	switch {
-	case cur.TotalEps > 0:
-		progress = fmt.Sprintf("ep %d/%d", cur.WatchedEps, cur.TotalEps)
-	default:
-		progress = fmt.Sprintf("ep %d/?", cur.WatchedEps)
-	}
+	progress := ui.FormatProgress(cur.WatchedEps, cur.TotalEps, m.aired[cur.MalID], cur.AirStatus == "currently_airing")
 	if a := ui.MALAirShort(cur.AirStatus); a != "" {
 		progress += "  [" + a + "]"
 	}
+	// Render the progress core (wrapped), then append the status badge unwrapped
+	// so its ANSI doesn't get split by line wrapping.
+	progressLine := ProgressStyle.Render(wrap(progress, width))
 	if cur.ListStatus != "" {
-		progress += "  —  " + ui.MALListStatusShort(cur.ListStatus)
+		if badge := ui.ColoredStatus(cur.ListStatus); badge != "" {
+			progressLine += "  " + badge
+		}
 	} else if cur.WatchedEps > 0 {
-		progress += "  ·  Watching"
+		progressLine += "  ·  Watching"
 	}
-	lines = append(lines, ProgressStyle.Render(wrap(progress, width)))
+	lines = append(lines, progressLine)
 
 	if cur.MeanScore > 0 {
 		s := fmt.Sprintf("★ %.2f", cur.MeanScore)

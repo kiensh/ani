@@ -8,25 +8,40 @@ import (
 
 	"ani/internal/animetosho"
 	"ani/internal/mal"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
-// RenderMALLine renders the one-line summary used by the anime picker.
+// RenderMALLine renders the one-line label used by the anime picker list. With a
+// preview pane showing the details, the list line is just the title.
 func RenderMALLine(m mal.Item) string {
-	var b strings.Builder
-	b.WriteString(Truncate(m.Title, 40))
+	return Truncate(m.Title, 40)
+}
+
+// FormatProgress builds the "ep …" progress string for an anime.
+//   - airing: always three numbers — "ep watched/aired/total", with "?" for an
+//     unknown aired count (no Jikan data) or unknown total. e.g. "0/4/12",
+//     "0/?/12", "0/4/?", "0/?" "?".
+//   - not airing: "ep watched/total" (or "watched/?"); "" when nothing is known.
+func FormatProgress(watched, total, aired int, airing bool) string {
+	if airing {
+		a := "?"
+		if aired > 0 {
+			a = strconv.Itoa(aired)
+		}
+		t := "?"
+		if total > 0 {
+			t = strconv.Itoa(total)
+		}
+		return fmt.Sprintf("ep %d/%s/%s", watched, a, t)
+	}
 	switch {
-	case m.TotalEps > 0:
-		fmt.Fprintf(&b, "  ep %d/%d", m.WatchedEps, m.TotalEps)
-	case m.WatchedEps > 0:
-		fmt.Fprintf(&b, "  ep %d/?", m.WatchedEps)
+	case total > 0:
+		return fmt.Sprintf("ep %d/%d", watched, total)
+	case watched > 0:
+		return fmt.Sprintf("ep %d/?", watched)
 	}
-	if a := MALAirShort(m.AirStatus); a != "" {
-		fmt.Fprintf(&b, "  [%s]", a)
-	}
-	if m.Score > 0 {
-		fmt.Fprintf(&b, "  ★%d", m.Score)
-	}
-	return b.String()
+	return ""
 }
 
 // MALListStatusShort turns a MAL status code into a display label.
@@ -44,6 +59,48 @@ func MALListStatusShort(s string) string {
 		return "Plan to Watch"
 	}
 	return mal.TitleCase(s)
+}
+
+// statusBadgeStyle returns a background+foreground lipgloss style per MAL list
+// status (watching=green, completed=blue, on_hold=orange, dropped=red,
+// plan_to_watch=gray). Zero style for unknown/empty.
+func statusBadgeStyle(s string) lipgloss.Style {
+	switch s {
+	case "watching":
+		return lipgloss.NewStyle().Background(lipgloss.Color("46")).Foreground(lipgloss.Color("0")).Bold(true)
+	case "completed":
+		return lipgloss.NewStyle().Background(lipgloss.Color("27")).Foreground(lipgloss.Color("15")).Bold(true)
+	case "on_hold":
+		return lipgloss.NewStyle().Background(lipgloss.Color("208")).Foreground(lipgloss.Color("0")).Bold(true)
+	case "dropped":
+		return lipgloss.NewStyle().Background(lipgloss.Color("124")).Foreground(lipgloss.Color("15")).Bold(true)
+	case "plan_to_watch":
+		return lipgloss.NewStyle().Background(lipgloss.Color("240")).Foreground(lipgloss.Color("15")).Bold(true)
+	}
+	return lipgloss.NewStyle()
+}
+
+// hasStatusColor reports whether status is one of the five with a badge color.
+func hasStatusColor(s string) bool {
+	switch s {
+	case "watching", "completed", "on_hold", "dropped", "plan_to_watch":
+		return true
+	}
+	return false
+}
+
+// ColoredStatus renders the status label as a colored badge (background +
+// foreground per status). Returns "" for an empty status; for an unknown status
+// it returns the plain label.
+func ColoredStatus(status string) string {
+	label := MALListStatusShort(status)
+	if status == "" || label == "" {
+		return ""
+	}
+	if !hasStatusColor(status) {
+		return label
+	}
+	return statusBadgeStyle(status).Render(" " + label + " ")
 }
 
 // MALAirShort shortens a MAL airing status.
@@ -166,21 +223,18 @@ func cprint(color, text string, width int) {
 }
 
 // MALItemHeader renders the progress/status header shown above the release list.
-func MALItemHeader(item *mal.Item) string {
+// aired is the latest aired episode (0 if unknown) for the "watched/aired/total"
+// form on airing anime.
+func MALItemHeader(item *mal.Item, aired int) string {
 	if item == nil {
 		return ""
 	}
-	s := ""
-	if item.TotalEps > 0 {
-		s = fmt.Sprintf("ep %d/%d", item.WatchedEps, item.TotalEps)
-	} else if item.WatchedEps > 0 {
-		s = fmt.Sprintf("ep %d/?", item.WatchedEps)
-	}
-	if ls := MALListStatusShort(item.ListStatus); ls != "" {
+	s := FormatProgress(item.WatchedEps, item.TotalEps, aired, item.AirStatus == "currently_airing")
+	if badge := ColoredStatus(item.ListStatus); badge != "" {
 		if s != "" {
 			s += "  —  "
 		}
-		s += ls
+		s += badge
 	} else if item.WatchedEps > 0 {
 		if s != "" {
 			s += "  —  "

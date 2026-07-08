@@ -22,6 +22,20 @@ func upMsg() tea.KeyMsg    { return tea.KeyMsg{Type: tea.KeyUp} }
 func enterMsg() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyEnter} }
 func escMsg() tea.KeyMsg   { return tea.KeyMsg{Type: tea.KeyEscape} }
 func tabMsg() tea.KeyMsg   { return tea.KeyMsg{Type: tea.KeyTab} }
+func spaceMsg() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeySpace} }
+
+// overlaySelect positions the active anime overlay's cursor on the given label
+// (robust to the menu's filtering/ordering).
+func overlaySelect(t *testing.T, m *animePicker, label string) {
+	t.Helper()
+	for i, it := range m.overlay.items {
+		if it == label {
+			m.overlay.cursor = i
+			return
+		}
+	}
+	t.Fatalf("overlay item %q not found in %v", label, m.overlay.items)
+}
 
 // fetchAll returns a fetch func that always returns the given releases
 // regardless of episode — lets tests inject a fixed release set.
@@ -73,7 +87,7 @@ func TestAnimePickerRender(t *testing.T) {
 		{MalID: 1, Title: "Frieren: Beyond Journey's End", TotalEps: 28, WatchedEps: 3, MeanScore: 9.3, Genres: "Adventure", CoverURL: ""},
 		{MalID: 2, Title: "Re:Zero", TotalEps: 25, WatchedEps: 25, CoverURL: ""},
 	}
-	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), false)
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, false)
 	loadAnime(m, items)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
@@ -96,7 +110,7 @@ func TestAnimePickerRender(t *testing.T) {
 
 func TestAnimePickerSearchHeader(t *testing.T) {
 	items := []mal.Item{{MalID: 1, Title: "Re:Zero"}}
-	m := newAnimePicker(SourceSeason, "rezero", animeLoadAll(items), false)
+	m := newAnimePicker(SourceSeason, "rezero", animeLoadAll(items), nil, nil, false)
 	loadAnime(m, items)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	out := m.View()
@@ -113,7 +127,8 @@ func TestAnimePickerFilterNav(t *testing.T) {
 		{MalID: 2, Title: "Beta"},
 		{MalID: 3, Title: "Gamma"},
 	}
-	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), false)
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, false)
+	m.filter.Status = "All" // this test exercises fuzzy, not the status filter
 	loadAnime(m, items)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 
@@ -133,7 +148,8 @@ func TestAnimePickerFilterNav(t *testing.T) {
 // TestAnimePickerRemoveG verifies g/G are no-ops (not top/bottom jumps).
 func TestAnimePickerRemoveG(t *testing.T) {
 	items := []mal.Item{{MalID: 1, Title: "A"}, {MalID: 2, Title: "B"}, {MalID: 3, Title: "C"}}
-	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), false)
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, false)
+	m.filter.Status = "All" // navigation test, not status
 	loadAnime(m, items)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 
@@ -156,19 +172,16 @@ func TestAnimePickerStatusFilter(t *testing.T) {
 		{MalID: 2, Title: "Beta", ListStatus: "completed"},
 		{MalID: 3, Title: "Gamma", ListStatus: "completed"},
 	}
-	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), false)
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, false)
 	loadAnime(m, items)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 
-	// 't' opens the 8-item status overlay: All, Not in My List, My List,
-	// Watching, Completed, … → Completed is index 4.
+	// 't' opens the 8-item status overlay (cursor on the current "My List").
 	m.Update(keyMsg('t'))
 	if !m.overlay.active() || m.overlay.kind != animeOverlayStatus {
 		t.Fatalf("t did not open status overlay")
 	}
-	for i := 0; i < 4; i++ {
-		m.Update(downMsg())
-	}
+	overlaySelect(t, m, "Completed")
 	m.Update(enterMsg())
 	if m.filter.Status != "Completed" {
 		t.Errorf("Status = %q, want Completed", m.filter.Status)
@@ -211,7 +224,7 @@ func TestStatusFilterPredicates(t *testing.T) {
 // Score applies it (no longer a cycle).
 func TestAnimePickerSortOverlay(t *testing.T) {
 	items := []mal.Item{{MalID: 1, Title: "A"}}
-	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), false)
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, false)
 	loadAnime(m, items)
 	if m.filter.Sort != "popularity" {
 		t.Fatalf("default sort = %q, want popularity", m.filter.Sort)
@@ -235,15 +248,15 @@ func TestAnimePickerSortOverlay(t *testing.T) {
 // TestAnimePickerStatusOptionsBySource verifies My List offers 6 status options
 // (no Not in My List / My List) while Season and Search offer 8.
 func TestAnimePickerStatusOptionsBySource(t *testing.T) {
-	listM := newAnimePicker(SourceList, "", animeLoadAll([]mal.Item{{}}), false)
+	listM := newAnimePicker(SourceList, "", animeLoadAll([]mal.Item{{}}), nil, nil, false)
 	if n := len(listM.statusOptions()); n != 6 {
 		t.Errorf("My List status options = %d, want 6", n)
 	}
-	seasonM := newAnimePicker(SourceSeason, "", animeLoadAll([]mal.Item{{}}), false)
+	seasonM := newAnimePicker(SourceSeason, "", animeLoadAll([]mal.Item{{}}), nil, nil, false)
 	if n := len(seasonM.statusOptions()); n != 8 {
 		t.Errorf("Season status options = %d, want 8", n)
 	}
-	searchM := newAnimePicker(SourceSeason, "x", animeLoadAll([]mal.Item{{}}), false)
+	searchM := newAnimePicker(SourceSeason, "x", animeLoadAll([]mal.Item{{}}), nil, nil, false)
 	if n := len(searchM.statusOptions()); n != 8 {
 		t.Errorf("Search status options = %d, want 8", n)
 	}
@@ -253,7 +266,7 @@ func TestAnimePickerStatusOptionsBySource(t *testing.T) {
 // (season filter is forced to All there).
 func TestAnimePickerSeasonDisabledInMyList(t *testing.T) {
 	items := []mal.Item{{MalID: 1, Title: "A"}}
-	m := newAnimePicker(SourceList, "", animeLoadAll(items), false)
+	m := newAnimePicker(SourceList, "", animeLoadAll(items), nil, nil, false)
 	loadAnime(m, items)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	m.Update(keyMsg('e'))
@@ -268,7 +281,7 @@ func TestAnimePickerSeasonDisabledInMyList(t *testing.T) {
 // TestAnimePickerTabToggle verifies Tab flips Season ↔ My List and reloads.
 func TestAnimePickerTabToggle(t *testing.T) {
 	items := []mal.Item{{MalID: 1, Title: "A"}}
-	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), false)
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, false)
 	loadAnime(m, items)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 
@@ -297,7 +310,7 @@ func TestSeasonSourceSwitch(t *testing.T) {
 		seasons = append(seasons, season)
 		return items
 	}
-	m := newAnimePicker(SourceSeason, "", load, false)
+	m := newAnimePicker(SourceSeason, "", load, nil, nil, false)
 	loadAnime(m, items)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 
@@ -349,13 +362,218 @@ func TestAnimePickerListFixedHeight(t *testing.T) {
 	for i := range items {
 		items[i] = mal.Item{MalID: i + 1, Title: fmt.Sprintf("Anime %d", i+1)}
 	}
-	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), false)
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, false)
 	loadAnime(m, items)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	out := m.View()
 	lines := strings.Split(out, "\n")
 	if len(lines) > 20 {
 		t.Errorf("View rendered %d lines, want <= 20 (terminal height)", len(lines))
+	}
+}
+
+// TestAnimePickerSetStatus verifies Space → actions menu → confirm → apply: the
+// setter is called with the right StatusAction, the item updates, and Esc at the
+// confirm cancels.
+func TestAnimePickerSetStatus(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, Title: "Alpha", ListStatus: "watching", WatchedEps: 3},
+	}
+	var got StatusAction
+	var gotID, gotWatched int
+	apply := func(malID, watched int, act StatusAction) bool {
+		gotID, gotWatched, got = malID, watched, act
+		return true
+	}
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), apply, nil, false)
+	loadAnime(m, items)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+
+	// Space opens the actions menu. The item is "watching", so "Set Watching" is
+	// hidden; the first option is "Set Completed".
+	m.Update(spaceMsg())
+	if !m.overlay.active() || m.overlay.kind != animeOverlayActions {
+		t.Fatalf("Space did not open actions menu")
+	}
+	if sliceContains(m.overlay.items, "Set Watching") {
+		t.Errorf("menu should hide the current-status option; got %v", m.overlay.items)
+	}
+	overlaySelect(t, m, "Set Completed")
+	m.Update(enterMsg())
+	if m.overlay.kind != animeOverlayConfirm {
+		t.Fatalf("Enter did not open confirm modal (kind=%v)", m.overlay.kind)
+	}
+	// 'y' applies via a background cmd; execute it and feed the result back.
+	_, cmd := m.Update(keyMsg('y'))
+	if cmd == nil {
+		t.Fatal("no apply cmd returned after confirm")
+	}
+	m.Update(cmd())
+	if got.Status != "completed" || got.Remove {
+		t.Errorf("applyStatus got = %+v, want completed", got)
+	}
+	if gotID != 1 || gotWatched != 3 {
+		t.Errorf("applyStatus got malID=%d watched=%d, want 1/3", gotID, gotWatched)
+	}
+	if m.overlay.active() {
+		t.Errorf("overlay still active after apply")
+	}
+	if m.items[0].ListStatus != "completed" {
+		t.Errorf("item ListStatus = %q, want completed", m.items[0].ListStatus)
+	}
+}
+
+// TestAnimePickerSetStatusEscCancels verifies Esc at the confirm modal does not
+// apply the action.
+func TestAnimePickerSetStatusEscCancels(t *testing.T) {
+	items := []mal.Item{{MalID: 1, Title: "Alpha", ListStatus: "watching"}}
+	called := false
+	apply := func(int, int, StatusAction) bool { called = true; return true }
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), apply, nil, false)
+	loadAnime(m, items)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+
+	m.Update(spaceMsg())
+	overlaySelect(t, m, "Set Completed")
+	m.Update(enterMsg()) // → confirm
+	m.Update(escMsg())
+	if called {
+		t.Errorf("applyStatus was called after Esc at confirm")
+	}
+	if m.overlay.active() {
+		t.Errorf("overlay still active after Esc")
+	}
+	if m.items[0].ListStatus != "watching" {
+		t.Errorf("ListStatus changed after cancelled action: %q", m.items[0].ListStatus)
+	}
+}
+
+// TestAnimePickerRemoveFromList verifies Remove: in My List the item is dropped;
+// in Season its ListStatus clears.
+func TestAnimePickerRemoveFromList(t *testing.T) {
+	apply := func(int, int, StatusAction) bool { return true }
+
+	// My List source: item is dropped from the cached set.
+	listItems := []mal.Item{{MalID: 1, Title: "Alpha", ListStatus: "watching"}}
+	lm := newAnimePicker(SourceList, "", animeLoadAll(listItems), apply, nil, false)
+	loadAnime(lm, listItems)
+	lm.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	lm.Update(spaceMsg())
+	overlaySelect(t, lm, "Remove from My List")
+	lm.Update(enterMsg())
+	_, cmd := lm.Update(keyMsg('y'))
+	if cmd != nil {
+		lm.Update(cmd())
+	}
+	if len(lm.items) != 0 {
+		t.Errorf("My List: items len = %d after remove, want 0", len(lm.items))
+	}
+
+	// Season source: ListStatus clears (item stays, now Not in My List).
+	seasonItems := []mal.Item{{MalID: 1, Title: "Alpha", ListStatus: "watching"}}
+	sm := newAnimePicker(SourceSeason, "", animeLoadAll(seasonItems), apply, nil, false)
+	loadAnime(sm, seasonItems)
+	sm.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	sm.Update(spaceMsg())
+	overlaySelect(t, sm, "Remove from My List")
+	sm.Update(enterMsg())
+	_, scmd := sm.Update(keyMsg('y'))
+	if scmd != nil {
+		sm.Update(scmd())
+	}
+	if len(sm.items) != 1 {
+		t.Errorf("Season: items len = %d after remove, want 1 (cleared, not dropped)", len(sm.items))
+	}
+	if sm.items[0].ListStatus != "" {
+		t.Errorf("Season: ListStatus = %q after remove, want empty", sm.items[0].ListStatus)
+	}
+}
+
+// TestAnimePickerActionsNoMalID verifies Space is a no-op without a MAL id
+// (AnimeTosho fallback items) or without an injected writer.
+func TestAnimePickerActionsNoMalID(t *testing.T) {
+	apply := func(int, int, StatusAction) bool { return true }
+
+	// MalID == 0 → no menu.
+	noID := []mal.Item{{MalID: 0, Title: "Animetosho hit"}}
+	m := newAnimePicker(SourceSeason, "x", animeLoadAll(noID), apply, nil, false)
+	loadAnime(m, noID)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m.Update(spaceMsg())
+	if m.overlay.active() {
+		t.Errorf("Space opened actions menu for an item with MalID==0")
+	}
+
+	// nil applyStatus → no menu even with a MAL id.
+	hasID := []mal.Item{{MalID: 5, Title: "MAL hit"}}
+	m2 := newAnimePicker(SourceSeason, "", animeLoadAll(hasID), nil, nil, false)
+	loadAnime(m2, hasID)
+	m2.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m2.Update(spaceMsg())
+	if m2.overlay.active() {
+		t.Errorf("Space opened actions menu with nil applyStatus")
+	}
+}
+
+// TestActionLabelsFor verifies the actions menu drops the current-status option
+// and hides Remove for items not on the list.
+func TestActionLabelsFor(t *testing.T) {
+	watching := actionLabelsFor("watching")
+	if sliceContains(watching, "Set Watching") {
+		t.Errorf("watching item should hide 'Set Watching': %v", watching)
+	}
+	if !sliceContains(watching, "Remove from My List") {
+		t.Errorf("on-list item should offer Remove: %v", watching)
+	}
+
+	notOnList := actionLabelsFor("")
+	if sliceContains(notOnList, "Remove from My List") {
+		t.Errorf("item not on list should hide Remove: %v", notOnList)
+	}
+	if len(notOnList) != 5 {
+		t.Errorf("not-on-list menu = %d options, want 5 (all set statuses): %v", len(notOnList), notOnList)
+	}
+}
+
+// TestAnimePickerDefaultStatus verifies the status filter default is "My List"
+// for the Season source and "All" elsewhere.
+func TestAnimePickerDefaultStatus(t *testing.T) {
+	season := newAnimePicker(SourceSeason, "", animeLoadAll([]mal.Item{{}}), nil, nil, false)
+	if season.filter.Status != "My List" {
+		t.Errorf("Season default status = %q, want My List", season.filter.Status)
+	}
+	list := newAnimePicker(SourceList, "", animeLoadAll([]mal.Item{{}}), nil, nil, false)
+	if list.filter.Status != "All" {
+		t.Errorf("My List default status = %q, want All", list.filter.Status)
+	}
+	search := newAnimePicker(SourceSeason, "x", animeLoadAll([]mal.Item{{}}), nil, nil, false)
+	if search.filter.Status != "All" {
+		t.Errorf("Search default status = %q, want All", search.filter.Status)
+	}
+}
+
+// TestAnimePickerLatestEpisode verifies the focused airing anime's metadata shows
+// watched/aired/total once the latest-aired fetch resolves.
+func TestAnimePickerLatestEpisode(t *testing.T) {
+	items := []mal.Item{{MalID: 1, Title: "Airing A", TotalEps: 12, WatchedEps: 0, AirStatus: "currently_airing", ListStatus: "watching"}}
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, func(int) int { return 4 }, false)
+	loadAnime(m, items)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+
+	// Before the fetch resolves: plain watched/total.
+	if strings.Contains(m.View(), "ep 0/4/12") {
+		t.Fatalf("before fetch, should not show aired")
+	}
+	cmd := m.latestEpisodeCmd()
+	if cmd == nil {
+		t.Fatal("latestEpisodeCmd returned nil for an airing anime")
+	}
+	m.Update(cmd()) // latestEpMsg → cache m.aired[1]=4
+	if m.aired[1] != 4 {
+		t.Errorf("aired cache = %v, want {1:4}", m.aired)
+	}
+	if !strings.Contains(m.View(), "ep 0/4/12") {
+		t.Errorf("after fetch, metadata should show 'ep 0/4/12'")
 	}
 }
 
@@ -368,7 +586,7 @@ func TestReleasePickerRender(t *testing.T) {
 		mkRel("EMBER", "720p", 1, false),
 	}
 	item := &mal.Item{Title: "Frieren", TotalEps: 28, WatchedEps: 11}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
@@ -393,7 +611,7 @@ func TestReleasePickerDefaultFilters(t *testing.T) {
 		mkRel("d", "1080p", 4, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 10}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, false)
 	loadReleases(m, all)
 	if m.filter.Quality != "" {
 		t.Errorf("default quality = %q, want \"\" (all)", m.filter.Quality)
@@ -408,7 +626,7 @@ func TestReleasePickerDefaultEpisodeFinished(t *testing.T) {
 		mkRel("a", "1080p", 12, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 12}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, false)
 	loadReleases(m, all)
 	if m.filter.Episode != 0 {
 		t.Errorf("default episode (finished) = %d, want 0", m.filter.Episode)
@@ -420,7 +638,7 @@ func TestReleasePickerDefaultEpisodeFinished(t *testing.T) {
 func TestReleasePickerEpisodeDisabled(t *testing.T) {
 	all := []*animetosho.Release{mkRel("a", "1080p", 5, false)}
 	item := &mal.Item{Title: "Latest uploads"}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), true, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), true, nil, nil, false)
 	if m.filter.Episode != 0 {
 		t.Errorf("disabled default episode = %d, want 0", m.filter.Episode)
 	}
@@ -438,7 +656,7 @@ func TestReleasePickerOverlayGroup(t *testing.T) {
 		mkRel("SubsPlease", "1080p", 2, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
@@ -466,7 +684,7 @@ func TestReleasePickerOverlayQuality(t *testing.T) {
 		mkRel("b", "720p", 2, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
@@ -487,7 +705,7 @@ func TestReleasePickerOverlayEpisodeEnter(t *testing.T) {
 		mkRel("c", "1080p", 5, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, false)
 	loadReleases(m, all)
 	m.filter.Episode = 0
 	m.applyFilter()
@@ -510,7 +728,7 @@ func TestReleasePickerOverlayEpisodeEscCancels(t *testing.T) {
 		mkRel("a", "1080p", 6, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 5}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, false)
 	loadReleases(m, all)
 	if m.filter.Episode != 6 {
 		t.Fatalf("setup: default episode = %d, want 6", m.filter.Episode)
@@ -530,7 +748,7 @@ func TestReleasePickerSortOverlay(t *testing.T) {
 		mkRel("a", "1080p", 1, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
@@ -556,7 +774,7 @@ func TestReleasePickerEnterPlaysDDownloads(t *testing.T) {
 		mkRel("a", "1080p", 1, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
@@ -566,7 +784,7 @@ func TestReleasePickerEnterPlaysDDownloads(t *testing.T) {
 	}
 
 	// Fresh picker for the 'd' case.
-	m = newReleasePicker(item, "", "", "newest", fetchAll(all), false, false)
+	m = newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.Update(keyMsg('d'))
@@ -575,10 +793,50 @@ func TestReleasePickerEnterPlaysDDownloads(t *testing.T) {
 	}
 }
 
+// TestReleasePickerActionsMenu verifies Space → Play/Download/Copy Magnet menu.
+func TestReleasePickerActionsMenu(t *testing.T) {
+	all := []*animetosho.Release{mkRel("a", "1080p", 1, false)}
+	all[0].Entry.Magnet = "magnet:?xt=urn:btih:FAKE"
+	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
+
+	var copied string
+	copyFn := func(s string) error { copied = s; return nil }
+
+	// Play via the menu quits with action "play".
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, copyFn, nil, false)
+	loadReleases(m, all)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m.Update(spaceMsg())
+	if !m.overlay.active() || m.overlay.kind != overlayActions {
+		t.Fatalf("Space did not open actions menu")
+	}
+	m.Update(enterMsg()) // cursor on Play (index 0)
+	if m.result.Action != "play" || m.result.Release == nil {
+		t.Errorf("Play: Action=%q Release=%v, want play/<non-nil>", m.result.Action, m.result.Release)
+	}
+
+	// Copy Magnet via the menu: copies the magnet, sets a toast, does NOT select.
+	m2 := newReleasePicker(item, "", "", "newest", fetchAll(all), false, copyFn, nil, false)
+	loadReleases(m2, all)
+	m2.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m2.Update(spaceMsg())
+	m2.overlay.cursor = 2 // Copy Magnet URL
+	m2.Update(enterMsg())
+	if copied != "magnet:?xt=urn:btih:FAKE" {
+		t.Errorf("copyMagnet got %q, want the magnet", copied)
+	}
+	if m2.toast == "" {
+		t.Errorf("toast not set after copy")
+	}
+	if m2.result.Release != nil {
+		t.Errorf("Copy Magnet should not select a release")
+	}
+}
+
 func TestReleasePickerEscBack(t *testing.T) {
 	all := []*animetosho.Release{mkRel("a", "1080p", 1, false)}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.Update(escMsg())
@@ -590,7 +848,7 @@ func TestReleasePickerEscBack(t *testing.T) {
 func TestReleasePickerEscInOverlayCancels(t *testing.T) {
 	all := []*animetosho.Release{mkRel("a", "1080p", 1, false)}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.Update(keyMsg('g'))
