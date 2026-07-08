@@ -1,26 +1,18 @@
 package tui
 
 import (
+	"time"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// RunActionPrompt launches a small full-screen prompt asking the user to play
-// or download the selected release. Returns the chosen action ("play" or
-// "download"). The default (Enter) is play.
-func RunActionPrompt(releaseTitle string) (string, error) {
-	m := &actionPrompt{title: releaseTitle, result: "play"}
-	p := tea.NewProgram(m, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		return "", err
-	}
-	return m.result, nil
-}
-
-// RunCompletedPrompt launches a small full-screen prompt asking whether to mark
-// the anime completed on MAL. Returns true for yes (default).
+// RunCompletedPrompt launches a centered modal asking whether to mark the anime
+// completed on MAL. On "yes" it shows a green success flash for ~1.4s before
+// closing, so the result is impossible to miss (previously it was a stderr log
+// after the prompt exited). Returns true for yes.
 func RunCompletedPrompt(animeTitle string) (bool, error) {
-	m := &completedPrompt{title: animeTitle, result: true}
+	m := &completedPrompt{title: animeTitle, phase: phaseConfirm, result: false}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		return false, err
@@ -28,81 +20,76 @@ func RunCompletedPrompt(animeTitle string) (bool, error) {
 	return m.result, nil
 }
 
-// ---- action prompt ----
+// completed-prompt phases.
+type completedPhase int
 
-type actionPrompt struct {
-	title  string
-	result string
-}
+const (
+	phaseConfirm completedPhase = iota
+	phaseDone // green success flash; auto-closes after SuccessFlashHold
+)
 
-func (m *actionPrompt) Init() tea.Cmd { return nil }
-
-func (m *actionPrompt) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	k, ok := msg.(tea.KeyMsg)
-	if !ok {
-		return m, nil
-	}
-	switch k.String() {
-	case "p", "P":
-		m.result = "play"
-		return m, tea.Quit
-	case "d", "D":
-		m.result = "download"
-		return m, tea.Quit
-	case "enter":
-		m.result = "play" // default
-		return m, tea.Quit
-	case "ctrl+c", "q":
-		m.result = "play"
-		return m, tea.Quit
-	}
-	return m, nil
-}
-
-func (m *actionPrompt) View() string {
-	title := lipgloss.NewStyle().Bold(true).Foreground(colorTitle).Render("  Selected:")
-	subject := lipgloss.NewStyle().Faint(true).Render("  " + clip(m.title, 60))
-	opts := lipgloss.NewStyle().Render("\n  [p] play in mpv   [d] download via aria2c  (default p)")
-	hint := HelpStyle.Render("\n  press p or d, Enter to confirm")
-	return lipgloss.JoinVertical(lipgloss.Left, title, subject, opts, hint)
-}
-
-// ---- completed prompt ----
-
+// completedPrompt is a two-phase centered modal: confirm, then a green success
+// flash. result is the user's decision (yes/no); the success phase is only
+// reached on yes.
 type completedPrompt struct {
 	title  string
-	result bool // true = mark completed (default)
+	phase  completedPhase
+	result bool // true = mark completed
+
+	width, height int
 }
+
+// successTickMsg fires after the success flash has held long enough.
+type successTickMsg struct{}
 
 func (m *completedPrompt) Init() tea.Cmd { return nil }
 
 func (m *completedPrompt) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	k, ok := msg.(tea.KeyMsg)
-	if !ok {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
 		return m, nil
-	}
-	switch k.String() {
-	case "y", "Y":
-		m.result = true
+	case successTickMsg:
+		// Flash held long enough — close.
 		return m, tea.Quit
-	case "n", "N":
-		m.result = false
-		return m, tea.Quit
-	case "enter":
-		m.result = true // default Y
-		return m, tea.Quit
-	case "ctrl+c", "q":
-		m.result = true
-		return m, tea.Quit
+	case tea.KeyMsg:
+		if m.phase == phaseDone {
+			// Any key during the flash dismisses it immediately.
+			return m, tea.Quit
+		}
+		switch msg.String() {
+		case "y", "Y", "enter":
+			m.result = true
+			m.phase = phaseDone
+			return m, tea.Tick(SuccessFlashHold, func(time.Time) tea.Msg { return successTickMsg{} })
+		case "n", "N", "esc", "q", "ctrl+c":
+			// No / cancel: do NOT mark completed (cancel ≠ yes here).
+			m.result = false
+			return m, tea.Quit
+		}
 	}
 	return m, nil
 }
 
 func (m *completedPrompt) View() string {
+	if m.phase == phaseDone {
+		body := SuccessStyle.Render("✓ Marked \"" + clip(m.title, 48) + "\" completed on MAL")
+		return m.center(body)
+	}
 	question := lipgloss.NewStyle().Bold(true).Foreground(colorAccent).
-		Render("  Mark as completed on MAL?")
-	subject := lipgloss.NewStyle().Faint(true).Render("  " + clip(m.title, 60))
-	opts := lipgloss.NewStyle().Render("\n  [Y] yes   [n] no  (default Y)")
-	hint := HelpStyle.Render("\n  press y or n, Enter to confirm")
-	return lipgloss.JoinVertical(lipgloss.Left, question, subject, opts, hint)
+		Render("Mark as completed on MAL?")
+	subject := lipgloss.NewStyle().Faint(true).Render(clip(m.title, 48))
+	opts := lipgloss.NewStyle().Render("[Y] yes    [n] no  (Esc = no)")
+	body := ModalBorderStyle.Render(lipgloss.JoinVertical(lipgloss.Center,
+		question, "", subject, "", opts))
+	return m.center(body)
+}
+
+// center places a modal box in the middle of the terminal (best-effort when the
+// dimensions aren't known yet).
+func (m *completedPrompt) center(box string) string {
+	if m.width == 0 || m.height == 0 {
+		return lipgloss.NewStyle().MarginTop(2).Render(box)
+	}
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }

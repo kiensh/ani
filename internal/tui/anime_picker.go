@@ -2,7 +2,9 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -11,74 +13,374 @@ import (
 	"ani/internal/ui"
 )
 
-// AnimeMode selects which header the anime picker shows.
-type AnimeMode int
+// AnimeSource selects which MAL dataset the anime picker shows (browse only).
+// Search (query != "") is separate; the source is ignored there.
+type AnimeSource int
 
 const (
-	AnimeModeList   AnimeMode = iota // user's MAL list (no query)
-	AnimeModeSearch                  // MAL text search
+	SourceList   AnimeSource = iota // user's full cross-season list
+	SourceSeason                    // one season's lineup (or "Later" = upcoming)
 )
 
-// animePicker is the MAL anime selection screen. Left pane: scrollable list
-// (title, ep X/Y, status) inside a rounded border. Right pane: cover image
-// (kitten icat via /dev/tty, painted over a pure-blank region) above colored
-// metadata text. Supports `/` fuzzy filter, j/k + arrow navigation, Enter to
-// select, q to quit.
+func (s AnimeSource) String() string {
+	if s == SourceList {
+		return "My List"
+	}
+	return "Season"
+}
+
+// AnimeLoad returns the items for a (source, query, season) triple.
+//   - query != ""                      → MAL search results
+//   - SourceList                       → the user's full cross-season list
+//   - SourceSeason + season == "Later" → upcoming ranking
+//   - SourceSeason + season == label   → that season's lineup
 //
-// Cover images are pre-downloaded to temp files on load (CoverCache) so renders
-// read a local file — instant, no network delay, no blank flash on navigation.
+// The picker caches results so re-visits are instant.
+type AnimeLoad func(source AnimeSource, query, season string) []mal.Item
+
+// AnimeFilter holds the client-side status/sort + fuzzy state. (Season is a
+// top-level picker field: in Season it's the load key; in My List/search it's
+// forced to "All". So it isn't a client filter.)
+type AnimeFilter struct {
+	Status    string // status overlay label
+	Sort      string // popularity | score | title | updated | airdate
+	FuzzyText string
+	Filtering bool
+}
+
+// sortOption is one row of the sort overlay.
+type sortOption struct{ label, value string }
+
+var sortOptions = []sortOption{
+	{"Popularity", "popularity"},
+	{"Score", "score"},
+	{"Title", "title"},
+	{"Updated", "updated"},
+	{"Air Date", "airdate"},
+}
+
+func sortLabel(value string) string {
+	for _, o := range sortOptions {
+		if o.value == value {
+			return o.label
+		}
+	}
+	return value
+}
+
+func sortValue(label string) (string, bool) {
+	for _, o := range sortOptions {
+		if o.label == label {
+			return o.value, true
+		}
+	}
+	return "", false
+}
+
+// statusOptionsFull is the status overlay for sources that include un-added
+// anime (Season, Later, Search) — where "Not in My List" can match.
+var statusOptionsFull = []string{"All", "Not in My List", "My List", "Watching", "Completed", "On-Hold", "Plan to Watch", "Dropped"}
+
+// statusOptionsMyList is the status overlay for the My List source (your own
+// list has no un-added anime, so "Not in My List"/"My List" are dropped).
+var statusOptionsMyList = []string{"All", "Watching", "Completed", "On-Hold", "Plan to Watch", "Dropped"}
+
+// statusValue maps a list-status overlay label to the MAL ListStatus string it
+// matches (empty for the pseudo-statuses All / Not in My List / My List).
+func statusValue(label string) string {
+	switch label {
+	case "Watching":
+		return "watching"
+	case "Completed":
+		return "completed"
+	case "On-Hold":
+		return "on_hold"
+	case "Plan to Watch":
+		return "plan_to_watch"
+	case "Dropped":
+		return "dropped"
+	}
+	return ""
+}
+
+// statusKeeps reports whether an item with the given ListStatus is kept by the
+// selected status label.
+func statusKeeps(label, listStatus string) bool {
+	switch label {
+	case "", "All":
+		return true
+	case "Not in My List":
+		return listStatus == ""
+	case "My List":
+		return listStatus != ""
+	default:
+		return listStatus == statusValue(label)
+	}
+}
+
+// seasonRank orders seasons within a year (winter < spring < summer < fall).
+func seasonRank(s mal.Season) int {
+	switch s {
+	case mal.SeasonWinter:
+		return 0
+	case mal.SeasonSpring:
+		return 1
+	case mal.SeasonSummer:
+		return 2
+	case mal.SeasonFall:
+		return 3
+	}
+	return 0
+}
+
+// seasonNewer reports whether a is a later season than b (by label).
+func seasonNewer(a, b string) bool {
+	ay, as, ok := mal.ParseSeasonLabel(a)
+	if !ok {
+		return false
+	}
+	by, bs, ok := mal.ParseSeasonLabel(b)
+	if !ok {
+		return true
+	}
+	if ay != by {
+		return ay > by
+	}
+	return seasonRank(as) > seasonRank(bs)
+}
+
+// recentSeasonLabels is the offline fallback for the season overlay: the current
+// season plus `n-1` past seasons, newest-first (no fabricated future).
+func recentSeasonLabels(year int, season mal.Season, n int) []string {
+	order := []mal.Season{mal.SeasonWinter, mal.SeasonSpring, mal.SeasonSummer, mal.SeasonFall}
+	idx := 0
+	for i, s := range order {
+		if s == season {
+			idx = i
+			break
+		}
+	}
+	out := make([]string, 0, n)
+	cur, y := idx, year
+	for i := 0; i < n; i++ {
+		out = append(out, mal.ParseSeason(y, order[cur]))
+		cur--
+		if cur < 0 {
+			cur = 3
+			y--
+		}
+	}
+	return out
+}
+
+// sortAnimes returns a sorted copy of items by the given sort name.
+func sortAnimes(items []mal.Item, sortName string) []mal.Item {
+	out := make([]mal.Item, len(items))
+	copy(out, items)
+	switch sortName {
+	case "score":
+		sort.SliceStable(out, func(i, j int) bool { return out[i].MeanScore > out[j].MeanScore })
+	case "title":
+		sort.SliceStable(out, func(i, j int) bool {
+			return strings.ToLower(out[i].Title) < strings.ToLower(out[j].Title)
+		})
+	case "updated":
+		// Zero times (not on your list) sink to the bottom.
+		sort.SliceStable(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	case "airdate":
+		// StartDate is YYYY-MM-DD, so lexical = chronological; empty sinks.
+		sort.SliceStable(out, func(i, j int) bool { return out[i].StartDate > out[j].StartDate })
+	default: // popularity
+		sort.SliceStable(out, func(i, j int) bool { return out[i].Members > out[j].Members })
+	}
+	return out
+}
+
+// ---- anime overlay (status / season / sort) ----
+
+type animeOverlayKind int
+
+const (
+	animeOverlayNone animeOverlayKind = iota
+	animeOverlayStatus
+	animeOverlaySeason
+	animeOverlaySort
+)
+
+type animeOverlay struct {
+	kind   animeOverlayKind
+	items  []string
+	cursor int
+}
+
+func (o *animeOverlay) active() bool { return o.kind != animeOverlayNone }
+
+func (o *animeOverlay) open(kind animeOverlayKind, items []string, current string) {
+	o.kind = kind
+	o.items = items
+	o.cursor = 0
+	for i, it := range items {
+		if it == current {
+			o.cursor = i
+			break
+		}
+	}
+}
+
+func (o *animeOverlay) close() { o.kind = animeOverlayNone; o.items = nil; o.cursor = 0 }
+
+func (o *animeOverlay) move(delta int) {
+	n := len(o.items)
+	if n == 0 {
+		return
+	}
+	o.cursor = (o.cursor + delta) % n
+	if o.cursor < 0 {
+		o.cursor += n
+	}
+}
+
+func (o *animeOverlay) selected() string {
+	if o.cursor >= 0 && o.cursor < len(o.items) {
+		return o.items[o.cursor]
+	}
+	return ""
+}
+
+// String renders an animeOverlayKind as its overlay title.
+func (k animeOverlayKind) String() string {
+	switch k {
+	case animeOverlayStatus:
+		return "Status"
+	case animeOverlaySeason:
+		return "Season"
+	case animeOverlaySort:
+		return "Sort"
+	}
+	return ""
+}
+
+// ---- model ----
+
+// animePicker is the MAL anime selection screen. Two browse sources (Tab):
+// My List (the user's whole list, season filter disabled) and Season (browse one
+// season or "Later"/upcoming, where "Not in My List" works). Search is a
+// separate query-driven mode.
 type animePicker struct {
-	items    []mal.Item
-	mode     AnimeMode
-	query    string // for AnimeModeSearch header
-	filtered []int  // indices into items matching the fuzzy filter
-	cursor   int    // index into filtered
-	topItem  int    // first visible row in the list
-	debug    bool
+	items   []mal.Item // loaded (unfiltered) for the current (source, query, season)
+	view    []mal.Item // filtered + sorted display slice
+	source  AnimeSource
+	query   string // "" = browse, non-empty = search
+	season  string // "All" (My List/search) | "Later" | "Summer 2026"
+	load    AnimeLoad
+	cache   *animeCache
+	loading bool
+
+	// current real-world season (default + window anchor)
+	currentYear   int
+	currentSeason mal.Season
+	currentLabel  string
+
+	seasonArchive []string // lazily-fetched Jikan archive (nil until first use)
+
+	filter  AnimeFilter
+	overlay animeOverlay
+
+	cursor  int
+	topItem int
+	debug   bool
 
 	cover     *CoverCache
-	coverText string // unicode-placeholder text for the current item's cover
+	coverText string
 
 	width, height int
 
 	// Layout, recomputed on WindowSizeMsg. All in terminal cells.
-	listWidth  int // outer width of the LEFT pane (incl. border)
-	paneHeight int // height of both panes (= height - header - help)
-	previewCol int // column where the RIGHT pane (incl. its left border) starts
-	coverCol   int // column where the cover image is placed (inside right border)
-	coverRow   int // row where the cover image is placed (inside top border)
-	coverCols  int // cell width of the cover area (matches --place W)
-	coverRows  int // cell height of the cover area (matches --place H)
-
-	filterText string
-	filtering  bool
+	listWidth  int
+	paneHeight int
+	previewCol int
+	coverCol   int
+	coverRow   int
+	coverCols  int
+	coverRows  int
 
 	result *Result
 }
 
-func newAnimePicker(items []mal.Item, mode AnimeMode, query string, debug bool) *animePicker {
+// animeCache memoizes loaded items per (source, query, season).
+type animeCache struct {
+	mu sync.Mutex
+	m  map[string][]mal.Item
+}
+
+func (c *animeCache) get(key string) ([]mal.Item, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v, ok := c.m[key]
+	return v, ok
+}
+
+func (c *animeCache) put(key string, items []mal.Item) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.m[key] = items
+}
+
+func animeCacheKey(source AnimeSource, query, season string) string {
+	return fmt.Sprintf("%d|%s|%s", source, query, season)
+}
+
+func newAnimePicker(source AnimeSource, query string, load AnimeLoad, debug bool) *animePicker {
+	y, s, label := mal.CurrentSeason()
 	ap := &animePicker{
-		items:  items,
-		mode:   mode,
-		query:  query,
-		debug:  debug,
-		result: &Result{},
+		source:        source,
+		query:         query,
+		load:          load,
+		cache:         &animeCache{m: map[string][]mal.Item{}},
+		loading:       true,
+		currentYear:   y,
+		currentSeason: s,
+		currentLabel:  label,
+		filter:        AnimeFilter{Sort: "popularity", Status: "All"},
+		debug:         debug,
+		result:        &Result{},
 	}
-	ap.applyFilter()
+	ap.season = ap.defaultSeason()
 	return ap
 }
 
-func (m *animePicker) Init() tea.Cmd {
-	// Pre-download every cover to a temp file so on-screen renders are instant.
-	urls := make([]string, 0, len(m.items))
-	for _, it := range m.items {
-		if it.CoverURL != "" {
-			urls = append(urls, it.CoverURL)
-		}
+// defaultSeason is the season a source opens on: the current season for Season
+// (browse), "All" otherwise (My List / search).
+func (m *animePicker) defaultSeason() string {
+	if m.source == SourceSeason && m.query == "" {
+		return m.currentLabel
 	}
-	cmd, cache := NewCoverCache(urls)
-	m.cover = cache
-	return cmd
+	return mal.SeasonAll
+}
+
+func (m *animePicker) Init() tea.Cmd { return m.loadCmd(m.source, m.query, m.season) }
+
+// itemsLoadedMsg carries one (source, query, season) load's items; Update
+// discards stale results.
+type itemsLoadedMsg struct {
+	items  []mal.Item
+	source AnimeSource
+	query  string
+	season string
+}
+
+func (m *animePicker) loadCmd(source AnimeSource, query, season string) tea.Cmd {
+	load := m.load
+	cache := m.cache
+	return func() tea.Msg {
+		key := animeCacheKey(source, query, season)
+		if items, ok := cache.get(key); ok {
+			return itemsLoadedMsg{items: items, source: source, query: query, season: season}
+		}
+		items := load(source, query, season)
+		cache.put(key, items)
+		return itemsLoadedMsg{items: items, source: source, query: query, season: season}
+	}
 }
 
 func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -89,18 +391,21 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fixScroll()
 		return m, m.loadCoverCmd()
 
+	case itemsLoadedMsg:
+		return m.applyLoaded(msg)
+
 	case coverReadyMsg:
-		// All downloads finished — load the cover for the current item.
 		return m, m.loadCoverCmd()
 
 	case coverTextMsg:
-		// Placeholder text for the current cover arrived: store it so View()
-		// renders it (the image anchors to it; the old image auto-clears).
 		m.coverText = msg.text
 		return m, nil
 
 	case tea.KeyMsg:
-		if m.filtering {
+		if m.overlay.active() {
+			return m.handleOverlayKey(msg)
+		}
+		if m.filter.Filtering {
 			return m.handleFilterKey(msg)
 		}
 		return m.handleKey(msg)
@@ -108,13 +413,55 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// applyLoaded ingests a (source, query, season) load's items when it matches
+// what we currently want; stale loads are discarded.
+func (m *animePicker) applyLoaded(msg itemsLoadedMsg) (tea.Model, tea.Cmd) {
+	if msg.source != m.source || msg.query != m.query || msg.season != m.season {
+		return m, nil
+	}
+	m.items = msg.items
+	m.loading = false
+	m.cursor = 0
+	m.topItem = 0
+	m.applyFilter()
+	return m, m.rebuildCoverCmd()
+}
+
+// rebuildCoverCmd pre-downloads covers for the current item set.
+func (m *animePicker) rebuildCoverCmd() tea.Cmd {
+	urls := make([]string, 0, len(m.items))
+	for _, it := range m.items {
+		if it.CoverURL != "" {
+			urls = append(urls, it.CoverURL)
+		}
+	}
+	cmd, cache := NewCoverCache(urls)
+	m.cover = cache
+	m.coverText = ""
+	return cmd
+}
+
 func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "esc", "ctrl+c":
 		m.result.Quit = true
-		// quitCmd cleans the cover temp dir. The cover image auto-clears when
-		// the alt screen tears down (its placeholder chars vanish).
 		return m, tea.Batch(tea.Quit, m.quitCmd())
+	case "tab":
+		// Toggle My List ↔ Season (browse only; search is query-driven).
+		if m.query != "" {
+			return m, nil
+		}
+		if m.source == SourceList {
+			m.source = SourceSeason
+		} else {
+			m.source = SourceList
+		}
+		m.season = m.defaultSeason()
+		m.filter.Status = "All"
+		m.loading = true
+		m.cursor = 0
+		m.topItem = 0
+		return m, m.loadCmd(m.source, m.query, m.season)
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -122,54 +469,143 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.loadCoverCmd()
 		}
 	case "down", "j":
-		if m.cursor < len(m.filtered)-1 {
+		if m.cursor < len(m.view)-1 {
 			m.cursor++
 			m.fixScroll()
 			return m, m.loadCoverCmd()
 		}
+	case "t":
+		m.overlay.open(animeOverlayStatus, m.statusOptions(), m.filter.Status)
+		return m, nil
+	case "e":
+		// Season filter only applies to the Season source.
+		if m.query == "" && m.source == SourceSeason {
+			m.openSeasonOverlay()
+		}
+		return m, nil
+	case "s":
+		labels := make([]string, len(sortOptions))
+		for i, o := range sortOptions {
+			labels[i] = o.label
+		}
+		m.overlay.open(animeOverlaySort, labels, sortLabel(m.filter.Sort))
+		return m, nil
 	case "/":
-		m.filtering = true
-		m.filterText = ""
+		m.filter.Filtering = true
+		m.filter.FuzzyText = ""
 		return m, nil
 	case "enter":
-		if idx := m.selectedIndex(); idx >= 0 {
-			item := m.items[idx]
-			m.result.Anime = &item
+		if it := m.currentItemCopy(); it != nil {
+			m.result.Anime = it
 			return m, tea.Batch(tea.Quit, m.quitCmd())
 		}
 	}
 	return m, nil
 }
 
-// quitCmd cleans the cover temp dir. The cover image itself auto-clears when
-// the alt screen is torn down (its placeholder chars vanish), so no explicit
-// clear is needed.
-func (m *animePicker) quitCmd() tea.Cmd {
-	cache := m.cover
-	return func() tea.Msg {
-		if cache != nil {
-			cache.Cleanup()
-		}
-		return nil
+// statusOptions returns the status overlay list for the current source.
+func (m *animePicker) statusOptions() []string {
+	if m.query == "" && m.source == SourceList {
+		return statusOptionsMyList
 	}
+	return statusOptionsFull
+}
+
+// openSeasonOverlay builds the Season source's season list: "Later" + the Jikan
+// archive windowed to ~12 years (real future included).
+func (m *animePicker) openSeasonOverlay() {
+	items := []string{mal.SeasonLater}
+	items = append(items, m.seasonArchiveItems()...)
+	m.overlay.open(animeOverlaySeason, items, m.season)
+}
+
+// seasonArchiveItems returns the browse season list (sans the leading "Later"):
+// the Jikan archive windowed to the latest ~12 years (real future included),
+// falling back to a local current+past list if the archive can't be fetched.
+func (m *animePicker) seasonArchiveItems() []string {
+	if m.seasonArchive == nil {
+		m.seasonArchive = mal.SeasonArchive(m.debug)
+	}
+	arch := m.seasonArchive
+	if len(arch) == 0 {
+		return recentSeasonLabels(m.currentYear, m.currentSeason, 49)
+	}
+	minYear := m.currentYear - 12
+	out := make([]string, 0, len(arch))
+	for _, label := range arch {
+		if y, _, ok := mal.ParseSeasonLabel(label); ok && y >= minYear {
+			out = append(out, label)
+		}
+	}
+	return out
+}
+
+func (m *animePicker) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.overlay.close()
+		return m, nil
+	case "enter":
+		return m.applyOverlaySelection()
+	case "up", "k":
+		m.overlay.move(-1)
+	case "down", "j":
+		m.overlay.move(1)
+	case "home":
+		m.overlay.cursor = 0
+	case "end":
+		if n := len(m.overlay.items); n > 0 {
+			m.overlay.cursor = n - 1
+		}
+	}
+	return m, nil
+}
+
+// applyOverlaySelection applies the overlay's selection and closes it.
+func (m *animePicker) applyOverlaySelection() (tea.Model, tea.Cmd) {
+	sel := m.overlay.selected()
+	kind := m.overlay.kind
+	m.overlay.close()
+	switch kind {
+	case animeOverlayStatus:
+		if sel != "" {
+			m.filter.Status = sel
+		}
+		m.applyFilter()
+		return m, m.loadCoverCmd()
+	case animeOverlaySort:
+		if v, ok := sortValue(sel); ok {
+			m.filter.Sort = v
+		}
+		m.applyFilter()
+		return m, m.loadCoverCmd()
+	case animeOverlaySeason:
+		if sel == "" {
+			return m, nil
+		}
+		m.season = sel
+		m.loading = true
+		m.cursor = 0
+		m.topItem = 0
+		return m, m.loadCmd(m.source, m.query, m.season)
+	}
+	return m, nil
 }
 
 func (m *animePicker) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
-		// Esc exits filter mode but keeps the filter applied.
-		m.filtering = false
+		m.filter.Filtering = false
 		m.fixScroll()
 		return m, nil
 	case "enter":
-		m.filtering = false
+		m.filter.Filtering = false
 		m.applyFilter()
 		m.fixScroll()
-		if len(m.filtered) > 0 {
+		if len(m.view) > 0 {
 			m.cursor = 0
-			if idx := m.selectedIndex(); idx >= 0 {
-				item := m.items[idx]
-				m.result.Anime = &item
+			if it := m.currentItemCopy(); it != nil {
+				m.result.Anime = it
 				return m, tea.Batch(tea.Quit, m.quitCmd())
 			}
 		}
@@ -182,30 +618,31 @@ func (m *animePicker) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "down":
-		if m.cursor < len(m.filtered)-1 {
+		if m.cursor < len(m.view)-1 {
 			m.cursor++
 			m.fixScroll()
 			return m, m.loadCoverCmd()
 		}
 		return m, nil
 	case "backspace":
-		if len(m.filterText) > 0 {
-			r := []rune(m.filterText)
-			m.filterText = string(r[:len(r)-1])
+		if len(m.filter.FuzzyText) > 0 {
+			r := []rune(m.filter.FuzzyText)
+			m.filter.FuzzyText = string(r[:len(r)-1])
 			m.applyFilter()
 			m.fixScroll()
 			return m, m.loadCoverCmd()
 		}
-		m.filtering = false
+		m.filter.Filtering = false
+		m.applyFilter()
 		return m, m.loadCoverCmd()
 	case " ", "tab":
-		m.filterText += " "
+		m.filter.FuzzyText += " "
 		m.applyFilter()
 		m.fixScroll()
 		return m, m.loadCoverCmd()
 	default:
 		if isPrintable(msg) {
-			m.filterText += msg.String()
+			m.filter.FuzzyText += msg.String()
 			m.applyFilter()
 			m.fixScroll()
 			return m, m.loadCoverCmd()
@@ -214,45 +651,59 @@ func (m *animePicker) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// applyFilter rebuilds m.filtered from the current filterText (substring,
-// case-insensitive). Empty filter shows everything; the cursor is clamped.
+// applyFilter recomputes m.view: status (always; options depend on source) →
+// fuzzy → sort, then clamps the cursor. Season is never a client filter (it's
+// either the Season load key or forced "All" in My List/search).
 func (m *animePicker) applyFilter() {
-	needle := strings.ToLower(m.filterText)
-	m.filtered = m.filtered[:0]
-	for i, it := range m.items {
-		if needle == "" || strings.Contains(strings.ToLower(it.Title), needle) {
-			m.filtered = append(m.filtered, i)
+	rs := m.items
+	if m.filter.Status != "" && m.filter.Status != "All" {
+		filtered := make([]mal.Item, 0, len(rs))
+		for _, it := range rs {
+			if statusKeeps(m.filter.Status, it.ListStatus) {
+				filtered = append(filtered, it)
+			}
 		}
+		rs = filtered
 	}
-	if m.cursor >= len(m.filtered) {
-		m.cursor = max(0, len(m.filtered)-1)
+	if m.filter.FuzzyText != "" {
+		needle := strings.ToLower(m.filter.FuzzyText)
+		filtered := make([]mal.Item, 0, len(rs))
+		for _, it := range rs {
+			if strings.Contains(strings.ToLower(it.Title), needle) {
+				filtered = append(filtered, it)
+			}
+		}
+		rs = filtered
 	}
+	m.view = sortAnimes(rs, m.filter.Sort)
+	if m.cursor >= len(m.view) {
+		m.cursor = max(0, len(m.view)-1)
+	}
+	m.fixScroll()
 }
 
-// selectedIndex maps the cursor (into filtered) back to an items index.
-func (m *animePicker) selectedIndex() int {
-	if m.cursor < 0 || m.cursor >= len(m.filtered) {
-		return -1
-	}
-	return m.filtered[m.cursor]
-}
-
-func (m *animePicker) currentItem() *mal.Item {
-	idx := m.selectedIndex()
-	if idx < 0 {
+func (m *animePicker) currentItemCopy() *mal.Item {
+	if m.cursor < 0 || m.cursor >= len(m.view) {
 		return nil
 	}
-	return &m.items[idx]
+	it := m.view[m.cursor]
+	return &it
 }
 
-// recomputeLayout sets the pane sizes and the cover/preview anchor cells from
-// the ACTUAL layout, so the kitten icat --place argument lines up exactly with
-// the blank cover area rendered by renderMetadata().
-//
-// Layout (top→bottom): header (1), panes (height-2), help (1).
-// Left pane ≈ 60% width (clamped 35–60); right pane gets the rest (min 25).
-// Both panes have a 1-cell border on every side and no inner padding, so the
-// cover area sits flush inside the right pane's border.
+// quitCmd cleans the cover temp dir. The cover image auto-clears when the alt
+// screen is torn down.
+func (m *animePicker) quitCmd() tea.Cmd {
+	cache := m.cover
+	return func() tea.Msg {
+		if cache != nil {
+			cache.Cleanup()
+		}
+		return nil
+	}
+}
+
+// recomputeLayout sets the pane sizes and the cover/preview anchor cells.
+// Layout (top→bottom): header (1), badges (1), panes (height-3), help (1).
 func (m *animePicker) recomputeLayout() {
 	w := m.width
 	h := m.height
@@ -268,30 +719,19 @@ func (m *animePicker) recomputeLayout() {
 		listW = max(10, w-25)
 	}
 	m.listWidth = listW
-	m.paneHeight = h - 2 // header (1) + help (1)
+	m.paneHeight = h - 3 // header (1) + badges (1) + help (1)
 	if m.paneHeight < 3 {
 		m.paneHeight = 3
 	}
 
-	// RIGHT pane starts where the LEFT pane ends (borders are shared via
-	// JoinHorizontal, so the right pane's left border sits at listWidth).
 	m.previewCol = listW
-	// Cover area lives INSIDE the right pane border: +1 col, +1 row (header)
-	// +1 row (right pane top border). No inner padding.
 	m.coverCol = m.previewCol + 1
-	m.coverRow = 1 /* header */ + 1 /* right pane top border */
+	m.coverRow = 2 /* header + badges */ + 1 /* right pane top border */
 
-	// Cover width = right pane content width (full width inside the borders).
-	// Cover width = right pane CONTENT width (previewWidth minus 2 borders).
-	// The blank cover lines must be exactly this wide to sit flush inside the
-	// border (no wrap/clip) and to match the --place width.
-	previewContentW := w - m.previewCol - 2 /* left+right border */
+	previewContentW := w - m.previewCol - 2
 	m.coverCols = clamp(previewContentW, 8, 40)
 
-	// Cover height = right pane content height (paneHeight minus its 2 border
-	// rows), capped to 14 so tall terminals leave room for metadata below it.
-	// Never exceed the content height, or metadata would overflow the border.
-	contentH := m.paneHeight - 2 /* right pane top+bottom border */
+	contentH := m.paneHeight - 2
 	if contentH < 1 {
 		contentH = 1
 	}
@@ -305,9 +745,6 @@ func (m *animePicker) recomputeLayout() {
 	m.coverRows = coverRows
 }
 
-// pageSize is the number of list rows that fit inside the LEFT pane (its
-// content height, minus title and border rows). The left pane renders a title
-// line at its top, so reserve 1 for the title.
 func (m *animePicker) pageSize() int {
 	if m.height == 0 {
 		return 20
@@ -319,34 +756,47 @@ func (m *animePicker) pageSize() int {
 	return ps
 }
 
-// fixScroll keeps the cursor within the visible window, scrolling topItem as
-// needed.
-func (m *animePicker) fixScroll() {
-	ps := m.pageSize()
-	if m.cursor < m.topItem {
-		m.topItem = m.cursor
+// scrollOff is the minimum number of context lines kept visible above and below
+// the cursor while scrolling a list pane (vim-style scrolloff).
+const scrollOff = 7
+
+// clampTop returns the topItem that keeps cursor visible in a page of pageSize
+// items (out of total), with at least scrollOff lines of context above and
+// below. scrollOff is capped to (pageSize-1)/2 for tiny windows, and topItem is
+// clamped to [0, total-pageSize] so the list never scrolls past its ends.
+func clampTop(cursor, topItem, pageSize, total int) int {
+	ps := pageSize
+	so := scrollOff
+	if 2*so+1 > ps {
+		so = (ps - 1) / 2
 	}
-	if m.cursor >= m.topItem+ps {
-		m.topItem = m.cursor - ps + 1
+	if so < 0 {
+		so = 0
 	}
-	if m.topItem < 0 {
-		m.topItem = 0
+	if cursor < topItem+so {
+		topItem = cursor - so
 	}
+	if cursor > topItem+ps-1-so {
+		topItem = cursor - (ps - 1) + so
+	}
+	if topItem < 0 {
+		topItem = 0
+	}
+	if maxTop := max(0, total-ps); topItem > maxTop {
+		topItem = maxTop
+	}
+	return topItem
 }
 
-// coverTextMsg carries the unicode-placeholder text for a cover (or "" when
-// there is no cover / it isn't cached yet). View() renders it; the image
-// anchors to it and clears automatically when the text changes.
+func (m *animePicker) fixScroll() {
+	m.topItem = clampTop(m.cursor, m.topItem, m.pageSize(), len(m.view))
+}
+
+// coverTextMsg carries the unicode-placeholder text for a cover.
 type coverTextMsg struct{ text string }
 
-// loadCoverCmd runs kitten for the current item's cached cover in unicode-
-// placeholder mode, writes the image upload to /dev/tty, and returns the
-// placeholder text. When the text changes on navigation, bubbletea's diff
-// drops the old placeholders and kitty clears the old image automatically — no
-// --clear, no coordinates. Returns "" if there's no cover or it isn't cached
-// yet (the next coverReadyMsg retries).
 func (m *animePicker) loadCoverCmd() tea.Cmd {
-	cur := m.currentItem()
+	cur := m.currentItemCopy()
 	if cur == nil || cur.CoverURL == "" || m.cover == nil {
 		return func() tea.Msg { return coverTextMsg{text: ""} }
 	}
@@ -365,17 +815,26 @@ func (m *animePicker) loadCoverCmd() tea.Cmd {
 	}
 }
 
-// headerText renders the 1-line header for the current mode.
+// sourceLabel returns the badge/header label for the active source.
+func (m *animePicker) sourceLabel() string {
+	if m.query != "" {
+		return "Search"
+	}
+	return m.source.String()
+}
+
 func (m *animePicker) headerText() string {
-	switch m.mode {
-	case AnimeModeSearch:
-		return HeaderStyle.Render(fmt.Sprintf("Search: %q — %d results", m.query, len(m.filtered)))
+	if m.query != "" {
+		return HeaderStyle.Render(fmt.Sprintf("Search: %q — %d results", m.query, len(m.view)))
+	}
+	switch m.source {
+	case SourceList:
+		return HeaderStyle.Render(fmt.Sprintf("My List — %d anime", len(m.view)))
 	default:
-		noun := "anime"
-		if len(m.filtered) == 1 {
-			noun = "anime"
+		if m.season == mal.SeasonLater {
+			return HeaderStyle.Render(fmt.Sprintf("Later — %d anime", len(m.view)))
 		}
-		return HeaderStyle.Render(fmt.Sprintf("Watching List — %d %s", len(m.filtered), noun))
+		return HeaderStyle.Render(fmt.Sprintf("%s — %d anime", m.season, len(m.view)))
 	}
 }
 
@@ -383,13 +842,27 @@ func (m *animePicker) View() string {
 	if m.width == 0 {
 		return "Loading anime…"
 	}
-
-	// ---- LEFT pane (list) ----
-	title := TitleStyle.Render("Anime") + FaintStyle.Render(fmt.Sprintf("  (%d)", len(m.filtered)))
-	if m.filtering {
-		title += "  " + FaintStyle.Render("filter: ") + m.filterText + "▏"
+	if m.loading {
+		label := m.season
+		if m.query != "" {
+			label = fmt.Sprintf("search %q", m.query)
+		} else if m.source == SourceList {
+			label = "my list"
+		}
+		return FaintStyle.Render(fmt.Sprintf("Loading %s…", label))
 	}
-	leftContent := title + "\n" + m.renderList()
+
+	// ---- LEFT pane (list / overlay) ----
+	var leftContent string
+	if m.overlay.active() {
+		leftContent = renderListOverlayContent(m.overlay.kind.String(), m.overlay.items, m.overlay.cursor, m.pageSize())
+	} else {
+		title := TitleStyle.Render("Anime") + FaintStyle.Render(fmt.Sprintf("  (%d)", len(m.view)))
+		if m.filter.Filtering {
+			title += "  " + FaintStyle.Render("filter: ") + m.filter.FuzzyText + "▏"
+		}
+		leftContent = title + "\n" + m.renderList()
+	}
 	leftPane := ListBorderStyle.
 		Width(m.listWidth).
 		Height(m.paneHeight - 2).
@@ -407,60 +880,62 @@ func (m *animePicker) View() string {
 		Render(rightContent)
 
 	header := m.headerText()
-	help := HelpStyle.Render("j/k nav  / filter  Enter select  q quit")
+	badges := m.renderBadges()
+	help := HelpStyle.Render("j/k nav  Tab source  t status  e season  s sort  / filter  Enter select  q quit")
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
-	return lipgloss.JoinVertical(lipgloss.Left, header, panes, help)
+	return lipgloss.JoinVertical(lipgloss.Left, header, badges, panes, help)
 }
 
-// renderList draws the visible slice of the filtered list with a cursor glyph.
-// Each line is rendered independently with a full style reset so the selected
-// highlight never leaks into adjacent rows. The selected row gets the full
-// "▶ " prefix + SelectedStyle; other rows are plain strings (no style), which
-// reset naturally.
+// renderBadges renders the source/status/season/sort badge line. The season
+// badge only shows for the Season source (it's forced "All" and hidden elsewhere).
+func (m *animePicker) renderBadges() string {
+	parts := []string{
+		conditionalBadge("source:"+m.sourceLabel(), true),
+		conditionalBadge("status:"+m.filter.Status, m.filter.Status != "All"),
+	}
+	if m.query == "" && m.source == SourceSeason {
+		parts = append(parts, conditionalBadge("season:"+m.season, true))
+	}
+	parts = append(parts, conditionalBadge("sort:"+sortLabel(m.filter.Sort), false))
+	return strings.Join(parts, " ")
+}
+
+// renderList draws exactly pageSize lines (the visible slice, padded with blanks)
+// so the left pane never grows past its box and the header stays pinned.
 func (m *animePicker) renderList() string {
 	ps := m.pageSize()
 	end := m.topItem + ps
-	if end > len(m.filtered) {
-		end = len(m.filtered)
+	if end > len(m.view) {
+		end = len(m.view)
 	}
-	// Content width inside the list border: -2 (left+right border) -2 (glyph).
 	avail := m.listWidth - 2 - len(CursorGlyph)
 	if avail < 4 {
 		avail = 4
 	}
-	var b strings.Builder
+	lines := make([]string, 0, ps)
 	for i := m.topItem; i < end; i++ {
-		idx := m.filtered[i]
-		text := clip(ui.RenderMALLine(m.items[idx]), avail)
-		var line string
+		text := clip(ui.RenderMALLine(m.view[i]), avail)
 		if i == m.cursor {
-			line = SelectedStyle.Render(CursorGlyph + text)
+			lines = append(lines, SelectedStyle.Render(CursorGlyph+text))
 		} else {
-			line = "  " + text
+			lines = append(lines, "  "+text)
 		}
-		b.WriteString(line)
-		b.WriteByte('\n')
 	}
-	return b.String()
+	for len(lines) < ps {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
-// renderMetadata builds the right pane content. The TOP region is the unicode-
-// placeholder text for the current cover (m.coverText): kitty anchors the image
-// to those chars wherever they're rendered, so there are no absolute
-// coordinates and the image clears automatically when the text changes. Below
-// it comes the colored metadata text.
+// renderMetadata builds the right pane content: cover placeholder region on top,
+// colored metadata below.
 func (m *animePicker) renderMetadata() string {
-	cur := m.currentItem()
+	cur := m.currentItemCopy()
 
 	lines := make([]string, 0, m.coverRows+8)
 	if m.coverText != "" {
-		// Unicode-placeholder text for the current cover. kitty anchors the
-		// image to these chars (rendered wherever this text lands), so there
-		// are no absolute coordinates and clearing is automatic when the text
-		// changes. Reset SGR after so the image-id color doesn't bleed.
 		lines = append(lines, strings.Split(m.coverText+"\x1b[0m", "\n")...)
 	} else {
-		// No cover yet (loading / none): blank area.
 		blank := strings.Repeat(" ", m.coverCols)
 		for i := 0; i < m.coverRows; i++ {
 			lines = append(lines, CoverBlankStyle.Render(blank))
@@ -468,19 +943,16 @@ func (m *animePicker) renderMetadata() string {
 	}
 
 	if cur == nil {
-		// Pad remaining pane height with blanks so the border is uniform.
 		return fitPaneHeight(strings.Join(padToHeight(lines, m.paneHeight-2), "\n"), m.paneHeight-2)
 	}
 
-	// Metadata content width = preview content width (matches cover width).
-	width := m.width - m.previewCol - 2 /* left+right border */
+	width := m.width - m.previewCol - 2
 	if width < 12 {
 		width = 12
 	}
 
 	lines = append(lines, TitleStyle.Render(wrap(cur.Title, width)))
 
-	// progress / status
 	progress := ""
 	switch {
 	case cur.TotalEps > 0:
@@ -498,7 +970,6 @@ func (m *animePicker) renderMetadata() string {
 	}
 	lines = append(lines, ProgressStyle.Render(wrap(progress, width)))
 
-	// score
 	if cur.MeanScore > 0 {
 		s := fmt.Sprintf("★ %.2f", cur.MeanScore)
 		if cur.Score > 0 {
@@ -530,7 +1001,7 @@ func (m *animePicker) renderMetadata() string {
 	}
 
 	if cur.Rank > 0 || cur.Members > 0 {
-		parts := []string{}
+		var parts []string
 		if cur.Rank > 0 {
 			parts = append(parts, fmt.Sprintf("Rank #%d", cur.Rank))
 		}
@@ -543,10 +1014,7 @@ func (m *animePicker) renderMetadata() string {
 	return fitPaneHeight(strings.Join(lines, "\n"), m.paneHeight-2)
 }
 
-// fitPaneHeight ensures the joined content occupies exactly maxLines rows: it
-// splits on newlines, truncates to maxLines (preserving the leading coverRows
-// blank lines so the cover --place region stays valid), and pads short content
-// with blanks. maxLines <= 0 returns s unchanged.
+// fitPaneHeight ensures the joined content occupies exactly maxLines rows.
 func fitPaneHeight(s string, maxLines int) string {
 	if maxLines <= 0 {
 		return s
@@ -561,9 +1029,6 @@ func fitPaneHeight(s string, maxLines int) string {
 	return strings.Join(lines, "\n")
 }
 
-// padToHeight appends blank lines (each width = the last line's width if
-// present, else 1) until the slice has target lines. Used so the right pane
-// fills its border height uniformly when there's no metadata to show.
 func padToHeight(lines []string, target int) []string {
 	for len(lines) < target {
 		lines = append(lines, "")
@@ -573,7 +1038,6 @@ func padToHeight(lines []string, target int) []string {
 
 // ---- small text helpers shared by the pickers ----
 
-// clip truncates s to n runes (no ellipsis; lipgloss clips per-style anyway).
 func clip(s string, n int) string {
 	if n <= 0 {
 		return ""
@@ -585,9 +1049,6 @@ func clip(s string, n int) string {
 	return string(r[:n])
 }
 
-// wrap breaks s into newline-separated pieces no wider than width runes,
-// preferring to break after a space. (Mirrors ui.WrapLine but returns a single
-// joined string.)
 func wrap(s string, width int) string {
 	if width <= 0 {
 		return s
@@ -595,7 +1056,6 @@ func wrap(s string, width int) string {
 	return ui.WrapLine(s, width)
 }
 
-// isPrintable reports whether a key event is a single printable rune.
 func isPrintable(msg tea.KeyMsg) bool {
 	s := msg.String()
 	if len(s) != 1 {
@@ -612,7 +1072,6 @@ func max(a, b int) int {
 	return b
 }
 
-// clamp limits v to the inclusive [lo, hi] range.
 func clamp(v, lo, hi int) int {
 	if v < lo {
 		return lo

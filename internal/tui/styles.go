@@ -1,6 +1,10 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"time"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 // Color palette — mirrors the ANSI codes used by the fzf preview panes
 // (internal/ui/preview.go) so the two UIs read as the same app.
@@ -22,6 +26,7 @@ var (
 	colorBadgeBg  = lipgloss.Color("220") // yellow
 	colorFaint    = lipgloss.Color("245") // grey
 	colorAccent   = lipgloss.Color("213") // magenta accent for headers
+	colorSuccess  = lipgloss.Color("41")  // green (completion success)
 )
 
 // TitleStyle styles the main title of a pane.
@@ -80,3 +85,23 @@ const CursorGlyph = "▶ "
 
 // CoverBlankStyle renders plain spaces for the cover area.
 var CoverBlankStyle = lipgloss.NewStyle()
+
+// ModalBorderStyle draws a rounded border for centered modal prompts
+// (e.g. the mark-completed confirmation).
+var ModalBorderStyle = lipgloss.NewStyle().
+	Border(lipgloss.RoundedBorder()).
+	BorderForeground(lipgloss.Color("240")).
+	Padding(1, 2)
+
+// SuccessStyle draws a green bordered box for success feedback
+// (e.g. the "marked completed" flash).
+var SuccessStyle = lipgloss.NewStyle().
+	Border(lipgloss.RoundedBorder()).
+	BorderForeground(colorSuccess).
+	Foreground(colorSuccess).
+	Bold(true).
+	Padding(1, 2)
+
+// SuccessFlashHold is how long the green success flash stays on screen before
+// auto-closing.
+const SuccessFlashHold = 1400 * time.Millisecond

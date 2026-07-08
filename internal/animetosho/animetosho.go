@@ -15,6 +15,7 @@ const (
 	toshoBase       = "https://feed.animetosho.xyz"
 	toshoSeriesPath = "/json/v1/series"
 	toshoAnidbPath  = "/json/v1/series/anidb/"
+	toshoSearchPath = "/json/v1/search"
 	pageLimit       = 100
 	searchRowCap    = 400
 	httpTimeout     = 30 * time.Second
@@ -91,6 +92,13 @@ type SeriesSummary struct {
 
 type seriesSearchResponse struct {
 	Data []SeriesSummary `json:"data"`
+}
+
+// searchResponse is the /json/v1/search payload: a flat list of releases. With
+// no `q` the feed returns the newest uploads site-wide (each carries its series
+// + episode), which powers the no-login `./ani` landing screen.
+type searchResponse struct {
+	Data []Entry `json:"data"`
 }
 
 type seriesDetailResponse struct {
@@ -221,4 +229,20 @@ func FetchReleases(aid, ep int) ([]*Release, error) {
 		}
 	}
 	return ToReleases(entries), nil
+}
+
+// LatestReleases returns the most recent uploads site-wide (the search feed with
+// no `q`). Each release carries its series + episode, so the list is playable
+// directly. Used for the no-login `./ani` landing screen.
+func LatestReleases(limit int) ([]*Release, error) {
+	if limit <= 0 {
+		limit = pageLimit
+	}
+	var resp searchResponse
+	if err := toshoGet(toshoSearchPath, url.Values{
+		"limit": {strconv.Itoa(limit)},
+	}, &resp); err != nil {
+		return nil, err
+	}
+	return ToReleases(resp.Data), nil
 }

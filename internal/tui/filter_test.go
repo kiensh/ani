@@ -150,15 +150,18 @@ func TestFilterApplyEpisode(t *testing.T) {
 	}
 }
 
-func TestFilterCycleSort(t *testing.T) {
-	f := Filter{}
-	seen := map[string]bool{}
-	for i := 0; i < len(sortCycle); i++ {
-		f.CycleSort()
-		seen[f.Sort] = true
+func TestReleaseSortOptions(t *testing.T) {
+	if v, ok := releaseSortValue("Oldest"); !ok || v != "oldest" {
+		t.Errorf("releaseSortValue(Oldest) = %q,%v want oldest,true", v, ok)
 	}
-	if len(seen) != len(sortCycle) {
-		t.Errorf("sort cycle visited %d unique values, want %d: %v", len(seen), len(sortCycle), seen)
+	if releaseSortLabel("smallest") != "Smallest" {
+		t.Errorf("releaseSortLabel(smallest) = %q, want Smallest", releaseSortLabel("smallest"))
+	}
+	if _, ok := releaseSortValue("Nope"); ok {
+		t.Errorf("releaseSortValue(Nope) = ok, want false")
+	}
+	if len(releaseSortOptions) != 4 {
+		t.Errorf("len(releaseSortOptions) = %d, want 4", len(releaseSortOptions))
 	}
 }
 

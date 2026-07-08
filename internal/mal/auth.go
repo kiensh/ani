@@ -79,6 +79,28 @@ var (
 	authDebug bool
 )
 
+// LoggedIn reports whether a usable MAL session exists WITHOUT triggering the
+// browser OAuth flow: environment credentials are present AND a token file with
+// a non-empty access token is on disk. Use this to choose between the MAL UI
+// and the AnimeTosho fallback so `./ani` never unexpectedly opens a browser.
+// (A statically-valid token may still fail to refresh later; that surfaces as a
+// normal MAL error at call time.)
+func LoggedIn() bool {
+	config.LoadDotenv()
+	if _, _, ok := malCreds(); !ok {
+		return false
+	}
+	data, err := os.ReadFile(malTokenPath())
+	if err != nil {
+		return false
+	}
+	var t oauth2.Token
+	if json.Unmarshal(data, &t) != nil {
+		return false
+	}
+	return t.AccessToken != ""
+}
+
 // Client returns the go-myanimelist client, authenticating once per process
 // (PKCE browser flow on first run, cached token afterwards). debug controls the
 // verbose PKCE/token-exchange logging on the initial auth.

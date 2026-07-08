@@ -1,11 +1,10 @@
-// Package tui is the bubbletea-based terminal UI for ani. It replaces fzf as
-// the default interface (the fzf UI remains available via --fzf).
+// Package tui is the bubbletea-based terminal UI for ani.
 //
 // The package exposes two entry points — RunAnimePicker and RunReleasePicker —
 // each of which drives one screen to completion and returns a Result. The
 // root model is a small state machine that sequences the screens:
 //
-//	anime picker → release picker → action prompt → (completed prompt)
+//	anime picker → release picker → (completed prompt)
 package tui
 
 import (
@@ -22,7 +21,7 @@ type Result struct {
 	Back      bool                // user wants to return to the previous screen
 	Anime     *mal.Item           // selected anime (anime picker)
 	Release   *animetosho.Release // selected release (release picker)
-	Action    string              // "play" or "download" (action prompt)
+	Action    string              // "play" or "download" (release picker: Enter / d)
 	Completed bool                // mark MAL completed (completed prompt)
 
 	// Filter preferences from the release picker (persisted across sessions).
@@ -31,15 +30,16 @@ type Result struct {
 	FilterSort    string
 }
 
-// RunAnimePicker launches the TUI for anime selection. Returns the selected
-// anime, or a Result with Quit=true when the user cancels. mode + query drive
-// the header line (list vs search). When debug is true, diagnostic info is
-// written to stderr (the TUI itself always runs normally).
-func RunAnimePicker(items []mal.Item, mode AnimeMode, query string, debug bool) (*Result, error) {
-	if len(items) == 0 {
+// RunAnimePicker launches the TUI for anime selection. source is the initial
+// browse source (SourceList / SourceSeason); query non-empty means search. The
+// picker loads its own data via load for the (source, query, season) triple,
+// caching each. Returns the selected anime, or a Result with Quit=true when the
+// user cancels.
+func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, debug bool) (*Result, error) {
+	if load == nil {
 		return &Result{Quit: true}, nil
 	}
-	m := newAnimePicker(items, mode, query, debug)
+	m := newAnimePicker(source, query, load, debug)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
 	if err != nil {
@@ -55,12 +55,13 @@ func RunAnimePicker(items []mal.Item, mode AnimeMode, query string, debug bool) 
 // anime info shown in the header; group/quality/sortName seed the initial
 // filter. fetch returns the releases for a given episode (cached + scoped by
 // the caller) and is invoked on demand: initially for the default episode, and
-// again whenever the user changes the episode filter.
-func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, debug bool) (*Result, error) {
+// again whenever the user changes the episode filter. disableEpisode suppresses
+// the episode filter (for the latest-uploads landing screen).
+func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode, debug bool) (*Result, error) {
 	if item == nil || fetch == nil {
 		return &Result{Quit: true}, nil
 	}
-	m := newReleasePicker(item, group, quality, sortName, fetch, debug)
+	m := newReleasePicker(item, group, quality, sortName, fetch, disableEpisode, debug)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
 	if err != nil {

@@ -34,6 +34,11 @@ type releasePicker struct {
 	fetch    func(int) []*animetosho.Release
 	fetching bool // a fetch is in flight; show "Loading…" in the list area
 
+	// episodeDisabled suppresses the episode filter (the 'e' overlay and the
+	// default-episode seed). Used for the latest-uploads landing screen, where
+	// the list spans many series and per-episode filtering is meaningless.
+	episodeDisabled bool
+
 	filter  Filter
 	overlay filterOverlay
 
@@ -46,19 +51,21 @@ type releasePicker struct {
 	result *Result
 }
 
-func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, debug bool) *releasePicker {
+func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode, debug bool) *releasePicker {
 	rp := &releasePicker{
-		item:     item,
-		debug:    debug,
-		fetch:    fetch,
-		fetching: true, // the initial episode fetch is kicked off by Init
-		result:   &Result{},
+		item:            item,
+		debug:           debug,
+		fetch:           fetch,
+		fetching:        true, // the initial episode fetch is kicked off by Init
+		episodeDisabled: disableEpisode,
+		result:          &Result{},
 	}
 	rp.filter.Group = group
 	rp.filter.Quality = quality
 	rp.filter.Sort = ui.NormalizeSort(sortName)
 	// Default filter: next-unwatched episode (quality left at "all" — no default).
-	if rp.filter.Episode == 0 && item != nil {
+	// Skipped when the episode filter is disabled (latest-uploads view).
+	if !disableEpisode && rp.filter.Episode == 0 && item != nil {
 		rp.filter.Episode = DefaultEpisode(item.WatchedEps, item.TotalEps)
 	}
 	return rp
@@ -172,18 +179,30 @@ func (m *releasePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.overlay.openQuality(m.qualities, m.filter.Quality)
 		return m, nil
 	case "e":
+		if m.episodeDisabled {
+			return m, nil // episode filter N/A for the latest-uploads view
+		}
 		m.overlay.openEpisode(m.filter.Episode)
 		return m, nil
 	case "s":
-		m.filter.CycleSort()
-		m.applyFilter()
+		m.overlay.openSort(m.filter.Sort)
+		return m, nil
 	case "/":
 		m.filter.Filtering = true
 		m.filter.FuzzyText = ""
 		return m, nil
 	case "enter":
+		// Enter plays immediately (no separate play/download prompt).
 		if cur := m.currentRelease(); cur != nil {
 			m.result.Release = cur
+			m.result.Action = "play"
+			return m, tea.Quit
+		}
+	case "d":
+		// d downloads immediately.
+		if cur := m.currentRelease(); cur != nil {
+			m.result.Release = cur
+			m.result.Action = "download"
 			return m, tea.Quit
 		}
 	}
@@ -252,6 +271,7 @@ func (m *releasePicker) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 			if cur := m.currentRelease(); cur != nil {
 				m.result.Release = cur
+				m.result.Action = "play"
 				return m, tea.Quit
 			}
 		}
@@ -337,16 +357,7 @@ func (m *releasePicker) pageSize() int {
 }
 
 func (m *releasePicker) fixScroll() {
-	ps := m.pageSize()
-	if m.cursor < m.topItem {
-		m.topItem = m.cursor
-	}
-	if m.cursor >= m.topItem+ps {
-		m.topItem = m.cursor - ps + 1
-	}
-	if m.topItem < 0 {
-		m.topItem = 0
-	}
+	m.topItem = clampTop(m.cursor, m.topItem, m.pageSize(), len(m.view))
 }
 
 func (m *releasePicker) View() string {
@@ -424,7 +435,7 @@ func (m *releasePicker) renderBadges() string {
 	return strings.Join(parts, " ")
 }
 
-const rpHelpText = "j/k nav  g group  r quality  e episode  s sort  / filter  Enter select  Esc back  q quit"
+const rpHelpText = "j/k nav  g group  r quality  e episode  s sort  / filter  Enter play  d download  Esc back  q quit"
 
 // renderList draws the visible slice of the filtered list with a cursor glyph.
 // Each line is rendered independently with a full style reset so the selected
@@ -493,14 +504,16 @@ func (m *releasePicker) renderPreview() string {
 }
 
 // renderOverlayContent renders the active overlay's inner content (no border —
-// the caller wraps it in the overlay box). Group/quality show a selectable list
-// with a ▶ marker; episode shows a text-input prompt.
+// the caller wraps it in the overlay box). Group/quality show a selectable,
+// scrolling list; episode shows a text-input prompt.
 func (m *releasePicker) renderOverlayContent() string {
 	switch m.overlay.kind {
 	case overlayGroup:
-		return renderListOverlayContent("Group", m.overlay.items, m.overlay.cursor)
+		return renderListOverlayContent("Group", m.overlay.items, m.overlay.cursor, max(1, m.pageSize()-1))
 	case overlayQuality:
-		return renderListOverlayContent("Quality", m.overlay.items, m.overlay.cursor)
+		return renderListOverlayContent("Quality", m.overlay.items, m.overlay.cursor, max(1, m.pageSize()-1))
+	case overlaySort:
+		return renderListOverlayContent("Sort", m.overlay.items, m.overlay.cursor, max(1, m.pageSize()-1))
 	case overlayEpisode:
 		title := TitleStyle.Render("Episode (blank = all, Esc cancel)")
 		input := SelectedStyle.Render("▶ " + m.overlay.text + "▏")
@@ -510,23 +523,45 @@ func (m *releasePicker) renderOverlayContent() string {
 }
 
 // renderListOverlayContent renders the inner content of a list overlay: a title
-// line, then one selectable line per item with the highlighted one prefixed by
-// ▶ and styled.
-func renderListOverlayContent(title string, items []string, cursor int) string {
-	var b strings.Builder
-	b.WriteString(TitleStyle.Render(title))
-	b.WriteByte('\n')
-	for i, it := range items {
-		if i == cursor {
-			b.WriteString(SelectedStyle.Render(CursorGlyph + it))
-		} else {
-			b.WriteString("  " + it)
+// line, then a windowed slice of items centered on the cursor so a long list
+// scrolls inside the pane instead of overflowing. maxItems is the available item
+// rows; ↑/↓ hints mark when more items exist off-screen.
+func renderListOverlayContent(title string, items []string, cursor, maxItems int) string {
+	n := len(items)
+	if n > 0 {
+		title = fmt.Sprintf("%s (%d)", title, n)
+	}
+	lines := []string{TitleStyle.Render(title)}
+
+	top, end := 0, n
+	if maxItems > 0 && n > maxItems {
+		avail := maxItems - 2 // reserve room for the ↑/↓ hint lines
+		if avail < 1 {
+			avail = 1
 		}
-		if i < len(items)-1 {
-			b.WriteByte('\n')
+		top = cursor - avail/2
+		if top < 0 {
+			top = 0
+		}
+		if top > n-avail {
+			top = n - avail
+		}
+		end = top + avail
+		if top > 0 {
+			lines = append(lines, FaintStyle.Render("  ↑ more"))
 		}
 	}
-	return b.String()
+	for i := top; i < end; i++ {
+		if i == cursor {
+			lines = append(lines, SelectedStyle.Render(CursorGlyph+items[i]))
+		} else {
+			lines = append(lines, "  "+items[i])
+		}
+	}
+	if end < n {
+		lines = append(lines, FaintStyle.Render("  ↓ more"))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // conditionalBadge renders active when on, otherwise dim.

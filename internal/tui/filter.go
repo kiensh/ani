@@ -19,19 +19,38 @@ type Filter struct {
 	Filtering bool   // true when in fuzzy filter input mode (after pressing /)
 }
 
-// sortCycle is the order s cycles through.
-var sortCycle = []string{"newest", "oldest", "smallest", "largest"}
+// releaseSortOptions is the release-picker sort overlay list (label → value).
+var releaseSortOptions = []struct{ label, value string }{
+	{"Newest", "newest"},
+	{"Oldest", "oldest"},
+	{"Smallest", "smallest"},
+	{"Largest", "largest"},
+}
 
-// CycleSort advances the sort order to the next value in the cycle.
-func (f *Filter) CycleSort() {
-	cur := 0
-	for i, s := range sortCycle {
-		if s == f.Sort {
-			cur = i
-			break
+func releaseSortLabels() []string {
+	out := make([]string, len(releaseSortOptions))
+	for i, o := range releaseSortOptions {
+		out[i] = o.label
+	}
+	return out
+}
+
+func releaseSortLabel(value string) string {
+	for _, o := range releaseSortOptions {
+		if o.value == value {
+			return o.label
 		}
 	}
-	f.Sort = sortCycle[(cur+1)%len(sortCycle)]
+	return value
+}
+
+func releaseSortValue(label string) (string, bool) {
+	for _, o := range releaseSortOptions {
+		if o.label == label {
+			return o.value, true
+		}
+	}
+	return "", false
 }
 
 // SetEpisode sets the episode filter (0 means all).
@@ -213,6 +232,7 @@ const (
 	overlayGroup
 	overlayQuality
 	overlayEpisode
+	overlaySort
 )
 
 // filterOverlay is a selectable pop-up used by the group/quality filters and a
@@ -299,9 +319,9 @@ func (o *filterOverlay) move(delta int) {
 	}
 }
 
-// selectedItem returns the highlighted item (for group/quality overlays).
+// selectedItem returns the highlighted item (for group/quality/sort overlays).
 func (o *filterOverlay) selectedItem() string {
-	if o.kind == overlayGroup || o.kind == overlayQuality {
+	if o.kind == overlayGroup || o.kind == overlayQuality || o.kind == overlaySort {
 		if o.cursor >= 0 && o.cursor < len(o.items) {
 			return o.items[o.cursor]
 		}
@@ -309,8 +329,25 @@ func (o *filterOverlay) selectedItem() string {
 	return ""
 }
 
+// openSort opens the sort overlay (Newest/Oldest/Smallest/Largest), cursor on
+// the current sort's label.
+func (o *filterOverlay) openSort(currentValue string) {
+	o.kind = overlaySort
+	o.items = releaseSortLabels()
+	o.text = ""
+	o.cursor = 0
+	cur := releaseSortLabel(currentValue)
+	for i, it := range o.items {
+		if it == cur {
+			o.cursor = i
+			break
+		}
+	}
+}
+
 // applySelected writes the overlay's selection back into the filter. For group
 // and quality, "All" maps to "". Episode parses the typed text (empty = all).
+// Sort maps the chosen label to its value.
 func (o *filterOverlay) applySelected(f *Filter) {
 	switch o.kind {
 	case overlayGroup:
@@ -330,6 +367,12 @@ func (o *filterOverlay) applySelected(f *Filter) {
 			f.Episode = 0
 		} else if n, err := strconv.Atoi(o.text); err == nil {
 			f.SetEpisode(n)
+		}
+	case overlaySort:
+		if s := o.selectedItem(); s != "" {
+			if v, ok := releaseSortValue(s); ok {
+				f.Sort = v
+			}
 		}
 	}
 }
