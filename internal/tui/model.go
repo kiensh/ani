@@ -33,14 +33,14 @@ type Result struct {
 // RunAnimePicker launches the TUI for anime selection. source is the initial
 // browse source (SourceList / SourceSeason); query non-empty means search. load
 // supplies items per (source, query, season); applyStatus applies a per-anime
-// set-status/remove action (nil disables the Space menu); latestEpisode backs
-// the "watched/aired/total" display for the focused airing anime (nil disables).
-// Returns the selected anime, or a Result with Quit=true when the user cancels.
-func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, latestEpisode func(int) int, debug bool) (*Result, error) {
+// set-status/remove action, applyScore sets the score (nil disables either);
+// latestEpisode backs the "watched/aired/total" display for the focused airing
+// anime (nil disables). Returns the selected anime, or Quit=true on cancel.
+func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(int) int, debug bool) (*Result, error) {
 	if load == nil {
 		return &Result{Quit: true}, nil
 	}
-	m := newAnimePicker(source, query, load, applyStatus, latestEpisode, debug)
+	m := newAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, debug)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
 	if err != nil {

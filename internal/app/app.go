@@ -108,7 +108,15 @@ func resolveMal(opt *Options) (int, *mal.Item, error) {
 		return err == nil && !opt.DryRun
 	}
 	latestEpisode := func(malID int) int { n, _ := mal.LatestEpisode(malID, opt.Debug); return n }
-	res, err := tui.RunAnimePicker(source, query, load, applyStatus, latestEpisode, opt.Debug)
+	applyScore := func(malID, score int) bool {
+		err := mal.SetScore(malID, score, opt.DryRun, opt.Debug)
+		return err == nil && !opt.DryRun
+	}
+	applyWatched := func(malID, watched int) bool {
+		err := mal.SetWatched(malID, watched, opt.DryRun, opt.Debug)
+		return err == nil && !opt.DryRun
+	}
+	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -159,7 +167,7 @@ func resolveAnimetosho(opt *Options) (int, *mal.Item, error) {
 		return 0, nil, fmt.Errorf("no anime found")
 	}
 	load := func(tui.AnimeSource, string, string) []mal.Item { return items }
-	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, opt.Debug)
+	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}

@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -130,29 +131,44 @@ type actionOption struct {
 	label   string
 	action  StatusAction
 	display string // human status name for the confirm text (empty for Remove)
+	score   bool   // opens the score picker instead of a status/remove action
 }
 
-// actionOptions is the actions menu, top to bottom. Set statuses first, Remove last.
+// actionOptions is the actions menu, top to bottom.
 var actionOptions = []actionOption{
-	{"Set Watching", StatusAction{Status: "watching"}, "Watching"},
-	{"Set Completed", StatusAction{Status: "completed"}, "Completed"},
-	{"Set On-Hold", StatusAction{Status: "on_hold"}, "On-Hold"},
-	{"Set Plan to Watch", StatusAction{Status: "plan_to_watch"}, "Plan to Watch"},
-	{"Set Dropped", StatusAction{Status: "dropped"}, "Dropped"},
-	{"Remove from My List", StatusAction{Remove: true}, ""},
+	{"Set Watching", StatusAction{Status: "watching"}, "Watching", false},
+	{"Set Completed", StatusAction{Status: "completed"}, "Completed", false},
+	{"Set On-Hold", StatusAction{Status: "on_hold"}, "On-Hold", false},
+	{"Set Plan to Watch", StatusAction{Status: "plan_to_watch"}, "Plan to Watch", false},
+	{"Set Dropped", StatusAction{Status: "dropped"}, "Dropped", false},
+	{"Set Score", StatusAction{}, "", true},
+	{"Remove from My List", StatusAction{Remove: true}, "", false},
 }
 
-// actionLabelsFor returns the menu labels applicable to an item with the given
-// current ListStatus: the "Set <current>" option is dropped (already that
-// status — a no-op), and "Remove from My List" is dropped when the item isn't
-// on the list (empty status).
-func actionLabelsFor(listStatus string) []string {
-	out := make([]string, 0, len(actionOptions))
+// actionGroupLabels returns the top-level actions menu (Space): "Set Status" and
+// "Open Web" always; "Set Score", "Set Episode", and "Remove from My List" only
+// when the anime is on the list (they need an entry).
+func actionGroupLabels(listStatus string) []string {
+	out := []string{"Set Status"}
+	if listStatus != "" {
+		out = append(out, "Set Score", "Set Episode")
+	}
+	out = append(out, "Open Web")
+	if listStatus != "" {
+		out = append(out, "Remove from My List")
+	}
+	return out
+}
+
+// statusActionLabels returns the "Set Status" sub-menu: the five set-status
+// options minus the item's current status (a no-op).
+func statusActionLabels(listStatus string) []string {
+	out := make([]string, 0, 5)
 	for _, o := range actionOptions {
-		if o.action.Remove && listStatus == "" {
+		if o.score || o.action.Remove {
 			continue
 		}
-		if !o.action.Remove && o.action.Status == listStatus {
+		if o.action.Status == listStatus {
 			continue
 		}
 		out = append(out, o.label)
@@ -257,8 +273,11 @@ const (
 	animeOverlayStatus
 	animeOverlaySeason
 	animeOverlaySort
-	animeOverlayActions // per-anime actions menu (set status / remove)
-	animeOverlayConfirm // centered y/n modal for an actions-menu choice
+	animeOverlayActions     // top-level actions menu (Set Status / Set Score / Remove)
+	animeOverlayStatusMenu  // "Set Status" sub-menu (Watching/Completed/...)
+	animeOverlayConfirm     // centered y/n modal for an actions-menu choice
+	animeOverlayScore       // 1-10 / Remove Score picker
+	animeOverlayEpisode     // set watched episodes (number input)
 )
 
 type animeOverlay struct {
@@ -313,7 +332,13 @@ func (k animeOverlayKind) String() string {
 	case animeOverlaySort:
 		return "Sort"
 	case animeOverlayActions:
+		return "Actions"
+	case animeOverlayStatusMenu:
 		return "Set Status"
+	case animeOverlayScore:
+		return "Score"
+	case animeOverlayEpisode:
+		return "Episode"
 	}
 	return ""
 }
@@ -347,6 +372,12 @@ type animePicker struct {
 	// applyStatus applies a per-anime status action (set/remove) to MAL. nil in
 	// the AnimeTosho fallback (no MAL), where Space is a no-op.
 	applyStatus func(malID, watchedEps int, act StatusAction) bool
+
+	// applyScore sets the per-anime score (0 = unrate) on MAL; nil disables.
+	applyScore func(malID, score int) bool
+
+	// applyWatched sets the per-anime watched-episode count on MAL; nil disables.
+	applyWatched func(malID, watched int) bool
 
 	// latestEpisode returns the latest aired episode for a MAL id (nil disables
 	// the "watched/aired/total" display). aired caches results by malID.
@@ -397,13 +428,15 @@ func animeCacheKey(source AnimeSource, query, season string) string {
 	return fmt.Sprintf("%d|%s|%s", source, query, season)
 }
 
-func newAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, latestEpisode func(int) int, debug bool) *animePicker {
+func newAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(int) int, debug bool) *animePicker {
 	y, s, label := mal.CurrentSeason()
 	ap := &animePicker{
 		source:        source,
 		query:         query,
 		load:          load,
 		applyStatus:   applyStatus,
+		applyScore:    applyScore,
+		applyWatched:  applyWatched,
 		latestEpisode: latestEpisode,
 		aired:         map[int]int{},
 		cache:         &animeCache{m: map[string][]mal.Item{}},
@@ -476,6 +509,29 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case statusAppliedMsg:
 		return m.applyStatusApplied(msg)
+
+	case scoreAppliedMsg:
+		if msg.applied {
+			for i := range m.items {
+				if m.items[i].MalID == msg.malID {
+					m.items[i].Score = msg.score
+					break
+				}
+			}
+		}
+		return m, nil
+
+	case episodeAppliedMsg:
+		if msg.applied {
+			for i := range m.items {
+				if m.items[i].MalID == msg.malID {
+					m.items[i].WatchedEps = msg.watched
+					break
+				}
+			}
+			m.applyFilter()
+		}
+		return m, nil
 
 	case latestEpMsg:
 		// Cache the latest aired episode for the focused anime's metadata display.
@@ -590,8 +646,8 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if it == nil || it.MalID == 0 {
 			return m, nil
 		}
-		// Only the actions that actually apply to this item's current status.
-		m.overlay.open(animeOverlayActions, actionLabelsFor(it.ListStatus), "")
+		// Top-level actions menu (Set Status / Set Score / Remove from My List).
+		m.overlay.open(animeOverlayActions, actionGroupLabels(it.ListStatus), "")
 		return m, nil
 	case "/":
 		m.filter.Filtering = true
@@ -620,6 +676,122 @@ func (m *animePicker) openSeasonOverlay() {
 	items := []string{mal.SeasonLater}
 	items = append(items, m.seasonArchiveItems()...)
 	m.overlay.open(animeOverlaySeason, items, m.season)
+}
+
+// scoreOptions is the score picker list: 1-10 then "Remove Score".
+var scoreOptions = func() []string {
+	out := make([]string, 0, 11)
+	for i := 1; i <= 10; i++ {
+		out = append(out, strconv.Itoa(i))
+	}
+	out = append(out, "Remove Score")
+	return out
+}()
+
+// openScoreOverlay opens the 1-10 / Remove Score picker, cursor on currentScore.
+func (m *animePicker) openScoreOverlay(currentScore int) {
+	cur := ""
+	if currentScore >= 1 && currentScore <= 10 {
+		cur = strconv.Itoa(currentScore)
+	}
+	m.overlay.open(animeOverlayScore, scoreOptions, cur)
+}
+
+// backToActions returns from a sub-menu (Set Status / Set Score / Set Episode)
+// to the top-level actions group menu. Used on Esc in those sub-menus.
+func (m *animePicker) backToActions() (tea.Model, tea.Cmd) {
+	it := m.currentItemCopy()
+	if it == nil || it.MalID == 0 {
+		m.overlay.close()
+		return m, nil
+	}
+	m.overlay.open(animeOverlayActions, actionGroupLabels(it.ListStatus), "")
+	return m, nil
+}
+
+// openEpisodeOverlay opens the watched-episode number input, seeded with the
+// current watched count.
+func (m *animePicker) openEpisodeOverlay(currentWatched int) {
+	m.overlay.kind = animeOverlayEpisode
+	m.overlay.items = nil
+	m.overlay.cursor = 0
+	if currentWatched > 0 {
+		m.overlay.text = strconv.Itoa(currentWatched)
+	} else {
+		m.overlay.text = ""
+	}
+}
+
+// applyEpisodeSelection parses the typed episode number and applies it.
+func (m *animePicker) applyEpisodeSelection() (tea.Model, tea.Cmd) {
+	text := m.overlay.text
+	m.overlay.close()
+	it := m.currentItemCopy()
+	if it == nil || it.MalID == 0 {
+		return m, nil
+	}
+	n, err := strconv.Atoi(text)
+	if err != nil || n < 0 {
+		return m, nil
+	}
+	return m, m.episodeApplyCmd(it.MalID, n)
+}
+
+// episodeAppliedMsg carries a finished watched-episode update.
+type episodeAppliedMsg struct {
+	malID   int
+	watched int
+	applied bool
+}
+
+// episodeApplyCmd runs the watched-episode update in the background.
+func (m *animePicker) episodeApplyCmd(malID, watched int) tea.Cmd {
+	apply := m.applyWatched
+	return func() tea.Msg {
+		applied := false
+		if apply != nil {
+			applied = apply(malID, watched)
+		}
+		return episodeAppliedMsg{malID: malID, watched: watched, applied: applied}
+	}
+}
+
+// applyScoreSelection applies the chosen score picker item: a digit sets the
+// score, "Remove Score" clears it (0). sel is the selected label; the overlay is
+// already closed by the caller.
+func (m *animePicker) applyScoreSelection(sel string) (tea.Model, tea.Cmd) {
+	it := m.currentItemCopy()
+	if it == nil || it.MalID == 0 {
+		return m, nil
+	}
+	score := 0
+	if sel != "Remove Score" {
+		n, err := strconv.Atoi(sel)
+		if err != nil || n < 0 || n > 10 {
+			return m, nil
+		}
+		score = n
+	}
+	return m, m.scoreApplyCmd(it.MalID, score)
+}
+
+// scoreAppliedMsg carries a finished score update.
+type scoreAppliedMsg struct {
+	malID   int
+	score   int
+	applied bool
+}
+
+// scoreApplyCmd runs the score update in the background.
+func (m *animePicker) scoreApplyCmd(malID, score int) tea.Cmd {
+	apply := m.applyScore
+	return func() tea.Msg {
+		applied := false
+		if apply != nil {
+			applied = apply(malID, score)
+		}
+		return scoreAppliedMsg{malID: malID, score: score, applied: applied}
+	}
 }
 
 // seasonArchiveItems returns the browse season list (sans the leading "Later"):
@@ -661,12 +833,40 @@ func (m *animePicker) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Episode number input: digits build the number; Enter/Space applies; Esc
+	// goes back to the group menu.
+	if m.overlay.kind == animeOverlayEpisode {
+		key := msg.String()
+		switch key {
+		case "esc", "ctrl+c":
+			return m.backToActions()
+		case " ", "enter":
+			return m.applyEpisodeSelection()
+		case "backspace":
+			if len(m.overlay.text) > 0 {
+				r := []rune(m.overlay.text)
+				m.overlay.text = string(r[:len(r)-1])
+			}
+			return m, nil
+		default:
+			if len(key) == 1 && key[0] >= '0' && key[0] <= '9' {
+				m.overlay.text += key
+			}
+			return m, nil
+		}
+	}
+
 	// List overlays (status / season / sort / actions).
 	switch msg.String() {
 	case "esc", "ctrl+c":
+		// In a sub-menu opened from the actions group menu, Esc goes back up to
+		// the group menu instead of closing entirely.
+		if m.overlay.kind == animeOverlayStatusMenu || m.overlay.kind == animeOverlayScore {
+			return m.backToActions()
+		}
 		m.overlay.close()
 		return m, nil
-	case "enter":
+	case " ", "enter":
 		return m.applyOverlaySelection()
 	case "up", "k":
 		m.overlay.move(-1)
@@ -712,25 +912,50 @@ func (m *animePicker) applyOverlaySelection() (tea.Model, tea.Cmd) {
 		m.topItem = 0
 		return m, m.loadCmd(m.source, m.query, m.season)
 	case animeOverlayActions:
-		act, display, ok := actionByLabel(sel)
-		if !ok {
-			return m, nil
-		}
+		// Top-level group menu → route to the relevant sub-menu/confirm.
 		it := m.currentItemCopy()
 		if it == nil || it.MalID == 0 {
 			return m, nil
 		}
-		// Switch to the confirm modal (no write yet).
-		text := fmt.Sprintf("Set %q to %s?", it.Title, display)
-		if act.Remove {
-			text = fmt.Sprintf("Remove %q from your list?", it.Title)
+		switch sel {
+		case "Set Status":
+			m.overlay.open(animeOverlayStatusMenu, statusActionLabels(it.ListStatus), "")
+			return m, nil
+		case "Set Score":
+			m.openScoreOverlay(it.Score)
+			return m, nil
+		case "Set Episode":
+			m.openEpisodeOverlay(it.WatchedEps)
+			return m, nil
+		case "Open Web":
+			mal.OpenBrowser("https://myanimelist.net/anime/" + strconv.Itoa(it.MalID))
+			return m, nil
+		case "Remove from My List":
+			m.overlay.kind = animeOverlayConfirm
+			m.overlay.items = nil
+			m.overlay.cursor = 0
+			m.overlay.text = fmt.Sprintf("Remove %q from your list?", it.Title)
+			m.overlay.pendingAction = StatusAction{Remove: true}
+			return m, nil
+		}
+		return m, nil
+	case animeOverlayStatusMenu:
+		it := m.currentItemCopy()
+		if it == nil || it.MalID == 0 {
+			return m, nil
+		}
+		act, display, ok := actionByLabel(sel)
+		if !ok {
+			return m, nil
 		}
 		m.overlay.kind = animeOverlayConfirm
 		m.overlay.items = nil
 		m.overlay.cursor = 0
-		m.overlay.text = text
+		m.overlay.text = fmt.Sprintf("Set %q to %s?", it.Title, display)
 		m.overlay.pendingAction = act
 		return m, nil
+	case animeOverlayScore:
+		return m.applyScoreSelection(sel)
 	}
 	return m, nil
 }
@@ -1072,7 +1297,14 @@ func (m *animePicker) View() string {
 	// ---- LEFT pane (list / overlay) ----
 	var leftContent string
 	if m.overlay.active() {
-		leftContent = renderListOverlayContent(m.overlay.kind.String(), m.overlay.items, m.overlay.cursor, m.pageSize())
+		if m.overlay.kind == animeOverlayEpisode {
+			// Number-input overlay (text prompt, not a list).
+			title := TitleStyle.Render("Episodes watched (Enter = set, Esc = back)")
+			input := SelectedStyle.Render("▶ " + m.overlay.text + "▏")
+			leftContent = title + "\n" + input
+		} else {
+			leftContent = renderListOverlayContent(m.overlay.kind.String(), m.overlay.items, m.overlay.cursor, m.pageSize())
+		}
 	} else {
 		title := TitleStyle.Render("Anime") + FaintStyle.Render(fmt.Sprintf("  (%d)", len(m.view)))
 		if m.filter.Filtering {

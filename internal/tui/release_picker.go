@@ -281,7 +281,7 @@ func (m *releasePicker) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "ctrl+c":
 		m.overlay.close()
 		return m, nil
-	case "enter":
+	case " ", "enter":
 		// The actions menu doesn't go through applySelected — it picks an action.
 		if m.overlay.kind == overlayActions {
 			return m.applyAction()

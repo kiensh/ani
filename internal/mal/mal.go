@@ -489,6 +489,56 @@ func RemoveFromList(malID int, dryRun, debug bool) error {
 	return err
 }
 
+// SetScore sets the user's score (1-10) for an anime, or clears it when score is
+// 0. It uses a raw score-only PATCH so the entry's status/progress/etc. are
+// preserved (the SDK's UpdateMyListStatus always sends status, which would
+// clobber it). When dryRun is true the request is printed but not sent.
+// patchMyListStatus sends a raw PATCH to /anime/{id}/my_list_status with the
+// given url-encoded body, preserving fields not in the body. (The SDK's
+// UpdateMyListStatus always sends status, which would clobber it.) dryRun prints
+// the request without sending.
+func patchMyListStatus(malID int, body string, dryRun, debug bool) error {
+	if dryRun {
+		fmt.Fprintf(os.Stderr, "DRY-RUN: MAL PATCH /anime/%d/my_list_status %s (not sent)\n", malID, body)
+		return nil
+	}
+	hc, err := OAuthHTTPClient(debug)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPatch,
+		"https://api.myanimelist.net/v2/anime/"+strconv.Itoa(malID)+"/my_list_status",
+		strings.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if debug {
+		fmt.Fprintf(os.Stderr, "DEBUG MAL PATCH /anime/%d/my_list_status %s\n", malID, body)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("mal patch: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("mal patch: %s", resp.Status)
+	}
+	return nil
+}
+
+// SetScore sets the user's score (1-10) for an anime, or clears it when score is
+// 0. Score-only, so status/progress/etc. are preserved.
+func SetScore(malID, score int, dryRun, debug bool) error {
+	return patchMyListStatus(malID, "score="+strconv.Itoa(score), dryRun, debug)
+}
+
+// SetWatched sets the number of episodes watched. Watched-only, so status/score/
+// etc. are preserved.
+func SetWatched(malID, watched int, dryRun, debug bool) error {
+	return patchMyListStatus(malID, "num_watched_episodes="+strconv.Itoa(watched), dryRun, debug)
+}
+
 // RefreshItem re-fetches the anime from MAL and updates item in-place, so the
 // fzf header reflects the real state after a write-back. No-op when dryRun.
 func RefreshItem(item *Item, dryRun, debug bool) {
