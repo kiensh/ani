@@ -380,7 +380,8 @@ type animePicker struct {
 	applyWatched func(malID, watched int) bool
 
 	// latestEpisode returns the latest aired episode for a MAL id (nil disables
-	// the "watched/aired/total" display). aired caches results by malID.
+	// the "watched/aired/total" display). aired caches results by malID; a failed
+	// fetch (0) is intentionally not cached so it retries on the next focus.
 	latestEpisode func(malID int) int
 	aired         map[int]int
 
@@ -535,7 +536,10 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case latestEpMsg:
 		// Cache the latest aired episode for the focused anime's metadata display.
-		if m.latestEpisode != nil {
+		// Only cache a real value: a failed fetch (0) leaves the slot empty so it
+		// retries on the next focus instead of poisoning the cache (the fetch
+		// already retries internally, so 0 means "genuinely unknown right now").
+		if m.latestEpisode != nil && msg.aired > 0 {
 			m.aired[msg.malID] = msg.aired
 		}
 		return m, nil

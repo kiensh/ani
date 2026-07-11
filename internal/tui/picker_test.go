@@ -680,6 +680,34 @@ func TestAnimePickerLatestEpisode(t *testing.T) {
 	}
 }
 
+// TestAnimePickerLatestEpisodeNoPoisonOnFailure verifies a failed latest-aired
+// fetch (aired 0) does not poison the cache, so a later successful fetch for the
+// same anime still wins. This guards the "shows 100" bug: mal.LatestEpisode now
+// returns 0 (never the wrong page-1 value) on failure, and the cache must not
+// store that 0.
+func TestAnimePickerLatestEpisodeNoPoisonOnFailure(t *testing.T) {
+	items := []mal.Item{{MalID: 1, Title: "Airing A", TotalEps: 12, AirStatus: "currently_airing", ListStatus: "watching"}}
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, func(int) int { return 4 }, false)
+	loadAnime(m, items)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+
+	// A failed fetch (0) must not be cached.
+	m.Update(latestEpMsg{malID: 1, aired: 0})
+	if _, ok := m.aired[1]; ok {
+		t.Errorf("aired cache poisoned with 0 after a failed fetch; want entry absent")
+	}
+
+	// Since nothing was cached, a later successful fetch still populates it.
+	cmd := m.latestEpisodeCmd()
+	if cmd == nil {
+		t.Fatal("latestEpisodeCmd returned nil after a failed fetch; want a retry cmd")
+	}
+	m.Update(cmd()) // latestEpMsg → cache m.aired[1]=4
+	if m.aired[1] != 4 {
+		t.Errorf("aired cache = %v after successful fetch, want {1:4}", m.aired)
+	}
+}
+
 // ---- release picker ----
 
 func TestReleasePickerRender(t *testing.T) {

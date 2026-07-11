@@ -287,13 +287,31 @@ func LatestEpisode(malID int, debug bool) (int, error) {
 	if debug {
 		fmt.Fprintf(os.Stderr, "DEBUG Jikan GET %s\n", last)
 	}
-	var pn struct {
-		Data []jikanEpisode `json:"data"`
+	// Since has_next is true the latest episode is provably not on page 1, so
+	// retry the last page a few times to absorb transient Jikan rate limits (HTTP
+	// 429) — common when the picker fans out fetches. This runs in a background
+	// goroutine, so sleeping never blocks the UI. On total failure return 0
+	// (unknown) rather than page 1's last item, which would be a wrong "latest";
+	// the caller renders ? and retries on the next focus.
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		var pn struct {
+			Data []jikanEpisode `json:"data"`
+		}
+		if err := jikanGet(last, &pn); err != nil {
+			lastErr = err
+			if attempt < maxAttempts {
+				time.Sleep(700 * time.Millisecond)
+			}
+			continue
+		}
+		if len(pn.Data) == 0 {
+			return 0, nil
+		}
+		return pn.Data[len(pn.Data)-1].MalID, nil
 	}
-	if err := jikanGet(last, &pn); err != nil || len(pn.Data) == 0 {
-		return p1.Data[len(p1.Data)-1].MalID, nil
-	}
-	return pn.Data[len(pn.Data)-1].MalID, nil
+	return 0, lastErr
 }
 
 // jikanGet does an authenticated-less GET against Jikan and decodes JSON into
