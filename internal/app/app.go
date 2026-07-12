@@ -107,7 +107,7 @@ func resolveMal(opt *Options) (int, *mal.Item, error) {
 		}
 		return err == nil && !opt.DryRun
 	}
-	latestEpisode := func(malID int) int { n, _ := mal.LatestEpisode(malID, opt.Debug); return n }
+	latestEpisode := latestEpisodeFn(opt)
 	applyScore := func(malID, score int) bool {
 		err := mal.SetScore(malID, score, opt.DryRun, opt.Debug)
 		return err == nil && !opt.DryRun
@@ -131,13 +131,53 @@ func resolveMal(opt *Options) (int, *mal.Item, error) {
 	if aid == 0 {
 		return 0, nil, fmt.Errorf("could not resolve an AniDB id for %q", item.Title)
 	}
+	item.AnidbAID = aid // carry the resolved aid so the release picker's aired fallback can reuse it
 	return aid, item, nil
 }
 
+// latestEpisodeFn returns the aired-episode lookup both pickers use. AnimeTosho
+// is primary (it has no rate limit, unlike Jikan): resolve the aid and read the
+// latest episode from its releases (a same-day proxy for "aired"). Jikan's
+// episode feed is the fallback — authoritative but rate-limited — when the aid
+// can't be resolved or AnimeTosho has no releases. nil item → 0.
+func latestEpisodeFn(opt *Options) func(*mal.Item) int {
+	return func(item *mal.Item) int {
+		if item == nil {
+			return 0
+		}
+		if aid := resolveAidFast(item, opt); aid > 0 {
+			if n := animetosho.LatestEpisode(aid); n > 0 {
+				return n
+			}
+		}
+		n, _ := mal.LatestEpisode(item.MalID, opt.Debug)
+		return n
+	}
+}
+
+// resolveAidFast resolves an AniDB aid for item from the fast/cached sources
+// only — the item's own aid, then Fribb, then the AniDB title dump. No Jikan
+// /external call (that path is slow + rate-limited). Returns 0 if unresolved.
+func resolveAidFast(item *mal.Item, opt *Options) int {
+	if aid := item.AnidbAID; aid > 0 {
+		return aid
+	}
+	if id, ok := mal.AnidbAIDViaFribb(item.MalID, opt.Debug); ok {
+		return id
+	}
+	if id, ok := mal.AnidbAIDByTitle(item.Title, mal.StartYear(item), opt.Debug); ok {
+		return id
+	}
+	return 0
+}
+
 // resolveAnidbFromMAL resolves the AniDB id for a MAL item: Fribb offline map →
-// Jikan external links → animetosho title search.
+// AniDB title dump → Jikan external links → animetosho title search.
 func resolveAnidbFromMAL(item *mal.Item, opt *Options) int {
 	if id, ok := mal.AnidbAIDViaFribb(item.MalID, opt.Debug); ok {
+		return id
+	}
+	if id, ok := mal.AnidbAIDByTitle(item.Title, mal.StartYear(item), opt.Debug); ok {
 		return id
 	}
 	id, err := mal.AnidbAID(item.MalID, opt.Debug)
@@ -296,8 +336,7 @@ func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*animetosho.
 		return view[0], "play", nil
 	}
 	res, err := tui.RunReleasePicker(item, opt.Group, opt.Quality, opt.Sort, fetch, disableEpisode, player.CopyToClipboard,
-		func(malID int) int { n, _ := mal.LatestEpisode(malID, opt.Debug); return n },
-		opt.Debug)
+		latestEpisodeFn(opt), opt.Debug)
 	if err != nil {
 		return nil, "", err
 	}

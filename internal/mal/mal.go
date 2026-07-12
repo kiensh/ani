@@ -262,7 +262,7 @@ type jikanEpisode struct {
 // (not yet aired / none) or on error. (MAL has no "episodes aired" field, so
 // this is the accurate source.)
 func LatestEpisode(malID int, debug bool) (int, error) {
-	first := fmt.Sprintf("https://api.jikan.moe/v4/anime/%d/episodes", malID)
+	first := fmt.Sprintf("%s/anime/%d/episodes", jikanBaseURL, malID)
 	if debug {
 		fmt.Fprintf(os.Stderr, "DEBUG Jikan GET %s\n", first)
 	}
@@ -282,54 +282,63 @@ func LatestEpisode(malID int, debug bool) (int, error) {
 	if !p1.Pagination.HasNext {
 		return p1.Data[len(p1.Data)-1].MalID, nil
 	}
-	// Fetch the last page for the true latest episode.
+	// has_next: the latest episode is on the last page. jikanGet already retries
+	// transient failures; on failure return 0 (unknown) — NOT page 1's last item,
+	// which would be a wrong "latest" (the caller renders ? and retries on focus).
 	last := fmt.Sprintf("%s?page=%d", first, p1.Pagination.LastVisiblePage)
 	if debug {
 		fmt.Fprintf(os.Stderr, "DEBUG Jikan GET %s\n", last)
 	}
-	// Since has_next is true the latest episode is provably not on page 1, so
-	// retry the last page a few times to absorb transient Jikan rate limits (HTTP
-	// 429) — common when the picker fans out fetches. This runs in a background
-	// goroutine, so sleeping never blocks the UI. On total failure return 0
-	// (unknown) rather than page 1's last item, which would be a wrong "latest";
-	// the caller renders ? and retries on the next focus.
+	var pn struct {
+		Data []jikanEpisode `json:"data"`
+	}
+	if err := jikanGet(last, &pn); err != nil || len(pn.Data) == 0 {
+		return 0, nil
+	}
+	return pn.Data[len(pn.Data)-1].MalID, nil
+}
+
+var (
+	// jikanBaseURL is the Jikan API root (overridable in tests).
+	jikanBaseURL = "https://api.jikan.moe/v4"
+	// jikanRetryBackoff is the sleep between Jikan retry attempts (overridable in
+	// tests; set to 0 for instant retries).
+	jikanRetryBackoff = 700 * time.Millisecond
+)
+
+// jikanGet does an unauthenticated GET against Jikan and decodes JSON into out.
+// It retries transient failures (network errors, HTTP 429, and 5xx — the Jikan→
+// MyAnimeList outages that surface as 504 "Gateway Time-out") up to 3 times so a
+// momentary outage can't fail a lookup. Definitive failures (4xx other than 429,
+// or a JSON decode error on a 200) are returned immediately without retrying.
+func jikanGet(u string, out any) error {
 	const maxAttempts = 3
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		var pn struct {
-			Data []jikanEpisode `json:"data"`
+		req, err := http.NewRequest(http.MethodGet, u, nil)
+		if err != nil {
+			return err // not retryable
 		}
-		if err := jikanGet(last, &pn); err != nil {
-			lastErr = err
-			if attempt < maxAttempts {
-				time.Sleep(700 * time.Millisecond)
+		resp, err := http.DefaultClient.Do(req)
+		switch {
+		case err != nil:
+			lastErr = err // network error → retry
+		case resp.StatusCode == http.StatusOK:
+			err = json.NewDecoder(resp.Body).Decode(out)
+			resp.Body.Close()
+			return err // success, or decode error (not retryable)
+		default:
+			resp.Body.Close()
+			if sc := resp.StatusCode; sc != http.StatusTooManyRequests && sc < 500 {
+				return fmt.Errorf("jikan: %s", resp.Status) // definitive 4xx
 			}
-			continue
+			lastErr = fmt.Errorf("jikan: %s", resp.Status) // transient → retry
 		}
-		if len(pn.Data) == 0 {
-			return 0, nil
+		if attempt < maxAttempts {
+			time.Sleep(jikanRetryBackoff)
 		}
-		return pn.Data[len(pn.Data)-1].MalID, nil
 	}
-	return 0, lastErr
-}
-
-// jikanGet does an authenticated-less GET against Jikan and decodes JSON into
-// out. Returns an error on request failure or non-200.
-func jikanGet(u string, out any) error {
-	req, err := http.NewRequest(http.MethodGet, u, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("jikan: %s", resp.Status)
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return lastErr
 }
 
 // Seasonal returns the seasonal anime lineup for a given year/season (e.g.
@@ -404,21 +413,9 @@ func CurrentSeason() (year int, season Season, label string) {
 // MAL's external links — the MAL v2 API doesn't expose external links).
 // Returns 0, nil if no AniDB link is present.
 func AnidbAID(malID int, debug bool) (int, error) {
-	url := fmt.Sprintf("https://api.jikan.moe/v4/anime/%d/external", malID)
+	u := fmt.Sprintf("%s/anime/%d/external", jikanBaseURL, malID)
 	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG Jikan GET %s\n", url)
-	}
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return 0, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("jikan external: %s", resp.Status)
+		fmt.Fprintf(os.Stderr, "DEBUG Jikan GET %s\n", u)
 	}
 	var d struct {
 		Data []struct {
@@ -426,7 +423,7 @@ func AnidbAID(malID int, debug bool) (int, error) {
 			URL  string `json:"url"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+	if err := jikanGet(u, &d); err != nil {
 		return 0, err
 	}
 	if debug {

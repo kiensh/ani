@@ -47,9 +47,9 @@ type releasePicker struct {
 	copyMagnet func(string) error
 	toast      string // transient confirmation line (e.g. "✓ Magnet copied")
 
-	// latestEpisode returns the latest aired episode for a MAL id (nil disables
+	// latestEpisode returns the latest aired episode for m.item (nil disables
 	// the "watched/aired/total" header). aired caches the result for m.item.
-	latestEpisode func(int) int
+	latestEpisode func(*mal.Item) int
 	aired         int
 
 	view    []*animetosho.Release // filter.Apply(all)
@@ -61,7 +61,7 @@ type releasePicker struct {
 	result *Result
 }
 
-func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(int) int, debug bool) *releasePicker {
+func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(*mal.Item) int, debug bool) *releasePicker {
 	rp := &releasePicker{
 		item:            item,
 		debug:           debug,
@@ -108,9 +108,9 @@ func (m *releasePicker) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.fetchCmd(m.filter.Episode)}
 	// Also fetch the latest aired episode for the "watched/aired/total" header.
 	if m.item != nil && m.item.MalID > 0 && m.latestEpisode != nil {
-		malID := m.item.MalID
+		item := m.item
 		fn := m.latestEpisode
-		cmds = append(cmds, func() tea.Msg { return latestEpMsg{malID: malID, aired: fn(malID)} })
+		cmds = append(cmds, func() tea.Msg { return latestEpMsg{malID: item.MalID, aired: fn(item)} })
 	}
 	return tea.Batch(cmds...)
 }

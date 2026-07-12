@@ -36,7 +36,7 @@ type Result struct {
 // set-status/remove action, applyScore sets the score (nil disables either);
 // latestEpisode backs the "watched/aired/total" display for the focused airing
 // anime (nil disables). Returns the selected anime, or Quit=true on cancel.
-func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(int) int, debug bool) (*Result, error) {
+func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) int, debug bool) (*Result, error) {
 	if load == nil {
 		return &Result{Quit: true}, nil
 	}
@@ -60,7 +60,7 @@ func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 // the episode filter (latest-uploads view). copyMagnet backs the Space menu's
 // "Copy Magnet URL"; latestEpisode backs the "watched/aired/total" header (nil
 // disables each).
-func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(int) int, debug bool) (*Result, error) {
+func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(*mal.Item) int, debug bool) (*Result, error) {
 	if item == nil || fetch == nil {
 		return &Result{Quit: true}, nil
 	}

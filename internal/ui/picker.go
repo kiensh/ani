@@ -1,10 +1,10 @@
 package ui
 
 import (
-	"regexp"
 	"strings"
 
 	"ani/internal/animetosho"
+	"ani/internal/mal"
 )
 
 // FallbackAnidbByTitle searches animetosho by title (and shortened variants)
@@ -29,7 +29,7 @@ func FallbackAnidbByTitle(title string) int {
 func titleVariants(title string) []string {
 	var out []string
 	out = append(out, title)
-	stripped := stripSeasonSuffix(title)
+	stripped := mal.StripSeasonSuffix(title)
 	if stripped != title {
 		out = append(out, stripped)
 	}
@@ -38,17 +38,4 @@ func titleVariants(title string) []string {
 		out = append(out, strings.Join(words[:3], " "))
 	}
 	return out
-}
-
-var seasonSuffixRes = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\s+\d+(?:st|nd|rd|th)\s+Season$`),
-	regexp.MustCompile(`(?i)\s+Season\s+\d+$`),
-	regexp.MustCompile(`(?i)\s+Part\s+\d+$`),
-}
-
-func stripSeasonSuffix(title string) string {
-	for _, re := range seasonSuffixRes {
-		title = re.ReplaceAllString(title, "")
-	}
-	return strings.TrimSpace(title)
 }

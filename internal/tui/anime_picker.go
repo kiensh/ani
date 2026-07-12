@@ -379,10 +379,10 @@ type animePicker struct {
 	// applyWatched sets the per-anime watched-episode count on MAL; nil disables.
 	applyWatched func(malID, watched int) bool
 
-	// latestEpisode returns the latest aired episode for a MAL id (nil disables
-	// the "watched/aired/total" display). aired caches results by malID; a failed
-	// fetch (0) is intentionally not cached so it retries on the next focus.
-	latestEpisode func(malID int) int
+	// latestEpisode returns the latest aired episode for the focused item (nil
+	// disables the "watched/aired/total" display). aired caches results by malID;
+	// a failed fetch (0) is intentionally not cached so it retries on next focus.
+	latestEpisode func(item *mal.Item) int
 	aired         map[int]int
 
 	cursor  int
@@ -429,7 +429,7 @@ func animeCacheKey(source AnimeSource, query, season string) string {
 	return fmt.Sprintf("%d|%s|%s", source, query, season)
 }
 
-func newAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(int) int, debug bool) *animePicker {
+func newAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) int, debug bool) *animePicker {
 	y, s, label := mal.CurrentSeason()
 	ap := &animePicker{
 		source:        source,
@@ -1233,9 +1233,9 @@ func (m *animePicker) latestEpisodeCmd() tea.Cmd {
 	if _, ok := m.aired[cur.MalID]; ok {
 		return nil // cached
 	}
-	malID := cur.MalID
+	item := cur // stable copy; safe for the background goroutine
 	fn := m.latestEpisode
-	return func() tea.Msg { return latestEpMsg{malID: malID, aired: fn(malID)} }
+	return func() tea.Msg { return latestEpMsg{malID: item.MalID, aired: fn(item)} }
 }
 
 func (m *animePicker) loadCoverCmd() tea.Cmd {

@@ -659,7 +659,7 @@ func TestAnimePickerSetScore(t *testing.T) {
 // watched/aired/total once the latest-aired fetch resolves.
 func TestAnimePickerLatestEpisode(t *testing.T) {
 	items := []mal.Item{{MalID: 1, Title: "Airing A", TotalEps: 12, WatchedEps: 0, AirStatus: "currently_airing", ListStatus: "watching"}}
-	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, func(int) int { return 4 }, false)
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, func(*mal.Item) int { return 4 }, false)
 	loadAnime(m, items)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
 
@@ -687,7 +687,7 @@ func TestAnimePickerLatestEpisode(t *testing.T) {
 // store that 0.
 func TestAnimePickerLatestEpisodeNoPoisonOnFailure(t *testing.T) {
 	items := []mal.Item{{MalID: 1, Title: "Airing A", TotalEps: 12, AirStatus: "currently_airing", ListStatus: "watching"}}
-	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, func(int) int { return 4 }, false)
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, func(*mal.Item) int { return 4 }, false)
 	loadAnime(m, items)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
 

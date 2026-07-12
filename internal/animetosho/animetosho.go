@@ -12,7 +12,6 @@ import (
 )
 
 const (
-	toshoBase       = "https://feed.animetosho.xyz"
 	toshoSeriesPath = "/json/v1/series"
 	toshoAnidbPath  = "/json/v1/series/anidb/"
 	toshoSearchPath = "/json/v1/search"
@@ -23,6 +22,9 @@ const (
 	// CoverBase is the prefix for AniDB cover images.
 	CoverBase = "https://animetosho.xyz/static/img/anidb_covers/"
 )
+
+// toshoBase is the feed root (a var so tests can point it at httptest).
+var toshoBase = "https://feed.animetosho.xyz"
 
 // Series is the nested anime metadata on a release.
 type Series struct {
@@ -245,4 +247,42 @@ func LatestReleases(limit int) ([]*Release, error) {
 		return nil, err
 	}
 	return ToReleases(resp.Data), nil
+}
+
+// minGroups is how many distinct release groups must have put out an episode for
+// it to count as "aired". Cumulative-numbered files (a few groups number across
+// all seasons) and preview/pre-release eps (one group) stay below this; real
+// aired episodes are released by many groups.
+const minGroups = 3
+
+// LatestEpisode returns the highest episode number that ≥ minGroups distinct
+// release groups have put out — a same-day proxy for the latest aired episode.
+// Counting distinct groups (not raw releases) ignores cumulative-numbered and
+// preview/pre-release outliers, which come from few groups; and using the int
+// episode_number directly (no title regex) avoids truncating 4-digit episodes
+// (e.g. One Piece 1168). Returns 0 — which the caller treats as "unknown, fall
+// back to Jikan" — if no episode meets the threshold or on error.
+func LatestEpisode(aid int) int {
+	entries, err := SeriesReleasesPage(aid, 0, 0) // page 1, all episodes, newest-first
+	if err != nil {
+		return 0
+	}
+	groups := map[int]map[string]struct{}{} // ep -> set of release groups
+	for _, e := range entries {
+		ep := e.Series.EpisodeNumber
+		if ep <= 0 {
+			continue
+		}
+		if groups[ep] == nil {
+			groups[ep] = map[string]struct{}{}
+		}
+		groups[ep][e.ReleaseGroup] = struct{}{}
+	}
+	best := 0
+	for ep, gs := range groups {
+		if len(gs) >= minGroups && ep > best {
+			best = ep
+		}
+	}
+	return best
 }
