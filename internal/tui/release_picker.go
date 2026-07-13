@@ -345,21 +345,17 @@ func (m *releasePicker) applyAction() (tea.Model, tea.Cmd) {
 func (m *releasePicker) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
-		// Esc exits filter mode but keeps the filter applied.
+		// Esc discards the filter (vim: abort search) and returns to normal mode.
 		m.filter.Filtering = false
+		m.filter.FuzzyText = ""
+		m.applyFilter()
 		m.fixScroll()
 		return m, nil
 	case "enter":
+		// Enter accepts the filter (vim: keep the pattern) and returns to normal
+		// mode with the filter still applied — it does not select the release.
 		m.filter.Filtering = false
-		m.applyFilter()
-		if len(m.view) > 0 {
-			m.cursor = 0
-			if cur := m.currentRelease(); cur != nil {
-				m.result.Release = cur
-				m.result.Action = "play"
-				return m, tea.Quit
-			}
-		}
+		m.fixScroll()
 		return m, nil
 	case "up":
 		if m.cursor > 0 {
@@ -382,6 +378,10 @@ func (m *releasePicker) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.filter.Filtering = false
 			m.applyFilter()
 		}
+		return m, nil
+	case "ctrl+w":
+		m.filter.FuzzyText = dropLastWord(m.filter.FuzzyText)
+		m.applyFilter()
 		return m, nil
 	default:
 		if isPrintable(msg) {
@@ -456,8 +456,11 @@ func (m *releasePicker) View() string {
 		h1 = HeaderStyle.Render(info) + "  ·  "
 	}
 	h1 += FaintStyle.Render(fmt.Sprintf("%d rels", len(m.view)))
-	if m.filter.Filtering {
-		h1 += "  " + FaintStyle.Render("filter: ") + m.filter.FuzzyText + "▏"
+	if m.filter.Filtering || m.filter.FuzzyText != "" {
+		h1 += "  " + FaintStyle.Render("filter: ") + m.filter.FuzzyText
+		if m.filter.Filtering {
+			h1 += "▏"
+		}
 	}
 
 	// Header line 2: filter badges. (FIXED)

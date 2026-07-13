@@ -1014,20 +1014,17 @@ func (m *animePicker) applyStatusApplied(msg statusAppliedMsg) (tea.Model, tea.C
 func (m *animePicker) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
+		// Esc discards the filter (vim: abort search) and returns to normal mode.
 		m.filter.Filtering = false
-		m.fixScroll()
-		return m, nil
-	case "enter":
-		m.filter.Filtering = false
+		m.filter.FuzzyText = ""
 		m.applyFilter()
 		m.fixScroll()
-		if len(m.view) > 0 {
-			m.cursor = 0
-			if it := m.currentItemCopy(); it != nil {
-				m.result.Anime = it
-				return m, tea.Batch(tea.Quit, m.quitCmd())
-			}
-		}
+		return m, m.focusCmd()
+	case "enter":
+		// Enter accepts the filter (vim: keep the pattern) and returns to normal
+		// mode with the filter still applied — it does not select the item.
+		m.filter.Filtering = false
+		m.fixScroll()
 		return m, m.focusCmd()
 	case "up":
 		if m.cursor > 0 {
@@ -1053,6 +1050,11 @@ func (m *animePicker) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.filter.Filtering = false
 		m.applyFilter()
+		return m, m.focusCmd()
+	case "ctrl+w":
+		m.filter.FuzzyText = dropLastWord(m.filter.FuzzyText)
+		m.applyFilter()
+		m.fixScroll()
 		return m, m.focusCmd()
 	case " ", "tab":
 		m.filter.FuzzyText += " "
@@ -1311,8 +1313,11 @@ func (m *animePicker) View() string {
 		}
 	} else {
 		title := TitleStyle.Render("Anime") + FaintStyle.Render(fmt.Sprintf("  (%d)", len(m.view)))
-		if m.filter.Filtering {
-			title += "  " + FaintStyle.Render("filter: ") + m.filter.FuzzyText + "▏"
+		if m.filter.Filtering || m.filter.FuzzyText != "" {
+			title += "  " + FaintStyle.Render("filter: ") + m.filter.FuzzyText
+			if m.filter.Filtering {
+				title += "▏"
+			}
 		}
 		leftContent = title + "\n" + m.renderList()
 	}

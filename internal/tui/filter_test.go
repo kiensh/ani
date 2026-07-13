@@ -16,6 +16,23 @@ func mkRel(group, res string, ep int, batch bool) *animetosho.Release {
 	}
 }
 
+func TestDropLastWord(t *testing.T) {
+	cases := map[string]string{
+		"frieren 1080p":      "frieren",
+		"frieren 1080p web":  "frieren 1080p",
+		"frieren":            "",
+		"frieren ":           "",
+		"":                   "",
+		"  fired  ":          "",
+		"a b c":              "a b",
+	}
+	for in, want := range cases {
+		if got := dropLastWord(in); got != want {
+			t.Errorf("dropLastWord(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestResolutionHeight(t *testing.T) {
 	cases := map[string]string{
 		"1920x1080": "1080",

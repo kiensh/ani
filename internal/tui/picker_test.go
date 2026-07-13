@@ -145,6 +145,63 @@ func TestAnimePickerFilterNav(t *testing.T) {
 	}
 }
 
+// TestAnimePickerFilterEnterAccepts: Enter in filter mode keeps the filter
+// applied and returns to normal mode — it must NOT select/quit.
+func TestAnimePickerFilterEnterAccepts(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, Title: "Alpha"},
+		{MalID: 2, Title: "Gamma"},
+	}
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil, false)
+	m.filter.Status = "All"
+	loadAnime(m, items)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+
+	m.Update(keyMsg('/'))
+	m.Update(keyMsg('g'))
+	if !m.filter.Filtering || len(m.view) != 1 {
+		t.Fatalf("setup: want filter mode + 1 match, got Filtering=%v view=%d", m.filter.Filtering, len(m.view))
+	}
+	m.Update(enterMsg())
+	if m.filter.Filtering {
+		t.Errorf("after Enter: Filtering=true, want false (accept → normal mode)")
+	}
+	if m.filter.FuzzyText != "g" {
+		t.Errorf("after Enter: FuzzyText=%q, want 'g' (kept)", m.filter.FuzzyText)
+	}
+	if len(m.view) != 1 {
+		t.Errorf("after Enter: view=%d, want 1 (filter still applied)", len(m.view))
+	}
+	if m.result.Anime != nil {
+		t.Errorf("after Enter: result.Anime set; Enter must not select")
+	}
+}
+
+// TestAnimePickerFilterEscDiscards: Esc in filter mode discards the filter.
+func TestAnimePickerFilterEscDiscards(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, Title: "Alpha"},
+		{MalID: 2, Title: "Gamma"},
+	}
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil, false)
+	m.filter.Status = "All"
+	loadAnime(m, items)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+
+	m.Update(keyMsg('/'))
+	m.Update(keyMsg('g'))
+	m.Update(escMsg())
+	if m.filter.Filtering {
+		t.Errorf("after Esc: Filtering=true, want false")
+	}
+	if m.filter.FuzzyText != "" {
+		t.Errorf("after Esc: FuzzyText=%q, want '' (discarded)", m.filter.FuzzyText)
+	}
+	if len(m.view) != 2 {
+		t.Errorf("after Esc: view=%d, want 2 (filter cleared)", len(m.view))
+	}
+}
+
 // TestAnimePickerRemoveG verifies g/G are no-ops (not top/bottom jumps).
 func TestAnimePickerRemoveG(t *testing.T) {
 	items := []mal.Item{{MalID: 1, Title: "A"}, {MalID: 2, Title: "B"}, {MalID: 3, Title: "C"}}
@@ -731,6 +788,48 @@ func TestReleasePickerRender(t *testing.T) {
 	}
 	if !strings.Contains(out, "rels") {
 		t.Errorf("header missing rels count")
+	}
+}
+
+// TestReleasePickerFilterEnterAccepts: Enter in filter mode keeps the filter
+// applied and returns to normal mode (no select/quit). Guards the filter.go
+// change that makes the fuzzy text persist beyond Filtering mode.
+func TestReleasePickerFilterEnterAccepts(t *testing.T) {
+	all := []*animetosho.Release{
+		{Entry: &animetosho.Entry{Title: "Alpha 1080p"}, Group: "A", Resolution: "1080p"},
+		{Entry: &animetosho.Entry{Title: "Beta 720p"}, Group: "B", Resolution: "720p"},
+	}
+	item := &mal.Item{Title: "Show"}
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, false)
+	loadReleases(m, all)
+	m.filter.Episode = 0 // disable the default episode filter so only fuzzy applies
+	m.applyFilter()
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	m.Update(keyMsg('/'))
+	m.Update(keyMsg('8')) // matches "1080p" (Alpha), not "720p" (Beta)
+	if !m.filter.Filtering || len(m.view) != 1 {
+		t.Fatalf("setup: want filter mode + 1 match, got Filtering=%v view=%d", m.filter.Filtering, len(m.view))
+	}
+	m.Update(enterMsg())
+	if m.filter.Filtering {
+		t.Errorf("after Enter: Filtering=true, want false (accept → normal mode)")
+	}
+	if m.filter.FuzzyText != "8" {
+		t.Errorf("after Enter: FuzzyText=%q, want '8' (kept)", m.filter.FuzzyText)
+	}
+	if len(m.view) != 1 {
+		t.Errorf("after Enter: view=%d, want 1 (filter still applied)", len(m.view))
+	}
+	if m.result.Release != nil {
+		t.Errorf("after Enter: result.Release set; Enter must not select")
+	}
+	// Esc then discards it (re-enter filter mode and re-type first).
+	m.Update(keyMsg('/'))
+	m.Update(keyMsg('8'))
+	m.Update(escMsg())
+	if m.filter.FuzzyText != "" || len(m.view) != 2 {
+		t.Errorf("after Esc: FuzzyText=%q view=%d, want '' and 2 (discarded)", m.filter.FuzzyText, len(m.view))
 	}
 }
 

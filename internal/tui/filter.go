@@ -83,7 +83,7 @@ func (f *Filter) Apply(all []*animetosho.Release) []*animetosho.Release {
 		}
 		rs = filtered
 	}
-	if f.Filtering && f.FuzzyText != "" {
+	if f.FuzzyText != "" {
 		needle := strings.ToLower(f.FuzzyText)
 		filtered := make([]*animetosho.Release, 0, len(rs))
 		for _, r := range rs {
@@ -121,6 +121,24 @@ func fuzzyMatch(haystack, needle string) bool {
 		}
 	}
 	return j == len(n)
+}
+
+// dropLastWord removes the last whitespace-delimited word from s along with the
+// spaces separating it from the previous word — readline/vim ctrl-w semantics.
+// Used by the filter input's ctrl-w binding.
+func dropLastWord(s string) string {
+	r := []rune(s)
+	end := len(r)
+	for end > 0 && r[end-1] == ' ' {
+		end--
+	}
+	for end > 0 && r[end-1] != ' ' {
+		end--
+	}
+	for end > 0 && r[end-1] == ' ' {
+		end--
+	}
+	return string(r[:end])
 }
 
 // DistinctGroups returns the ordered, de-duplicated set of non-empty release
