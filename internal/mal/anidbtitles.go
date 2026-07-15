@@ -50,8 +50,8 @@ func AnidbAIDByTitle(title string, startYear int, debug bool) (int, bool) {
 	}
 	m, err := anidbTitlesMap(debug)
 	if err != nil || len(m) == 0 {
-		if debug && err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG anidb-titles: %v\n", err)
+		if err != nil {
+			dbg(debug, "DEBUG anidb-titles: %v\n", err)
 		}
 		return 0, false
 	}
@@ -88,29 +88,25 @@ func anidbTitlesMap(debug bool) (map[string]int, error) {
 	firstBuild := statErr != nil
 	if firstBuild {
 		fmt.Fprintln(os.Stderr, "Building AniDB title index (one-time, ~2 MB)…")
-	} else if debug {
-		fmt.Fprintln(os.Stderr, "DEBUG anidb-titles: refreshing stale cache (>7d)…")
+	} else {
+		dbg(debug, "DEBUG anidb-titles: refreshing stale cache (>7d)…\n")
 	}
 
 	m, err := downloadAndBuildAnidbTitles(debug)
 	if err != nil {
 		if statErr == nil {
 			if m2, e := readAnidbTitlesCache(p); e == nil {
-				if debug {
-					fmt.Fprintf(os.Stderr, "DEBUG anidb-titles: download failed (%v); serving stale cache (%d entries)\n", err, len(m2))
-				}
+				dbg(debug, "DEBUG anidb-titles: download failed (%v); serving stale cache (%d entries)\n", err, len(m2))
 				return m2, nil
 			}
 		}
 		return nil, err
 	}
 
-	if werr := writeAnidbTitlesCache(p, m); werr != nil && debug {
-		fmt.Fprintf(os.Stderr, "DEBUG anidb-titles: cache write failed (%v)\n", werr)
+	if werr := writeAnidbTitlesCache(p, m); werr != nil {
+		dbg(debug, "DEBUG anidb-titles: cache write failed (%v)\n", werr)
 	}
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG anidb-titles: built map with %d titles\n", len(m))
-	}
+	dbg(debug, "DEBUG anidb-titles: built map with %d titles\n", len(m))
 	return m, nil
 }
 
@@ -131,9 +127,7 @@ func anidbTitlesCachePath() (string, error) {
 // it to a {normalized_title: aid} map, indexing every title except type=="short"
 // (shorts like "CB"/"SnM" are ambiguous collisions).
 func downloadAndBuildAnidbTitles(debug bool) (map[string]int, error) {
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG anidb-titles GET %s\n", anidbTitlesURL)
-	}
+	dbg(debug, "DEBUG anidb-titles GET %s\n", anidbTitlesURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, anidbTitlesURL, nil)
@@ -239,12 +233,20 @@ var seasonSuffixRes = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\s+Part\s+\d+$`),
 }
 
-// StripSeasonSuffix removes a trailing season/part marker from title.
+// StripSeasonSuffix removes trailing season/part markers from title, repeating
+// until none remain so e.g. "Foo Season 2 Part 2" → "Foo" (not "Foo Season 2").
 func StripSeasonSuffix(title string) string {
-	for _, re := range seasonSuffixRes {
-		title = re.ReplaceAllString(title, "")
+	for {
+		next := strings.TrimSpace(title)
+		for _, re := range seasonSuffixRes {
+			next = re.ReplaceAllString(next, "")
+		}
+		next = strings.TrimSpace(next)
+		if next == title {
+			return next
+		}
+		title = next
 	}
-	return strings.TrimSpace(title)
 }
 
 func readAnidbTitlesCache(path string) (map[string]int, error) {

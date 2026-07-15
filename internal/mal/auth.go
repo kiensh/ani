@@ -219,10 +219,8 @@ func malBrowserAuth(conf *oauth2.Config) (*oauth2.Token, error) {
 	v.Set("code", code)
 	v.Set("code_verifier", verifier)
 	v.Set("redirect_uri", conf.RedirectURL)
-	if authDebug {
-		fmt.Fprintf(os.Stderr, "DEBUG PKCE verifier=%s challenge=%s\n", verifier, challenge)
-		fmt.Fprintf(os.Stderr, "DEBUG MAL token exchange: POST %s body=%s\n", conf.Endpoint.TokenURL, Redact(v))
-	}
+	dbg(authDebug, "DEBUG PKCE verifier=%s challenge=%s\n", verifier, challenge)
+	dbg(authDebug, "DEBUG MAL token exchange: POST %s body=%s\n", conf.Endpoint.TokenURL, Redact(v))
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
 		conf.Endpoint.TokenURL, strings.NewReader(v.Encode()))
 	if err != nil {

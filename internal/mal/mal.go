@@ -117,9 +117,7 @@ func MyList(status mal.AnimeStatus, debug bool) ([]Item, error) {
 	if status != "" {
 		base = append(base, status)
 	}
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG MAL GET /users/@me/animelist status=%s\n", status)
-	}
+	dbg(debug, "DEBUG MAL GET /users/@me/animelist status=%s\n", status)
 	var out []Item
 	for offset := 0; ; offset += pageSize {
 		page, _, err := c.User.AnimeList(ctx, "@me", append(base, mal.Offset(offset))...)
@@ -136,17 +134,15 @@ func MyList(status mal.AnimeStatus, debug bool) ([]Item, error) {
 	return out, nil
 }
 
-// Search returns MAL anime matching a text query.
+// Search returns MAL anime matching a text query (a single MAL /anime?q= call,
+// results as MAL ranks them).
 func Search(q string, debug bool) ([]Item, error) {
 	c, err := Client(debug)
 	if err != nil {
 		return nil, err
 	}
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG MAL GET /anime?q=%s\n", q)
-	}
-	anime, _, err := c.Anime.List(context.Background(), q,
-		ExtraFields, mal.Limit(20))
+	dbg(debug, "DEBUG MAL GET /anime?q=%s\n", q)
+	anime, _, err := c.Anime.List(context.Background(), q, ExtraFields, mal.Limit(20))
 	if err != nil {
 		return nil, err
 	}
@@ -215,9 +211,7 @@ func ParseSeasonLabel(label string) (year int, season Season, ok bool) {
 // labels. nil on any error (best-effort; caller falls back to a local list).
 func SeasonArchive(debug bool) []string {
 	const u = "https://api.jikan.moe/v4/seasons"
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG Jikan GET %s\n", u)
-	}
+	dbg(debug, "DEBUG Jikan GET %s\n", u)
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return nil
@@ -263,9 +257,7 @@ type jikanEpisode struct {
 // this is the accurate source.)
 func LatestEpisode(malID int, debug bool) (int, error) {
 	first := fmt.Sprintf("%s/anime/%d/episodes", jikanBaseURL, malID)
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG Jikan GET %s\n", first)
-	}
+	dbg(debug, "DEBUG Jikan GET %s\n", first)
 	var p1 struct {
 		Pagination struct {
 			LastVisiblePage int  `json:"last_visible_page"`
@@ -286,9 +278,7 @@ func LatestEpisode(malID int, debug bool) (int, error) {
 	// transient failures; on failure return 0 (unknown) — NOT page 1's last item,
 	// which would be a wrong "latest" (the caller renders ? and retries on focus).
 	last := fmt.Sprintf("%s?page=%d", first, p1.Pagination.LastVisiblePage)
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG Jikan GET %s\n", last)
-	}
+	dbg(debug, "DEBUG Jikan GET %s\n", last)
 	var pn struct {
 		Data []jikanEpisode `json:"data"`
 	}
@@ -349,9 +339,7 @@ func Seasonal(year int, season Season, debug bool) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG MAL GET /anime/season/%d/%s\n", year, season)
-	}
+	dbg(debug, "DEBUG MAL GET /anime/season/%d/%s\n", year, season)
 	anime, _, err := c.Anime.Seasonal(context.Background(), year, mal.AnimeSeason(season),
 		ExtraFields, mal.Limit(100))
 	if err != nil {
@@ -373,9 +361,7 @@ func Upcoming(debug bool) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG MAL GET /anime/ranking/upcoming\n")
-	}
+	dbg(debug, "DEBUG MAL GET /anime/ranking/upcoming\n")
 	anime, _, err := c.Anime.Ranking(context.Background(), mal.AnimeRankingUpcoming,
 		ExtraFields, mal.Limit(100))
 	if err != nil {
@@ -414,9 +400,7 @@ func CurrentSeason() (year int, season Season, label string) {
 // Returns 0, nil if no AniDB link is present.
 func AnidbAID(malID int, debug bool) (int, error) {
 	u := fmt.Sprintf("%s/anime/%d/external", jikanBaseURL, malID)
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG Jikan GET %s\n", u)
-	}
+	dbg(debug, "DEBUG Jikan GET %s\n", u)
 	var d struct {
 		Data []struct {
 			Name string `json:"name"`
@@ -426,11 +410,9 @@ func AnidbAID(malID int, debug bool) (int, error) {
 	if err := jikanGet(u, &d); err != nil {
 		return 0, err
 	}
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG Jikan external for mal/%d:\n", malID)
-		for _, e := range d.Data {
-			fmt.Fprintf(os.Stderr, "  %s: %s\n", e.Name, e.URL)
-		}
+	dbg(debug, "DEBUG Jikan external for mal/%d:\n", malID)
+	for _, e := range d.Data {
+		dbg(debug, "  %s: %s\n", e.Name, e.URL)
 	}
 	for _, e := range d.Data {
 		if !strings.EqualFold(e.Name, "AniDB") && !strings.Contains(e.URL, "anidb.net") {
@@ -497,9 +479,7 @@ func RemoveFromList(malID int, dryRun, debug bool) error {
 	if err != nil {
 		return err
 	}
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG MAL DELETE /anime/%d/my_list_status\n", malID)
-	}
+	dbg(debug, "DEBUG MAL DELETE /anime/%d/my_list_status\n", malID)
 	_, err = c.Anime.DeleteMyListItem(context.Background(), malID)
 	return err
 }
@@ -528,9 +508,7 @@ func patchMyListStatus(malID int, body string, dryRun, debug bool) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG MAL PATCH /anime/%d/my_list_status %s\n", malID, body)
-	}
+	dbg(debug, "DEBUG MAL PATCH /anime/%d/my_list_status %s\n", malID, body)
 	resp, err := hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("mal patch: %w", err)
@@ -564,9 +542,7 @@ func RefreshItem(item *Item, dryRun, debug bool) {
 	if err != nil {
 		return
 	}
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG MAL refresh anime/%d\n", item.MalID)
-	}
+	dbg(debug, "DEBUG MAL refresh anime/%d\n", item.MalID)
 	a, _, err := c.Anime.Details(context.Background(), item.MalID, ExtraFields)
 	if err != nil {
 		return

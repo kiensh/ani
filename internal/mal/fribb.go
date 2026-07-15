@@ -40,8 +40,8 @@ var (
 func AnidbAIDViaFribb(malID int, debug bool) (int, bool) {
 	m, err := fribbMap(debug)
 	if err != nil || len(m) == 0 {
-		if debug && err != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG fribb: %v\n", err)
+		if err != nil {
+			dbg(debug, "DEBUG fribb: %v\n", err)
 		}
 		return 0, false
 	}
@@ -70,8 +70,8 @@ func fribbMap(debug bool) (map[string]int, error) {
 	firstBuild := statErr != nil
 	if firstBuild {
 		fmt.Fprintln(os.Stderr, "Building AniDB mapping from Fribb (one-time, ~7 MB)…")
-	} else if debug {
-		fmt.Fprintln(os.Stderr, "DEBUG fribb: refreshing stale cache (>7d)…")
+	} else {
+		dbg(debug, "DEBUG fribb: refreshing stale cache (>7d)…\n")
 	}
 
 	m, err := downloadAndBuildFribb(debug)
@@ -79,21 +79,17 @@ func fribbMap(debug bool) (map[string]int, error) {
 		// Fall back to whatever stale cache we have rather than failing hard.
 		if statErr == nil {
 			if m2, e := readFribbCache(p); e == nil {
-				if debug {
-					fmt.Fprintf(os.Stderr, "DEBUG fribb: download failed (%v); serving stale cache (%d entries)\n", err, len(m2))
-				}
+				dbg(debug, "DEBUG fribb: download failed (%v); serving stale cache (%d entries)\n", err, len(m2))
 				return m2, nil
 			}
 		}
 		return nil, err
 	}
 
-	if werr := writeFribbCache(p, m); werr != nil && debug {
-		fmt.Fprintf(os.Stderr, "DEBUG fribb: cache write failed (%v)\n", werr)
+	if werr := writeFribbCache(p, m); werr != nil {
+		dbg(debug, "DEBUG fribb: cache write failed (%v)\n", werr)
 	}
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG fribb: built map with %d MAL→AniDB pairs\n", len(m))
-	}
+	dbg(debug, "DEBUG fribb: built map with %d MAL→AniDB pairs\n", len(m))
 	return m, nil
 }
 
@@ -113,9 +109,7 @@ func fribbCachePath() (string, error) {
 // downloadAndBuildFribb fetches the full anime-list JSON and distills it to a
 // {mal_id: anidb_id} map, skipping entries lacking either id.
 func downloadAndBuildFribb(debug bool) (map[string]int, error) {
-	if debug {
-		fmt.Fprintf(os.Stderr, "DEBUG fribb GET %s\n", fribbFullURL)
-	}
+	dbg(debug, "DEBUG fribb GET %s\n", fribbFullURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fribbFullURL, nil)

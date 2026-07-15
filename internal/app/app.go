@@ -116,6 +116,11 @@ func resolveMal(opt *Options) (int, *mal.Item, error) {
 		err := mal.SetWatched(malID, watched, opt.DryRun, opt.Debug)
 		return err == nil && !opt.DryRun
 	}
+	if opt.DryRun {
+		// Dry-run: skip the anime picker, auto-pick the first match so the whole
+		// flow is non-interactive (the release picker dry-runs separately).
+		return resolveMalDry(opt, source, query, load)
+	}
 	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, opt.Debug)
 	if err != nil {
 		return 0, nil, err
@@ -133,6 +138,30 @@ func resolveMal(opt *Options) (int, *mal.Item, error) {
 	}
 	item.AnidbAID = aid // carry the resolved aid so the release picker's aired fallback can reuse it
 	return aid, item, nil
+}
+
+// resolveMalDry is the --dry-run path: skip the anime picker and auto-pick the
+// first item from load, so the whole flow is non-interactive.
+func resolveMalDry(opt *Options, source tui.AnimeSource, query string, load tui.AnimeLoad) (int, *mal.Item, error) {
+	season := mal.SeasonAll
+	if source == tui.SourceSeason && query == "" {
+		_, _, season = mal.CurrentSeason()
+	}
+	items := load(source, query, season)
+	if len(items) == 0 {
+		return 0, nil, fmt.Errorf("no anime found for %q", query)
+	}
+	item := items[0]
+	fmt.Fprintf(os.Stderr, "DRY-RUN: auto-picked %q\n", item.Title)
+	aid := item.AnidbAID
+	if aid == 0 {
+		aid = resolveAnidbFromMAL(&item, opt)
+	}
+	if aid == 0 {
+		return 0, nil, fmt.Errorf("could not resolve an AniDB id for %q", item.Title)
+	}
+	item.AnidbAID = aid
+	return aid, &item, nil
 }
 
 // latestEpisodeFn returns the aired-episode lookup both pickers use. AnimeTosho
@@ -207,6 +236,15 @@ func resolveAnimetosho(opt *Options) (int, *mal.Item, error) {
 		return 0, nil, fmt.Errorf("no anime found")
 	}
 	load := func(tui.AnimeSource, string, string) []mal.Item { return items }
+	if opt.DryRun {
+		// Dry-run: skip the anime picker, auto-pick the first series hit.
+		item := items[0]
+		fmt.Fprintf(os.Stderr, "DRY-RUN: auto-picked %q\n", item.Title)
+		if item.AnidbAID == 0 {
+			return 0, nil, fmt.Errorf("no AniDB id for %q", item.Title)
+		}
+		return item.AnidbAID, &item, nil
+	}
 	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, opt.Debug)
 	if err != nil {
 		return 0, nil, err
