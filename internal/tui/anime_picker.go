@@ -53,6 +53,7 @@ type AnimeFilter struct {
 type sortOption struct{ label, value string }
 
 var sortOptions = []sortOption{
+	{"Relevance", "relevance"},
 	{"Popularity", "popularity"},
 	{"Score", "score"},
 	{"Title", "title"},
@@ -246,6 +247,8 @@ func sortAnimes(items []mal.Item, sortName string) []mal.Item {
 	out := make([]mal.Item, len(items))
 	copy(out, items)
 	switch sortName {
+	case "relevance":
+		// Preserve the source's natural order (MAL's search ranking) — no re-sort.
 	case "score":
 		sort.SliceStable(out, func(i, j int) bool { return out[i].MeanScore > out[j].MeanScore })
 	case "title":
@@ -451,6 +454,7 @@ func newAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 	}
 	ap.season = ap.defaultSeason()
 	ap.filter.Status = ap.defaultStatus()
+	ap.filter.Sort = ap.defaultSort()
 	return ap
 }
 
@@ -461,6 +465,15 @@ func (m *animePicker) defaultSeason() string {
 		return m.currentLabel
 	}
 	return mal.SeasonAll
+}
+
+// defaultSort is the sort a source opens on: "relevance" for search (keep MAL's
+// search ranking), "updated" (last updated) otherwise.
+func (m *animePicker) defaultSort() string {
+	if m.query != "" {
+		return "relevance"
+	}
+	return "updated"
 }
 
 // defaultStatus is the status filter a source opens on: "My List" for Season

@@ -283,22 +283,52 @@ func TestAnimePickerSortOverlay(t *testing.T) {
 	items := []mal.Item{{MalID: 1, Title: "A"}}
 	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil, false)
 	loadAnime(m, items)
-	if m.filter.Sort != "popularity" {
-		t.Fatalf("default sort = %q, want popularity", m.filter.Sort)
+	if m.filter.Sort != "updated" {
+		t.Fatalf("default sort = %q, want updated", m.filter.Sort)
 	}
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	m.Update(keyMsg('s'))
 	if !m.overlay.active() || m.overlay.kind != animeOverlaySort {
 		t.Fatalf("s did not open sort overlay")
 	}
-	// Cursor on Popularity (0); move to Score (1), enter.
+	// Cursor on Updated; move down to Air Date, enter.
 	m.Update(downMsg())
 	m.Update(enterMsg())
-	if m.filter.Sort != "score" {
-		t.Errorf("Sort = %q, want score", m.filter.Sort)
+	if m.filter.Sort != "airdate" {
+		t.Errorf("Sort = %q, want airdate", m.filter.Sort)
 	}
 	if m.overlay.active() {
 		t.Errorf("overlay still active after Enter")
+	}
+}
+
+// TestAnimePickerSearchDefaultSort verifies search mode (query != "") defaults to
+// "relevance" (preserve MAL's search ranking), while browse defaults to popularity.
+func TestAnimePickerSearchDefaultSort(t *testing.T) {
+	items := []mal.Item{{MalID: 1, Title: "A"}}
+	sm := newAnimePicker(SourceSeason, "frieren", animeLoadAll(items), nil, nil, nil, nil, false)
+	if sm.filter.Sort != "relevance" {
+		t.Errorf("search default sort = %q, want relevance", sm.filter.Sort)
+	}
+	bm := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil, false)
+	if bm.filter.Sort != "updated" {
+		t.Errorf("browse default sort = %q, want updated", bm.filter.Sort)
+	}
+}
+
+// TestSortAnimesRelevance verifies "relevance" preserves the input order (no
+// re-sort), so MAL's search ranking is kept.
+func TestSortAnimesRelevance(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, Members: 100},
+		{MalID: 2, Members: 5},
+		{MalID: 3, Members: 50},
+	}
+	got := sortAnimes(items, "relevance")
+	for i := range items {
+		if got[i].MalID != items[i].MalID {
+			t.Errorf("relevance sort reordered items; want input order preserved")
+		}
 	}
 }
 
