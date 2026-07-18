@@ -24,6 +24,15 @@ const anidbTitlesSample = `<?xml version="1.0" encoding="UTF-8"?>
 		<title type="main" xml:lang="x-jat">Seihantai na Kimi to Boku (2026)</title>
 		<title type="official" xml:lang="en">You and I Are Polar Opposites (2026)</title>
 	</anime>
+	<anime aid="55555">
+		<title type="main" xml:lang="x-jat">Hana-darake na Show</title>
+	</anime>
+	<anime aid="66666">
+		<title type="main" xml:lang="x-jat">Saijo no Osewa wo Kagenagara Suru Koto ni Narimashita</title>
+	</anime>
+	<anime aid="77777">
+		<title type="main" xml:lang="x-jat">Akira</title>
+	</anime>
 </animetitles>`
 
 func gzipString(s string) []byte {
@@ -143,6 +152,47 @@ func TestStripSeasonSuffix(t *testing.T) {
 	}
 }
 
+func TestNormalizeTitle(t *testing.T) {
+	cases := map[string]string{
+		"A: B-C!":         "abc",
+		"Hana-darake":     "hanadarake",
+		"Dai Dai Dai":     "daidaidai",
+		"Foo (2026)":      "foo2026",
+		"  SEIHANTAI  ":   "seihantai",
+		"":                "",
+	}
+	for in, want := range cases {
+		if got := normalizeTitle(in); got != want {
+			t.Errorf("normalizeTitle(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestAnidbAIDByTitleTolerant covers the MAL↔AniDB format-diff cases the offline
+// dump should now bridge: hyphen differences (exact, via normalizeTitle) and small
+// romanization diffs (fuzzy, long titles only).
+func TestAnidbAIDByTitleTolerant(t *testing.T) {
+	_, cleanup := setupAnidbTitlesServer(t, anidbTitlesSample)
+	defer cleanup()
+
+	// Hyphen diff: indexed "Hana-darake na Show", queried "Hanadarake na Show".
+	if aid, ok := AnidbAIDByTitle("Hanadarake na Show", 0, false); !ok || aid != 55555 {
+		t.Errorf("hyphen diff: AnidbAIDByTitle = (%d, %v), want (55555, true)", aid, ok)
+	}
+
+	// Fuzzy: indexed "...Osewa wo Kagenagara...", queried "...Osewa o Kagenagara..."
+	// (the を particle wo→o); long title, edit distance 1.
+	if aid, ok := AnidbAIDByTitle("Saijo no Osewa o Kagenagara Suru Koto ni Narimashita", 0, false); !ok || aid != 66666 {
+		t.Errorf("fuzzy (wo/o): AnidbAIDByTitle = (%d, %v), want (66666, true)", aid, ok)
+	}
+
+	// Short title, 1-char diff: must NOT fuzzy-match (would be a false positive).
+	// Indexed "Akira" (len 5 < 30); "Akura" is distance 1 but fuzzy is gated off.
+	if aid, ok := AnidbAIDByTitle("Akura", 0, false); ok || aid != 0 {
+		t.Errorf("short fuzzy: AnidbAIDByTitle = (%d, %v), want (0, false) — no false match", aid, ok)
+	}
+}
+
 // TestAnidbAIDByTitleRealDump resolves the user's anime against the live AniDB
 // dump (1.84 MB) — guards the real parser/token-walk end-to-end. Skipped unless
 // ANI_INTEGRATION=1 so normal `go test` stays offline + fast.
@@ -160,4 +210,25 @@ func TestAnidbAIDByTitleRealDump(t *testing.T) {
 		t.Fatalf(`real dump: "Seihantai na Kimi to Boku 2nd Season"+2026 = (%d, %v), want (19983, true)`, aid, ok)
 	}
 	t.Logf("resolved aid %d via the real AniDB dump", aid)
+}
+
+// TestAnidbAIDByTitleRealSaijo resolves the long-titled "Saijo no Osewa" anime
+// (MAL title) against the real dump — it's indexed as aid 19690 with hyphen +
+// "wo"/"o" differences, so this guards the concatenate + fuzzy path end-to-end.
+// Skipped unless ANI_INTEGRATION=1.
+func TestAnidbAIDByTitleRealSaijo(t *testing.T) {
+	if os.Getenv("ANI_INTEGRATION") == "" {
+		t.Skip("skipping network integration test; set ANI_INTEGRATION=1 to run")
+	}
+	oldURL, oldCache := anidbTitlesURL, anidbTitlesCache
+	anidbTitlesURL = "https://anidb.net/api/anime-titles.xml.gz"
+	anidbTitlesCache = filepath.Join(t.TempDir(), "anidb-titles.json")
+	defer func() { anidbTitlesURL, anidbTitlesCache = oldURL, oldCache }()
+
+	q := "Saijo no Osewa: Takane no Hanadarake na Meimonkou de, Gakuin Ichi no Ojousama (Seikatsu Nouryoku Kaimu) wo Kagenagara Osewa suru Koto ni Narimashita"
+	aid, ok := AnidbAIDByTitle(q, 0, true)
+	if !ok || aid != 19690 {
+		t.Fatalf(`real dump: Saijo... = (%d, %v), want (19690, true)`, aid, ok)
+	}
+	t.Logf("resolved Saijo aid %d via the real AniDB dump (concatenate + fuzzy)", aid)
 }

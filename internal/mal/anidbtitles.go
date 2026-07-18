@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 var (
@@ -38,7 +39,7 @@ var (
 
 // AnidbAIDByTitle resolves an AniDB id from the anime's title via AniDB's public
 // anime-titles dump (one-time ~2 MB download, cached at
-// <configDir>/ani/anidb-titles.json, refreshed weekly). It first tries an exact
+// <configDir>/ani/anidb-titles2.json, refreshed weekly). It first tries an exact
 // normalized match, then — when startYear > 0 — a year-variant "base (YYYY)" to
 // bridge MAL season naming ("… 2nd Season") onto AniDB's year-suffixed entries
 // ("… (2026)", which has zero "2nd Season" variant). "(YYYY)" is a unique key in
@@ -67,7 +68,75 @@ func AnidbAIDByTitle(title string, startYear int, debug bool) (int, bool) {
 			}
 		}
 	}
+	// Fuzzy fallback: for a long query, accept a near-exact AniDB title to bridge
+	// small MAL↔AniDB romanization diffs (e.g. "wo"/"o") that exact + year-variant
+	// can't. Gated on length + uniqueness to avoid short-title false matches.
+	if aid, ok := fuzzyMatch(m, normalizeTitle(title)); ok {
+		return aid, true
+	}
 	return 0, false
+}
+
+// fuzzyMinLen is the minimum normalized-query length for the fuzzy fallback —
+// long titles only, where an edit distance ≤ 2 is unambiguous.
+const fuzzyMinLen = 30
+
+// fuzzyMatch finds the AniDB title closest to q by Levenshtein distance and
+// accepts it when q is long, distance ≤ 2, and the best is unique (strictly
+// closer than the runner-up).
+func fuzzyMatch(m map[string]int, q string) (int, bool) {
+	if len(q) < fuzzyMinLen {
+		return 0, false
+	}
+	bestAid, bestDist, secondDist := 0, 3, 3
+	for k, aid := range m {
+		if aid <= 0 {
+			continue
+		}
+		// Length pre-filter (edit distance ≥ |len diff|) keeps the scan cheap.
+		if dk := len(k) - len(q); dk > 2 || dk < -2 {
+			continue
+		}
+		if d := levenshtein(q, k); d < bestDist {
+			secondDist = bestDist
+			bestDist = d
+			bestAid = aid
+		} else if d < secondDist {
+			secondDist = d
+		}
+	}
+	if bestAid > 0 && bestDist <= 2 && bestDist < secondDist {
+		return bestAid, true
+	}
+	return 0, false
+}
+
+// levenshtein returns the edit (Levenshtein) distance between a and b.
+func levenshtein(a, b string) int {
+	ra, rb := []rune(a), []rune(b)
+	if len(ra) == 0 {
+		return len(rb)
+	}
+	if len(rb) == 0 {
+		return len(ra)
+	}
+	prev := make([]int, len(rb)+1)
+	cur := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		cur[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, min(cur[j-1]+1, prev[j-1]+cost))
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(rb)]
 }
 
 // anidbTitlesMap returns the title→aid map, serving the on-disk cache when fresh
@@ -120,7 +189,7 @@ func anidbTitlesCachePath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "ani", "anidb-titles.json"), nil
+	return filepath.Join(dir, "ani", "anidb-titles2.json"), nil
 }
 
 // downloadAndBuildAnidbTitles fetches the gzipped anime-titles dump and distills
@@ -206,10 +275,18 @@ func attrValue(attrs []xml.Attr, local string) string {
 	return ""
 }
 
-// normalizeTitle lowercases, trims, and collapses internal whitespace runs to a
-// single space. Punctuation/digits are kept ("3×3 Eyes" must survive).
+// normalizeTitle lowercases and keeps only letters/digits, concatenated — so
+// MAL and AniDB titles that differ only in spaces, hyphens, apostrophes, or
+// punctuation ("Hana-darake" vs "Hanadarake", "Dai Dai" vs "Daidai",
+// "(2026)", ":") compare equal.
 func normalizeTitle(s string) string {
-	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // StartYear returns the 4-digit start year from item.StartDate ("YYYY-MM-DD"),
