@@ -7,21 +7,20 @@ import (
 	"ani/internal/mal"
 )
 
-// FallbackAnidbByTitle searches animetosho by title (and shortened variants)
-// and returns the top anidb id (used when a MAL anime has no AniDB external
-// link). Returns 0 if none found.
-func FallbackAnidbByTitle(title string) int {
+// SearchAnidbSeries searches animetosho by title (and shortened variants) and
+// returns the de-duplicated hits (by anidb_aid) from the first variant that
+// matches. Used by the manual animetosho-series fallback picker.
+func SearchAnidbSeries(title string) []animetosho.SeriesSummary {
 	for _, candidate := range titleVariants(title) {
 		series, err := animetosho.SearchSeries(candidate)
 		if err != nil {
 			continue
 		}
-		series = DedupSeries(series)
-		if len(series) > 0 {
-			return series[0].AnidbAID
+		if series = DedupSeries(series); len(series) > 0 {
+			return series
 		}
 	}
-	return 0
+	return nil
 }
 
 // titleVariants returns progressively shorter versions of a title for fallback

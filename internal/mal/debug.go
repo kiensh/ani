@@ -14,6 +14,12 @@ var debugLog io.Writer = io.Discard
 // opens <configdir>/ani/debug.log).
 func SetDebugLog(w io.Writer) { debugLog = w }
 
+// LogDebug writes a line to the always-on debug log (no terminal echo). Lets
+// other packages (e.g. tui) record debug info to the same log file.
+func LogDebug(format string, args ...any) {
+	fmt.Fprintf(debugLog, format, args...)
+}
+
 // dbg writes a debug line to the always-on log, and also to stderr when echoTerm
 // is true (the per-call `debug` flag, driven by --debug). All DEBUG … lines go
 // through this so they're always captured to the file and echoed to the terminal

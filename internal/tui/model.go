@@ -78,3 +78,25 @@ func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch fun
 	}
 	return &Result{Quit: true}, nil
 }
+
+// RunSeriesPicker launches the manual AnimeTosho-series fallback: a two-pane
+// picker over the given series so the user can choose the matching AniDB entry
+// when auto resolution fails. Returns (aid, true) on selection, (0, false) on
+// cancel or empty input.
+func RunSeriesPicker(header string, series []animetosho.SeriesSummary) (int, bool) {
+	if len(series) == 0 {
+		return 0, false
+	}
+	m := newSeriesPicker(header, series)
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	final, err := p.Run()
+	if err != nil || final == nil {
+		return 0, false
+	}
+	sp, ok := final.(*seriesPicker)
+	if !ok {
+		return 0, false
+	}
+	sp.Cleanup()
+	return sp.result.aid, sp.result.ok
+}

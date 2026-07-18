@@ -84,12 +84,13 @@ func ToReleases(entries []Entry) []*Release {
 // SeriesSummary is one anime from /series?q=. Season is computed client-side
 // (max season token across that aid's titles); the API has no reliable season.
 type SeriesSummary struct {
-	AnidbAID     int    `json:"anidb_aid"`
-	Title        string `json:"title"`
-	Key          string `json:"key"`
-	TVDBSeason   int    `json:"tvdb_season"`
-	TorrentCount int    `json:"torrent_count"`
-	Season       int    `json:"-"`
+	AnidbAID      int    `json:"anidb_aid"`
+	Title         string `json:"title"`
+	Key           string `json:"key"`
+	TVDBSeason    int    `json:"tvdb_season"`
+	TorrentCount  int    `json:"torrent_count"`
+	LatestRelease string `json:"latest_release"`
+	Season        int    `json:"-"`
 }
 
 type seriesSearchResponse struct {

@@ -392,8 +392,9 @@ type animePicker struct {
 	topItem int
 	debug   bool
 
-	cover     *CoverCache
-	coverText string
+	cover       *CoverCache
+	coverText   string
+	coverHeights map[int]int // malID → actual rendered cover height (lines), so the placeholder matches on re-focus
 
 	width, height int
 
@@ -443,6 +444,7 @@ func newAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 		applyWatched:  applyWatched,
 		latestEpisode: latestEpisode,
 		aired:         map[int]int{},
+		coverHeights:  map[int]int{},
 		cache:         &animeCache{m: map[string][]mal.Item{}},
 		loading:       true,
 		currentYear:   y,
@@ -562,6 +564,11 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case coverTextMsg:
 		m.coverText = msg.text
+		// Cache the actual rendered cover height so the blank placeholder matches
+		// exactly on re-focus (no text shift).
+		if msg.text != "" && msg.key > 0 {
+			m.coverHeights[msg.key] = len(strings.Split(msg.text, "\n"))
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -1226,8 +1233,13 @@ func (m *animePicker) fixScroll() {
 	m.topItem = clampTop(m.cursor, m.topItem, m.pageSize(), len(m.view))
 }
 
-// coverTextMsg carries the unicode-placeholder text for a cover.
-type coverTextMsg struct{ text string }
+// coverTextMsg carries the unicode-placeholder text for a cover. key is the
+// anime's malID (anime picker) or the series' aid (series picker), used to cache
+// the rendered cover height so the placeholder matches exactly on re-focus.
+type coverTextMsg struct {
+	text string
+	key  int
+}
 
 // focusCmd batches the work done when the focused anime changes: load its cover
 // and (for airing anime) fetch its latest aired episode.
@@ -1260,6 +1272,7 @@ func (m *animePicker) loadCoverCmd() tea.Cmd {
 	}
 	path := m.cover.Get(cur.CoverURL)
 	cols, rows := m.coverCols, m.coverRows
+	malID := cur.MalID
 	if path == "" {
 		return func() tea.Msg { return coverTextMsg{text: ""} }
 	}
@@ -1269,7 +1282,7 @@ func (m *animePicker) loadCoverCmd() tea.Cmd {
 			return coverTextMsg{text: ""}
 		}
 		WriteUpload(upload)
-		return coverTextMsg{text: text}
+		return coverTextMsg{text: text, key: malID}
 	}
 }
 
@@ -1417,13 +1430,11 @@ func (m *animePicker) renderMetadata() string {
 	cur := m.currentItemCopy()
 
 	lines := make([]string, 0, m.coverRows+8)
+	// No blank placeholder: show nothing until the cover loads, then show the
+	// cover at its exact rendered height. Avoids the height mismatch between a
+	// fixed placeholder and the actual cover.
 	if m.coverText != "" {
 		lines = append(lines, strings.Split(m.coverText+"\x1b[0m", "\n")...)
-	} else {
-		blank := strings.Repeat(" ", m.coverCols)
-		for i := 0; i < m.coverRows; i++ {
-			lines = append(lines, CoverBlankStyle.Render(blank))
-		}
 	}
 
 	if cur == nil {

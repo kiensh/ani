@@ -17,6 +17,11 @@ type Config struct {
 	Sort    string `json:"sort"`    // default sort: newest|oldest|smallest|largest
 	Player  string `json:"player"`  // streaming player, default mpv
 	Dir     string `json:"dir"`     // default download dir, "" = cwd
+
+	// AnidbOverrides maps a MAL anime id to a user-chosen AniDB id (set by the
+	// manual animetosho-series fallback), so an anime resolved once by hand
+	// resolves instantly ever after. malID → aid.
+	AnidbOverrides map[int]int `json:"anidb_overrides"`
 }
 
 // Default returns the built-in default config.
@@ -24,7 +29,14 @@ func Default() Config {
 	return Config{Sort: "newest", Player: "mpv"}
 }
 
+// configFile overrides the on-disk config path (used by tests); empty means
+// derive it from os.UserConfigDir() like the MAL token.
+var configFile = ""
+
 func configPath() (string, error) {
+	if configFile != "" {
+		return configFile, nil
+	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
@@ -59,6 +71,28 @@ func SaveFilters(group, quality, sort string) {
 	cfg.Group = group
 	cfg.Quality = quality
 	cfg.Sort = sort
+	save(cfg)
+}
+
+// AnidbOverride returns a user-saved AniDB id for malID, if one was set.
+func AnidbOverride(malID int) (int, bool) {
+	cfg := Load()
+	aid, ok := cfg.AnidbOverrides[malID]
+	return aid, ok && aid > 0
+}
+
+// SaveAnidbOverride records a user-chosen AniDB id for a MAL anime id (from the
+// manual animetosho-series fallback) so it resolves instantly next time.
+func SaveAnidbOverride(malID, aid int) {
+	cfg := Load()
+	if cfg.AnidbOverrides == nil {
+		cfg.AnidbOverrides = map[int]int{}
+	}
+	cfg.AnidbOverrides[malID] = aid
+	save(cfg)
+}
+
+func save(cfg Config) {
 	p, err := configPath()
 	if err != nil {
 		return

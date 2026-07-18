@@ -134,6 +134,10 @@ func resolveMal(opt *Options) (int, *mal.Item, error) {
 		aid = resolveAnidbFromMAL(item, opt)
 	}
 	if aid == 0 {
+		// Last resort: manual AnimeTosho-series picker (cached on choice).
+		aid = resolveAnidbManual(item, opt)
+	}
+	if aid == 0 {
 		return 0, nil, fmt.Errorf("could not resolve an AniDB id for %q", item.Title)
 	}
 	item.AnidbAID = aid // carry the resolved aid so the release picker's aired fallback can reuse it
@@ -185,9 +189,13 @@ func latestEpisodeFn(opt *Options) func(*mal.Item) int {
 }
 
 // resolveAidFast resolves an AniDB aid for item from the fast/cached sources
-// only — the item's own aid, then Fribb, then the AniDB title dump. No Jikan
-// /external call (that path is slow + rate-limited). Returns 0 if unresolved.
+// only — the user's manual override, then the item's own aid, Fribb, and the
+// AniDB title dump. No Jikan /external call (slow + rate-limited). Returns 0 if
+// unresolved.
 func resolveAidFast(item *mal.Item, opt *Options) int {
+	if id, ok := config.AnidbOverride(item.MalID); ok {
+		return id
+	}
 	if aid := item.AnidbAID; aid > 0 {
 		return aid
 	}
@@ -200,9 +208,13 @@ func resolveAidFast(item *mal.Item, opt *Options) int {
 	return 0
 }
 
-// resolveAnidbFromMAL resolves the AniDB id for a MAL item: Fribb offline map →
-// AniDB title dump → Jikan external links → animetosho title search.
+// resolveAnidbFromMAL resolves the AniDB id for a MAL item: user override → Fribb
+// offline map → AniDB title dump → Jikan external links. Returns 0 if none match
+// (the caller then offers the manual animetosho-series fallback).
 func resolveAnidbFromMAL(item *mal.Item, opt *Options) int {
+	if aid, ok := config.AnidbOverride(item.MalID); ok {
+		return aid // user's saved manual choice
+	}
 	if id, ok := mal.AnidbAIDViaFribb(item.MalID, opt.Debug); ok {
 		return id
 	}
@@ -214,11 +226,24 @@ func resolveAnidbFromMAL(item *mal.Item, opt *Options) int {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 0
 	}
-	if id == 0 {
-		fmt.Fprintf(os.Stderr, "No AniDB link on MAL for %q — searching animetosho…\n", item.Title)
-		id = ui.FallbackAnidbByTitle(item.Title)
-	}
 	return id
+}
+
+// resolveAnidbManual is the last-resort fallback when auto resolution fails: it
+// searches AnimeTosho by title and opens the series picker so the user can pick
+// the matching series. The choice is cached (malID → aid) so it resolves
+// instantly next time. Returns 0 if the user cancels or nothing is found.
+func resolveAnidbManual(item *mal.Item, opt *Options) int {
+	series := ui.SearchAnidbSeries(item.Title)
+	if len(series) == 0 {
+		return 0
+	}
+	aid, ok := tui.RunSeriesPicker(item.Title, series)
+	if !ok || aid <= 0 {
+		return 0
+	}
+	config.SaveAnidbOverride(item.MalID, aid)
+	return aid
 }
 
 // resolveAnimetosho is the no-MAL path. A text query searches AnimeTosho series
