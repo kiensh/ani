@@ -35,12 +35,14 @@ type Result struct {
 // supplies items per (source, query, season); applyStatus applies a per-anime
 // set-status/remove action, applyScore sets the score (nil disables either);
 // latestEpisode backs the "watched/aired/total" display for the focused airing
-// anime (nil disables). Returns the selected anime, or Quit=true on cancel.
-func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) int, debug bool) (*Result, error) {
+// anime (nil disables); latestEpisodePrefetch is the fast-only background variant
+// that pages the aired-episode prefetch (nil disables aired prefetch; covers are
+// still paged). Returns the selected anime, or Quit=true on cancel.
+func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) int, latestEpisodePrefetch func(*mal.Item) int, debug bool) (*Result, error) {
 	if load == nil {
 		return &Result{Quit: true}, nil
 	}
-	m := newAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, debug)
+	m := newAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetch, debug)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
 	if err != nil {

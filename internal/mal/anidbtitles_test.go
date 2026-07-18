@@ -116,6 +116,81 @@ func TestAnidbAIDByTitleCacheReused(t *testing.T) {
 	}
 }
 
+// TestAnidbTitlesMemoServesAfterCacheRemoved: the in-memory memo serves the map
+// without re-reading disk or re-downloading, even after the on-disk cache file
+// is deleted (without the memo, the missing file would force a 2nd download).
+func TestAnidbTitlesMemoServesAfterCacheRemoved(t *testing.T) {
+	hits, cleanup := setupAnidbTitlesServer(t, anidbTitlesSample)
+	defer cleanup()
+
+	if aid, ok := AnidbAIDByTitle("Seihantai na Kimi to Boku", 0, false); !ok || aid != 19010 {
+		t.Fatalf("first lookup = (%d,%v), want (19010,true)", aid, ok)
+	}
+	if *hits != 1 {
+		t.Fatalf("hits after first lookup = %d, want 1", *hits)
+	}
+	// Delete the on-disk cache: only the in-memory memo can satisfy the next
+	// lookup without re-downloading.
+	if err := os.Remove(anidbTitlesCache); err != nil {
+		t.Fatalf("remove cache file: %v", err)
+	}
+	if aid, ok := AnidbAIDByTitle("Seihantai na Kimi to Boku", 0, false); !ok || aid != 19010 {
+		t.Errorf("second lookup = (%d,%v), want (19010,true) served from memo", aid, ok)
+	}
+	if *hits != 1 {
+		t.Errorf("hits after second lookup = %d, want 1 (memo served, no re-download)", *hits)
+	}
+}
+
+// TestAnidbTitlesMemoPathIsolation: a different cache path is NOT served from a
+// previous path's memo — it loads its own map.
+func TestAnidbTitlesMemoPathIsolation(t *testing.T) {
+	_, cleanupA := setupAnidbTitlesServer(t, anidbTitlesSample)
+	if aid, ok := AnidbAIDByTitle("Seihantai na Kimi to Boku", 0, false); !ok || aid != 19010 {
+		t.Fatalf("path A lookup = (%d,%v), want (19010,true)", aid, ok)
+	}
+	cleanupA()
+
+	const other = `<?xml version="1.0" encoding="UTF-8"?>
+<animetitles>
+	<anime aid="99999"><title type="main" xml:lang="x-jat">Seihantai na Kimi to Boku</title></anime>
+</animetitles>`
+	_, cleanupB := setupAnidbTitlesServer(t, other)
+	defer cleanupB()
+
+	if aid, ok := AnidbAIDByTitle("Seihantai na Kimi to Boku", 0, false); !ok || aid != 99999 {
+		t.Errorf("path B lookup = (%d,%v), want (99999,true) — isolated from path A's memo", aid, ok)
+	}
+}
+
+// TestAnidbTitlesMemoFailureNotCached: a failed load (HTTP 500, no disk cache)
+// is not memoized — the next lookup retries the server.
+func TestAnidbTitlesMemoFailureNotCached(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	oldURL, oldCache := anidbTitlesURL, anidbTitlesCache
+	anidbTitlesURL = srv.URL
+	anidbTitlesCache = filepath.Join(t.TempDir(), "anidb-titles.json")
+	defer func() { anidbTitlesURL, anidbTitlesCache = oldURL, oldCache }()
+
+	if _, ok := AnidbAIDByTitle("Seihantai na Kimi to Boku", 0, false); ok {
+		t.Fatal("first lookup: want failure (0,false)")
+	}
+	if hits != 1 {
+		t.Fatalf("hits after first lookup = %d, want 1", hits)
+	}
+	if _, ok := AnidbAIDByTitle("Seihantai na Kimi to Boku", 0, false); ok {
+		t.Fatal("second lookup: want failure (0,false)")
+	}
+	if hits != 2 {
+		t.Errorf("hits after second lookup = %d, want 2 (failure not memoized)", hits)
+	}
+}
+
 func TestStartYear(t *testing.T) {
 	tests := []struct {
 		start string

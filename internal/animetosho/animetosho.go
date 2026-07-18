@@ -27,6 +27,14 @@ const (
 // toshoBase is the feed root (a var so tests can point it at httptest).
 var toshoBase = "https://feed.animetosho.xyz"
 
+// SetToshoBaseForTest overrides the feed root and returns a restore func. For
+// cross-package tests; same-package tests can set toshoBase directly.
+func SetToshoBaseForTest(url string) func() {
+	old := toshoBase
+	toshoBase = url
+	return func() { toshoBase = old }
+}
+
 // Series is the nested anime metadata on a release.
 type Series struct {
 	Title         string `json:"title"`
@@ -353,7 +361,10 @@ func LatestEpisode(aid int) int {
 	if haveCluster && hi-lo >= mixedGap {
 		return lo
 	}
-	return maxSupp
+	if haveCluster {
+		return hi // newest-aired episode number (max of the newest-day cluster)
+	}
+	return maxSupp // defensive: newestDay set implies a cluster, but guard anyway
 }
 
 // parseDay parses the date portion of an animetosho date_added value

@@ -36,17 +36,25 @@ type CoverCache struct {
 	mu   sync.RWMutex
 }
 
-// NewCoverCache creates a cache backed by a fresh temp directory and returns a
-// tea.Cmd that downloads every distinct URL concurrently. Get returns "" until
-// a given URL's download finishes, so callers should re-render on coverReadyMsg.
-// Empty URLs are skipped (and never stored).
-func NewCoverCache(urls []string) (tea.Cmd, *CoverCache) {
+// NewCoverCache creates an empty cache backed by a fresh temp directory. Use
+// Download to fetch URLs (page-by-page); Get returns "" until a URL's download
+// finishes, so callers re-render on coverReadyMsg.
+func NewCoverCache() *CoverCache {
 	dir, err := os.MkdirTemp("", coverCacheDirName)
 	if err != nil {
-		return func() tea.Msg { return coverReadyMsg{} }, &CoverCache{maps: map[string]string{}}
+		return &CoverCache{maps: map[string]string{}}
 	}
-	c := &CoverCache{dir: dir, maps: map[string]string{}}
-	// De-dup while preserving order so each URL downloads exactly once.
+	return &CoverCache{dir: dir, maps: map[string]string{}}
+}
+
+// Download returns a Cmd that fetches each distinct, non-empty, not-already-
+// cached URL concurrently and emits coverReadyMsg once the batch settles. Already
+// cached URLs are skipped, so it's safe to call per visible page.
+func (c *CoverCache) Download(urls []string) tea.Cmd {
+	if c == nil {
+		return func() tea.Msg { return coverReadyMsg{} }
+	}
+	c.mu.RLock()
 	seen := map[string]bool{}
 	distinct := make([]string, 0, len(urls))
 	for _, u := range urls {
@@ -54,9 +62,13 @@ func NewCoverCache(urls []string) (tea.Cmd, *CoverCache) {
 			continue
 		}
 		seen[u] = true
+		if _, ok := c.maps[u]; ok {
+			continue // already downloaded
+		}
 		distinct = append(distinct, u)
 	}
-	return c.downloadAll(distinct), c
+	c.mu.RUnlock()
+	return c.downloadAll(distinct)
 }
 
 // downloadAll returns a Cmd that fetches each URL in its own goroutine. Each

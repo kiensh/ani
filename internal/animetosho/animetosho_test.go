@@ -210,6 +210,39 @@ func TestLatestEpisodeMixedNumbering(t *testing.T) {
 	}
 }
 
+// TestLatestEpisodeMixedNumberingDateSkew: per-season ep 2 (day D) and cumulative
+// ep 26 (day D+1, within dayWindow) — the same aired episode numbered two ways
+// with 1-day upload skew. Returns the per-season 2.
+func TestLatestEpisodeMixedNumberingDateSkew(t *testing.T) {
+	defer withToshoServer(t, toshoBodyDated(map[int][]datedRel{
+		1:  {{"A", "2026-07-05"}, {"B", "2026-07-05"}, {"C", "2026-07-05"}},
+		2:  {{"A", "2026-07-12"}, {"B", "2026-07-12"}, {"C", "2026-07-12"}},
+		25: {{"ASW", "2026-07-05"}, {"SubsPlease", "2026-07-05"}, {"VARYG", "2026-07-07"}},
+		26: {{"ASW", "2026-07-13"}, {"SubsPlease", "2026-07-13"}, {"VARYG", "2026-07-13"}}, // 1 day after ep 2
+	}), 0)()
+	if got := LatestEpisode(19663); got != 2 {
+		t.Errorf("LatestEpisode (date-skew mixed) = %d, want 2", got)
+	}
+}
+
+// TestLatestEpisodeLaggingCumulative: per-season numbering has progressed to ep 5
+// (newest day), while a cumulative-numbered release (ep 26, ≥3 groups) lags on an
+// older day. The latest AIRED is ep 5 — not the stale global-max 26. Guards the
+// bug where returning max(supported) picked an older cumulative number.
+func TestLatestEpisodeLaggingCumulative(t *testing.T) {
+	defer withToshoServer(t, toshoBodyDated(map[int][]datedRel{
+		1:  {{"A", "2026-07-01"}, {"B", "2026-07-01"}, {"C", "2026-07-01"}},
+		2:  {{"A", "2026-07-02"}, {"B", "2026-07-02"}, {"C", "2026-07-02"}},
+		3:  {{"A", "2026-07-03"}, {"B", "2026-07-03"}, {"C", "2026-07-03"}},
+		4:  {{"A", "2026-07-04"}, {"B", "2026-07-04"}, {"C", "2026-07-04"}},
+		5:  {{"A", "2026-07-05"}, {"B", "2026-07-05"}, {"C", "2026-07-05"}}, // newest
+		26: {{"ASW", "2026-06-28"}, {"SubsPlease", "2026-06-28"}, {"VARYG", "2026-06-28"}}, // lagging cumulative
+	}), 0)()
+	if got := LatestEpisode(19663); got != 5 {
+		t.Errorf("LatestEpisode (lagging cumulative) = %d, want 5 (newest-day per-season, not stale 26)", got)
+	}
+}
+
 // TestLatestEpisodeSameDayDoubleEpisode: eps 11 and 12 both aired the same day —
 // consecutive (spread 1), not mixed numbering → return the max (12).
 func TestLatestEpisodeSameDayDoubleEpisode(t *testing.T) {

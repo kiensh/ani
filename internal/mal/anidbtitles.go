@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
@@ -139,14 +140,46 @@ func levenshtein(a, b string) int {
 	return prev[len(rb)]
 }
 
-// anidbTitlesMap returns the title→aid map, serving the on-disk cache when fresh
-// and rebuilding (re-downloading) it when missing or stale. A failed rebuild
-// falls back to a stale cache if present. Mirrors fribbMap.
+// anidbTitlesMap returns the title→aid map, memoized per cache path: the parsed
+// map is built once per path (the prefetch issues many lookups per session, each
+// otherwise re-parsing the ~2 MB file) and reused for subsequent calls. Falls
+// through to loadAnidbTitlesMap (on-disk cache when fresh, else rebuild) on a
+// cache miss or when the path changes. Test-safe: each test sets a unique
+// anidbTitlesCache temp path, so each loads independently.
+var (
+	anidbMemoMu   sync.Mutex
+	anidbMemoPath string
+	anidbMemo     map[string]int
+)
+
 func anidbTitlesMap(debug bool) (map[string]int, error) {
 	p, err := anidbTitlesCachePath()
 	if err != nil {
 		return nil, err
 	}
+	anidbMemoMu.Lock()
+	if p == anidbMemoPath && anidbMemo != nil {
+		m := anidbMemo
+		anidbMemoMu.Unlock()
+		return m, nil
+	}
+	anidbMemoMu.Unlock()
+
+	m, err := loadAnidbTitlesMap(p, debug)
+	if err != nil || len(m) == 0 {
+		return m, err // don't memoize errors/empty — let the next call retry
+	}
+	anidbMemoMu.Lock()
+	anidbMemoPath = p
+	anidbMemo = m
+	anidbMemoMu.Unlock()
+	return m, nil
+}
+
+// loadAnidbTitlesMap returns the title→aid map, serving the on-disk cache when
+// fresh and rebuilding (re-downloading) it when missing or stale. A failed
+// rebuild falls back to a stale cache if present. Mirrors fribbMap.
+func loadAnidbTitlesMap(p string, debug bool) (map[string]int, error) {
 	info, statErr := os.Stat(p)
 	if statErr == nil && time.Since(info.ModTime()) < anidbTitlesMaxAge {
 		if m, e := readAnidbTitlesCache(p); e == nil {

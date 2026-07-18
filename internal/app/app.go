@@ -121,7 +121,7 @@ func resolveMal(opt *Options) (int, *mal.Item, error) {
 		// flow is non-interactive (the release picker dry-runs separately).
 		return resolveMalDry(opt, source, query, load)
 	}
-	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, opt.Debug)
+	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetchFn(opt), opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -185,6 +185,26 @@ func latestEpisodeFn(opt *Options) func(*mal.Item) int {
 		}
 		n, _ := mal.LatestEpisode(item.MalID, opt.Debug)
 		return n
+	}
+}
+
+// latestEpisodePrefetchFn is the background-prefetch variant of latestEpisodeFn:
+// fast-only (no Jikan), and it skips items whose AniDB id can't be resolved from
+// the fast sources (override → item aid → Fribb → AniDB titles). Those need the
+// manual AnimeTosho selection first, so their aired count isn't available yet —
+// and the background prefetch never calls Jikan (rate-limited, errors for some).
+// Returns 0 when skipped/unknown; the focus path (latestEpisodeFn) still tries
+// the full chain (incl. Jikan) on demand for items the prefetch didn't fill.
+func latestEpisodePrefetchFn(opt *Options) func(*mal.Item) int {
+	return func(item *mal.Item) int {
+		if item == nil {
+			return 0
+		}
+		aid := resolveAidFast(item, opt)
+		if aid <= 0 {
+			return 0
+		}
+		return animetosho.LatestEpisode(aid)
 	}
 }
 
@@ -270,7 +290,7 @@ func resolveAnimetosho(opt *Options) (int, *mal.Item, error) {
 		}
 		return item.AnidbAID, &item, nil
 	}
-	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, opt.Debug)
+	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
