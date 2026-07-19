@@ -394,6 +394,12 @@ type animePicker struct {
 	latestEpisodePrefetch func(item *mal.Item) int
 	airedPrefetched       map[int]bool
 
+	// prefetchSem caps concurrent aired-episode fetches for THIS instance. It's
+	// per-instance (not package-level) so orphaned goroutines from a previous
+	// picker (e.g. after going to the release picker and back) can't hold slots
+	// and stall this instance's prefetch.
+	prefetchSem chan struct{}
+
 	cursor  int
 	topItem int
 	debug   bool
@@ -452,6 +458,7 @@ func newAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 		latestEpisodePrefetch: latestEpisodePrefetch,
 		aired:                map[int]int{},
 		airedPrefetched:      map[int]bool{},
+		prefetchSem:          make(chan struct{}, prefetchCap),
 		coverHeights:         map[int]int{},
 		cache:         &animeCache{m: map[string][]mal.Item{}},
 		loading:       true,
@@ -624,12 +631,12 @@ type prefetchPageDoneMsg struct{ firstPage bool }
 // feed is an API, unlike the cover image CDN, which downloads uncapped).
 const prefetchCap = 6
 
-var prefetchSem = make(chan struct{}, prefetchCap)
-
 // prefetchPageCmd prefetches one page of covers + aired episodes (see
-// selectPrefetchPage for what each page covers). The page's cmds are batched
-// behind a barrier that emits prefetchPageDoneMsg when they settle, so the model
-// schedules page 2. An empty page 1 still chains to page 2 (the work may be
+// selectPrefetchPage for what each page covers). The cover download is batched
+// behind a barrier that emits prefetchPageDoneMsg when it settles, so the model
+// schedules page 2. Aired cmds run independently of the barrier (semaphore-
+// capped, emit latestEpMsg as they finish) so slow aired fetches can't gate the
+// next page's covers. An empty page 1 still chains to page 2 (the work may be
 // entirely off-screen); an empty page 2 returns nil.
 func (m *animePicker) prefetchPageCmd(firstPage bool) tea.Cmd {
 	coverURLs, airedItems := m.selectPrefetchPage(firstPage)
@@ -643,8 +650,10 @@ func (m *animePicker) prefetchPageCmd(firstPage bool) tea.Cmd {
 		return nil
 	}
 
+	// The barrier tracks ONLY the cover download, so page-2 covers start as soon
+	// as page-1 covers settle (fast CDN) — slow aired fetches can't gate them.
 	var wg sync.WaitGroup
-	wg.Add(1 + len(airedItems))
+	wg.Add(1)
 	cmds := make([]tea.Cmd, 0, 2+len(airedItems))
 
 	// Covers: download the page's distinct URLs concurrently (CDN, uncapped);
@@ -656,19 +665,22 @@ func (m *animePicker) prefetchPageCmd(firstPage bool) tea.Cmd {
 		return coverReadyMsg{}
 	})
 
-	// Aired episodes: one cmd per airing item, semaphore-capped.
+	// Aired episodes: one cmd per airing item, semaphore-capped. These run
+	// independently of the barrier — they emit latestEpMsg as they finish, so
+	// aired counts fill in without delaying the next page's covers.
+	sem := m.prefetchSem
 	for _, it := range airedItems {
 		item := it
 		fn := m.latestEpisodePrefetch
 		cmds = append(cmds, func() tea.Msg {
-			defer wg.Done()
-			prefetchSem <- struct{}{}
-			defer func() { <-prefetchSem }()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			return latestEpMsg{malID: item.MalID, aired: fn(&item)}
 		})
 	}
 
-	// Barrier: once covers + all aired fetches settle, signal the page is done.
+	// Barrier: once the page's covers settle, signal the page is done. (Aired
+	// cmds are intentionally not waited on — see above.)
 	cmds = append(cmds, func() tea.Msg {
 		wg.Wait()
 		return prefetchPageDoneMsg{firstPage: firstPage}

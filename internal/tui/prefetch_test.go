@@ -356,9 +356,25 @@ func TestPrefetchPageDoneHandler(t *testing.T) {
 	}
 }
 
-// TestPrefetchSemaphoreCap: the prefetch semaphore bounds concurrent in-flight
+// TestPrefetchSemaphorePerInstance: each picker gets its own semaphore (cap
+// prefetchCap), distinct from other instances — so orphaned goroutines from a
+// previous picker (e.g. after going to release and back) can't stall this one.
+func TestPrefetchSemaphorePerInstance(t *testing.T) {
+	m1 := newAnimePicker(SourceSeason, "", animeLoadAll(nil), nil, nil, nil, nil, nil, false)
+	m2 := newAnimePicker(SourceSeason, "", animeLoadAll(nil), nil, nil, nil, nil, nil, false)
+	if cap(m1.prefetchSem) != prefetchCap {
+		t.Errorf("m1.prefetchSem cap = %d, want %d", cap(m1.prefetchSem), prefetchCap)
+	}
+	if m1.prefetchSem == nil || m1.prefetchSem == m2.prefetchSem {
+		t.Errorf("pickers must have distinct non-nil sems; m1=%p m2=%p", m1.prefetchSem, m2.prefetchSem)
+	}
+}
+
+// TestPrefetchSemaphoreCap: a picker's semaphore bounds concurrent in-flight
 // aired fetches to prefetchCap.
 func TestPrefetchSemaphoreCap(t *testing.T) {
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(nil), nil, nil, nil, nil, nil, false)
+	sem := m.prefetchSem
 	const n = 50
 	var inFlight, maxInFlight int32
 	var wg sync.WaitGroup
@@ -366,12 +382,12 @@ func TestPrefetchSemaphoreCap(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			prefetchSem <- struct{}{}
-			defer func() { <-prefetchSem }()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			cur := atomic.AddInt32(&inFlight, 1)
 			for {
-				m := atomic.LoadInt32(&maxInFlight)
-				if cur <= m || atomic.CompareAndSwapInt32(&maxInFlight, m, cur) {
+				mm := atomic.LoadInt32(&maxInFlight)
+				if cur <= mm || atomic.CompareAndSwapInt32(&maxInFlight, mm, cur) {
 					break
 				}
 			}
