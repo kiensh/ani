@@ -812,6 +812,9 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		if it := m.currentItemCopy(); it != nil {
+			// Carry the cached aired count so the release picker reuses it
+			// instead of re-fetching on entry.
+			it.AiredEps = m.aired[it.MalID]
 			m.result.Anime = it
 			return m, tea.Batch(tea.Quit, m.quitCmd())
 		}

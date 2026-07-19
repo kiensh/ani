@@ -72,6 +72,11 @@ func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch fun
 		latestEpisode:   latestEpisode,
 		result:          &Result{},
 	}
+	// Reuse the aired count cached by the anime picker (if any), so the header
+	// shows immediately and Init doesn't re-fetch it.
+	if item != nil {
+		rp.aired = item.AiredEps
+	}
 	rp.filter.Group = group
 	rp.filter.Quality = quality
 	rp.filter.Sort = ui.NormalizeSort(sortName)
@@ -105,14 +110,19 @@ type latestEpMsg struct {
 }
 
 func (m *releasePicker) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.fetchCmd(m.filter.Episode)}
-	// Also fetch the latest aired episode for the "watched/aired/total" header.
-	if m.item != nil && m.item.MalID > 0 && m.latestEpisode != nil {
-		item := m.item
-		fn := m.latestEpisode
-		cmds = append(cmds, func() tea.Msg { return latestEpMsg{malID: item.MalID, aired: fn(item)} })
+	return tea.Batch(m.fetchCmd(m.filter.Episode), m.airedFetchCmd())
+}
+
+// airedFetchCmd fetches the latest aired episode for the "watched/aired/total"
+// header — unless the anime picker already cached it on the item (m.aired), in
+// which case it returns nil so the picker reuses the cached value.
+func (m *releasePicker) airedFetchCmd() tea.Cmd {
+	if m.aired != 0 || m.item == nil || m.item.MalID == 0 || m.latestEpisode == nil {
+		return nil
 	}
-	return tea.Batch(cmds...)
+	item := m.item
+	fn := m.latestEpisode
+	return func() tea.Msg { return latestEpMsg{malID: item.MalID, aired: fn(item)} }
 }
 
 func (m *releasePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {

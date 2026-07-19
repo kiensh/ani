@@ -34,6 +34,7 @@ type Item struct {
 	UpdatedAt   time.Time // list-status update time (zero if not on your list) — for the "updated" sort
 	StartDate   string    // anime air/start date (YYYY-MM-DD) — for the "air date" sort
 	AnidbAID    int       // AniDB anime id; 0 for pure MAL items (resolved later), set directly for AnimeTosho hits
+	AiredEps    int       // latest aired episode (computed; cached so the release picker doesn't re-fetch)
 }
 
 // TitleCase returns s with its first rune upper-cased.

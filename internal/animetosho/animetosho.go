@@ -265,124 +265,70 @@ func LatestReleases(limit int) ([]*Release, error) {
 // aired episodes are released by many groups.
 const minGroups = 3
 
-// mixedGap is the minimum spread between two episode numbers released around the
-// same day for them to count as the same aired episode numbered two ways — a
-// small per-season number ("2") and a large cumulative one ("26" = S1+S2+…+S3).
-// Two genuinely different episodes that air the same day are consecutive
-// (spread 1–2), so 3 cleanly separates mixed numbering from a double release.
-const mixedGap = 3
+// seasonGap is the minimum gap between two supported episode numbers that signals
+// a split between per-season numbering (low cluster) and cumulative-across-
+// seasons numbering (high cluster). Cumulative offsets are typically ≥ one cour
+// (~10+); within-season gaps (a couple of unsupported episodes) are ≤ ~3, so 8
+// sits between. See LatestEpisode.
+const seasonGap = 8
 
-// dayWindow is how much upload-timing skew we tolerate when grouping releases of
-// the same aired episode: per-season and cumulative groups may upload hours or a
-// day apart. A weekly show's previous episode is 7 days back, safely outside it.
-const dayWindow = 2 * 24 * time.Hour
-
-// LatestEpisode returns the highest episode number that ≥ minGroups distinct
-// release groups have put out — a same-day proxy for the latest aired episode.
-// Counting distinct groups (not raw releases) ignores cumulative-numbered and
-// preview/pre-release outliers, which come from few groups; and using the int
-// episode_number directly (no title regex) avoids truncating 4-digit episodes
-// (e.g. One Piece 1168).
+// LatestEpisode returns the latest aired episode number for an AniDB id, using
+// episode-number agreement among release groups as the signal:
 //
-// When a season-specific aid is polluted with BOTH per-season and cumulative
-// numbering for the same aired episode — per-season "2" (many groups) and
-// cumulative "26" (≥3 groups) released on the same day — the group-count filter
-// alone can't tell them apart (both clear minGroups), so we detect it by date:
-// the newest aired episode shows up under two numbers released within dayWindow,
-// and the per-season (smaller) number wins.
+//   - Only episodes released by ≥ minGroups distinct groups count, which drops
+//     one-group previews and few-group cumulative outliers.
+//   - Re-uploads of old episodes have no effect — they don't introduce new
+//     episode numbers, so they can't make a stale episode look "latest".
+//   - When a season-specific aid carries BOTH per-season ("2") and cumulative
+//     ("26") numbering for the same episodes, the cumulative numbers form a high
+//     cluster separated from the per-season cluster by a large gap (≥ seasonGap);
+//     the per-season (low) cluster's max is the real latest aired.
 //
 // Returns 0 — which the caller treats as "unknown, fall back to Jikan" — if no
-// episode meets the threshold or on error.
+// episode reaches minGroups, or on error.
+//
+// Limitation: if per-season and cumulative numbering happen to be contiguous
+// (current season's episode count ≥ the cumulative offset), there's no gap to
+// split on and this can't tell them apart — it'd return the cumulative max. Not
+// observed in practice (the known cumulative case, 100-nin S3, has offset 24 ≫
+// its 12-episode season).
 func LatestEpisode(aid int) int {
 	entries, err := SeriesReleasesPage(aid, 0, 0) // page 1, all episodes, newest-first
 	if err != nil {
 		return 0
 	}
-	type epInfo struct {
-		groups map[string]struct{}
-		day    time.Time // latest date_added day (zero if none parsed)
-	}
-	eps := map[int]*epInfo{}
+	groups := map[int]map[string]struct{}{} // ep -> set of release groups
 	for _, e := range entries {
 		ep := e.Series.EpisodeNumber
 		if ep <= 0 {
 			continue
 		}
-		info := eps[ep]
-		if info == nil {
-			info = &epInfo{groups: map[string]struct{}{}}
-			eps[ep] = info
+		if groups[ep] == nil {
+			groups[ep] = map[string]struct{}{}
 		}
-		info.groups[e.ReleaseGroup] = struct{}{}
-		if d := parseDay(e.DateAdded); !d.IsZero() && (info.day.IsZero() || d.After(info.day)) {
-			info.day = d
-		}
+		groups[ep][e.ReleaseGroup] = struct{}{}
 	}
 
-	// supported = episodes with ≥ minGroups distinct groups; newestDay = the
-	// latest release day among them (defines "the newest aired episode").
+	// Keep only episodes with ≥ minGroups distinct groups.
 	var supported []int
-	var newestDay time.Time
-	for ep, info := range eps {
-		if len(info.groups) < minGroups {
-			continue
-		}
-		supported = append(supported, ep)
-		if !info.day.IsZero() && (newestDay.IsZero() || info.day.After(newestDay)) {
-			newestDay = info.day
+	for ep, gs := range groups {
+		if len(gs) >= minGroups {
+			supported = append(supported, ep)
 		}
 	}
 	if len(supported) == 0 {
 		return 0
 	}
-	maxSupp := slices.Max(supported)
-	// No usable dates → can't detect mixed numbering; fall back to the plain max.
-	if newestDay.IsZero() {
-		return maxSupp
-	}
+	slices.Sort(supported)
 
-	// Among the supported episodes released on/around the newest day, if two
-	// numbers ≥ mixedGap apart share that window they're the same aired episode
-	// numbered two ways (per-season vs cumulative) — return the smaller one.
-	var lo, hi int
-	haveCluster := false
-	for _, ep := range supported {
-		d := eps[ep].day
-		if d.IsZero() || absDuration(d.Sub(newestDay)) > dayWindow {
-			continue
+	// Walk the per-season cluster from the lowest episode, stopping at the first
+	// big gap (a per-season ↔ cumulative split). Its max is the latest aired.
+	latest := supported[0]
+	for i := 1; i < len(supported); i++ {
+		if supported[i]-supported[i-1] >= seasonGap {
+			break
 		}
-		if !haveCluster {
-			lo, hi = ep, ep
-			haveCluster = true
-			continue
-		}
-		lo, hi = min(lo, ep), max(hi, ep)
+		latest = supported[i]
 	}
-	if haveCluster && hi-lo >= mixedGap {
-		return lo
-	}
-	if haveCluster {
-		return hi // newest-aired episode number (max of the newest-day cluster)
-	}
-	return maxSupp // defensive: newestDay set implies a cluster, but guard anyway
-}
-
-// parseDay parses the date portion of an animetosho date_added value
-// ("YYYY-MM-DD…") and truncates it to midnight. Zero time if absent/unparseable.
-func parseDay(s string) time.Time {
-	if len(s) < 10 {
-		return time.Time{}
-	}
-	t, err := time.Parse("2006-01-02", s[:10])
-	if err != nil {
-		return time.Time{}
-	}
-	return t
-}
-
-func absDuration(d time.Duration) time.Duration {
-	if d < 0 {
-		return -d
-	}
-	return d
+	return latest
 }

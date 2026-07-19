@@ -1053,6 +1053,30 @@ func TestReleasePickerEnterPlaysDDownloads(t *testing.T) {
 	}
 }
 
+// TestReleasePickerReusesCachedAired: when the anime picker cached the aired
+// count on the item (AiredEps), the release picker seeds m.aired from it and
+// skips the aired fetch — so entering the release screen doesn't re-fetch.
+func TestReleasePickerReusesCachedAired(t *testing.T) {
+	all := []*animetosho.Release{mkRel("a", "1080p", 1, false)}
+	fn := func(*mal.Item) int { return 9 }
+
+	cached := newReleasePicker(&mal.Item{MalID: 5, TotalEps: 12, AiredEps: 7}, "", "", "newest", fetchAll(all), false, nil, fn, false)
+	if cached.aired != 7 {
+		t.Errorf("cached: m.aired = %d, want 7 (reused from item.AiredEps)", cached.aired)
+	}
+	if cached.airedFetchCmd() != nil {
+		t.Errorf("cached: airedFetchCmd = non-nil, want nil (no re-fetch)")
+	}
+
+	uncached := newReleasePicker(&mal.Item{MalID: 5, TotalEps: 12}, "", "", "newest", fetchAll(all), false, nil, fn, false)
+	if uncached.aired != 0 {
+		t.Errorf("uncached: m.aired = %d, want 0", uncached.aired)
+	}
+	if uncached.airedFetchCmd() == nil {
+		t.Errorf("uncached: airedFetchCmd = nil, want a fetch cmd")
+	}
+}
+
 // TestReleasePickerActionsMenu verifies Space → Play/Download/Copy Magnet menu.
 func TestReleasePickerActionsMenu(t *testing.T) {
 	all := []*animetosho.Release{mkRel("a", "1080p", 1, false)}
