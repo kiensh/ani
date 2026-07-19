@@ -778,14 +778,22 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.topItem = 0
 		return m, m.loadCmd(m.source, m.query, m.season)
 	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
+		if len(m.view) > 0 {
+			if m.cursor > 0 {
+				m.cursor--
+			} else {
+				m.cursor = len(m.view) - 1 // wrap to bottom
+			}
 			m.fixScroll()
 			return m, m.focusCmd()
 		}
 	case "down", "j":
-		if m.cursor < len(m.view)-1 {
-			m.cursor++
+		if len(m.view) > 0 {
+			if m.cursor < len(m.view)-1 {
+				m.cursor++
+			} else {
+				m.cursor = 0 // wrap to top
+			}
 			m.fixScroll()
 			return m, m.focusCmd()
 		}

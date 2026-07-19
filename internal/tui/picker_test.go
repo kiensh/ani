@@ -221,6 +221,26 @@ func TestAnimePickerRemoveG(t *testing.T) {
 	}
 }
 
+// TestAnimePickerCyclicNav: 'k' at the first item wraps to the last; 'j' at the
+// last wraps to the first.
+func TestAnimePickerCyclicNav(t *testing.T) {
+	items := []mal.Item{{MalID: 1, Title: "A"}, {MalID: 2, Title: "B"}, {MalID: 3, Title: "C"}}
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil, nil, false)
+	m.filter.Status = "All"
+	loadAnime(m, items)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+
+	m.cursor = 0
+	m.Update(keyMsg('k'))
+	if m.cursor != 2 {
+		t.Errorf("k at first: cursor = %d, want 2 (wrap to last)", m.cursor)
+	}
+	m.Update(keyMsg('j'))
+	if m.cursor != 0 {
+		t.Errorf("j at last: cursor = %d, want 0 (wrap to first)", m.cursor)
+	}
+}
+
 // TestAnimePickerStatusFilter opens the status overlay, selects Completed, and
 // checks the view is filtered to completed items.
 func TestAnimePickerStatusFilter(t *testing.T) {
@@ -1126,6 +1146,32 @@ func TestReleasePickerEscBack(t *testing.T) {
 	m.Update(escMsg())
 	if !m.result.Back {
 		t.Errorf("Esc did not set Back")
+	}
+}
+
+// TestReleasePickerCyclicNav: 'k' at the first release wraps to the last; 'j' at
+// the last wraps to the first.
+func TestReleasePickerCyclicNav(t *testing.T) {
+	all := []*animetosho.Release{
+		mkRel("a", "1080p", 1, false),
+		mkRel("b", "1080p", 2, false),
+		mkRel("c", "1080p", 3, false),
+	}
+	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, false)
+	loadReleases(m, all)
+	m.filter.Episode = 0 // show all episodes so all 3 releases are in view
+	m.applyFilter()
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	m.cursor = 0
+	m.Update(keyMsg('k'))
+	if m.cursor != 2 {
+		t.Errorf("k at first: cursor = %d, want 2 (wrap to last)", m.cursor)
+	}
+	m.Update(keyMsg('j'))
+	if m.cursor != 0 {
+		t.Errorf("j at last: cursor = %d, want 0 (wrap to first)", m.cursor)
 	}
 }
 
