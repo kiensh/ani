@@ -535,6 +535,43 @@ func TestAnimePickerSetStatus(t *testing.T) {
 	}
 }
 
+// TestAnimePickerSetCompletedSetsWatchedTotal: marking Completed sends watched =
+// total episodes to MAL (not the current partial count) and reflects it locally.
+func TestAnimePickerSetCompletedSetsWatchedTotal(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, Title: "Alpha", ListStatus: "watching", WatchedEps: 11, TotalEps: 12},
+	}
+	var gotWatched int
+	apply := func(malID, watched int, act StatusAction) bool {
+		gotWatched = watched
+		return true
+	}
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), apply, nil, nil, nil, nil, false)
+	loadAnime(m, items)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+
+	m.Update(spaceMsg())
+	overlaySelect(t, m, "Set Status")
+	m.Update(enterMsg())
+	overlaySelect(t, m, "Set Completed")
+	m.Update(enterMsg()) // → confirm
+	_, cmd := m.Update(keyMsg('y'))
+	if cmd == nil {
+		t.Fatal("no apply cmd returned after confirm")
+	}
+	m.Update(cmd())
+
+	if gotWatched != 12 {
+		t.Errorf("applyStatus got watched = %d, want 12 (total) for completed", gotWatched)
+	}
+	if m.items[0].WatchedEps != 12 {
+		t.Errorf("local WatchedEps = %d, want 12 (reflected)", m.items[0].WatchedEps)
+	}
+	if m.items[0].ListStatus != "completed" {
+		t.Errorf("ListStatus = %q, want completed", m.items[0].ListStatus)
+	}
+}
+
 // TestAnimePickerSetStatusEscCancels verifies Esc at the confirm modal does not
 // apply the action.
 func TestAnimePickerSetStatusEscCancels(t *testing.T) {

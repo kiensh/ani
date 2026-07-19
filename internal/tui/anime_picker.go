@@ -1006,7 +1006,13 @@ func (m *animePicker) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if it == nil || it.MalID == 0 {
 				return m, nil
 			}
-			return m, m.statusApplyCmd(it.MalID, it.WatchedEps, act)
+			// "Completed" implies watched = total episodes (MAL requires it, and
+			// it's the intent); fall back to the current count when total is unknown.
+			watched := it.WatchedEps
+			if act.Status == "completed" && it.TotalEps > 0 {
+				watched = it.TotalEps
+			}
+			return m, m.statusApplyCmd(it.MalID, watched, act)
 		default:
 			m.overlay.close()
 			return m, nil
@@ -1179,6 +1185,9 @@ func (m *animePicker) applyStatusApplied(msg statusAppliedMsg) (tea.Model, tea.C
 			break
 		}
 		m.items[i].ListStatus = msg.act.Status
+		if msg.act.Status == "completed" && m.items[i].TotalEps > 0 {
+			m.items[i].WatchedEps = m.items[i].TotalEps
+		}
 		break
 	}
 	m.cursor = 0
