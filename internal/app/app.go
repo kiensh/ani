@@ -179,7 +179,7 @@ func latestEpisodeFn(opt *Options) func(*mal.Item) int {
 			return 0
 		}
 		if aid := resolveAidFast(item, opt); aid > 0 {
-			if n := animetosho.LatestEpisode(aid); n > 0 {
+			if n := animetosho.LatestEpisode(aid, item.TotalEps); n > 0 {
 				return n
 			}
 		}
@@ -204,7 +204,7 @@ func latestEpisodePrefetchFn(opt *Options) func(*mal.Item) int {
 		if aid <= 0 {
 			return 0
 		}
-		return animetosho.LatestEpisode(aid)
+		return animetosho.LatestEpisode(aid, item.TotalEps)
 	}
 }
 

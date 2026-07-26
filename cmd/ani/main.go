@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"ani/internal/animetosho"
 	"ani/internal/app"
 	"ani/internal/config"
 	"ani/internal/mal"
@@ -50,7 +51,9 @@ func run(args []string) error {
 		if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
 			logFile = f
 			mal.SetDebugLog(f)
+			animetosho.SetDebugLog(f)
 			if debug {
+				animetosho.SetDebugEcho(true)
 				fmt.Fprintf(os.Stderr, "ani debug log → %s\n", logPath)
 			}
 		}

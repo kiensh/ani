@@ -57,7 +57,7 @@ func TestLatestEpisodeAgreement(t *testing.T) {
 		4: {"Erai-raws", "SubsPlease", "ASW"},
 	}), 0)()
 
-	if got := LatestEpisode(123); got != 5 {
+	if got := LatestEpisode(123, 0); got != 5 {
 		t.Errorf("LatestEpisode = %d, want 5", got)
 	}
 }
@@ -71,7 +71,7 @@ func TestLatestEpisodeCumulative(t *testing.T) {
 		77: {"SubsPlease", "SubsPlease", "SubsPlease", "ASW"},
 	}), 0)()
 
-	if got := LatestEpisode(19242); got != 11 {
+	if got := LatestEpisode(19242, 0); got != 11 {
 		t.Errorf("LatestEpisode (cumulative) = %d, want 11 (not 77)", got)
 	}
 }
@@ -86,7 +86,7 @@ func TestLatestEpisodePreview(t *testing.T) {
 		3: {"FrixySubs"},
 	}), 0)()
 
-	if got := LatestEpisode(19479); got != 1 {
+	if got := LatestEpisode(19479, 0); got != 1 {
 		t.Errorf("LatestEpisode (preview) = %d, want 1 (not 5)", got)
 	}
 }
@@ -99,7 +99,7 @@ func TestLatestEpisodeLong(t *testing.T) {
 		1161: {"Erai-raws", "SubsPlease", "Judas"},
 	}), 0)()
 
-	if got := LatestEpisode(69); got != 1168 {
+	if got := LatestEpisode(69, 0); got != 1168 {
 		t.Errorf("LatestEpisode (long show) = %d, want 1168 (no truncation)", got)
 	}
 }
@@ -112,21 +112,21 @@ func TestLatestEpisodeLowAgreement(t *testing.T) {
 		4: {"NicheGrp"},
 	}), 0)()
 
-	if got := LatestEpisode(123); got != 0 {
+	if got := LatestEpisode(123, 0); got != 0 {
 		t.Errorf("LatestEpisode (low agreement) = %d, want 0 (→ Jikan)", got)
 	}
 }
 
 func TestLatestEpisodeEmpty(t *testing.T) {
 	defer withToshoServer(t, `{"data":{"title":"X","releases":[]}}`, 0)()
-	if got := LatestEpisode(123); got != 0 {
+	if got := LatestEpisode(123, 0); got != 0 {
 		t.Errorf("LatestEpisode (no releases) = %d, want 0", got)
 	}
 }
 
 func TestLatestEpisodeError(t *testing.T) {
 	defer withToshoServer(t, "boom", http.StatusInternalServerError)()
-	if got := LatestEpisode(123); got != 0 {
+	if got := LatestEpisode(123, 0); got != 0 {
 		t.Errorf("LatestEpisode (HTTP 500) = %d, want 0", got)
 	}
 }
@@ -139,7 +139,7 @@ func TestLatestEpisodeRealRezero(t *testing.T) {
 	if os.Getenv("ANI_INTEGRATION") == "" {
 		t.Skip("skipping network integration test; set ANI_INTEGRATION=1 to run")
 	}
-	got := LatestEpisode(19242)
+	got := LatestEpisode(19242, 0)
 	if got <= 0 || got > 19 {
 		t.Errorf("LatestEpisode(19242 Re:Zero S4) = %d, want 1..19 (total 19); cumulative bug?", got)
 	}
@@ -155,7 +155,7 @@ func TestLatestEpisodeReal100nin(t *testing.T) {
 	if os.Getenv("ANI_INTEGRATION") == "" {
 		t.Skip("skipping network integration test; set ANI_INTEGRATION=1 to run")
 	}
-	got := LatestEpisode(19663)
+	got := LatestEpisode(19663, 0)
 	// Season 3 is a single cour (≤ ~12 per-season eps); a cumulative number would
 	// be 25+. A correct per-season result stays well under the cumulative floor.
 	if got <= 0 || got >= 25 {
@@ -172,7 +172,7 @@ func TestLatestEpisodeRealSlimeS4(t *testing.T) {
 	if os.Getenv("ANI_INTEGRATION") == "" {
 		t.Skip("skipping network integration test; set ANI_INTEGRATION=1 to run")
 	}
-	got := LatestEpisode(18884)
+	got := LatestEpisode(18884, 0)
 	// Ep 15 has aired; the re-up of ep 12 must not drag the result down to 12.
 	if got < 15 {
 		t.Errorf("LatestEpisode(18884 Slime S4) = %d, want >= 15 (re-up of ep 12 shouldn't win)", got)
@@ -190,7 +190,7 @@ func TestLatestEpisodeMixedNumbering(t *testing.T) {
 		25: {"ASW", "SubsPlease", "VARYG"},
 		26: {"ASW", "SubsPlease", "VARYG"},
 	}), 0)()
-	if got := LatestEpisode(19663); got != 2 {
+	if got := LatestEpisode(19663, 0); got != 2 {
 		t.Errorf("LatestEpisode (mixed numbering) = %d, want 2 (per-season, not cumulative 26)", got)
 	}
 }
@@ -207,7 +207,7 @@ func TestLatestEpisodeCumulativeCluster(t *testing.T) {
 		5:  {"A", "B", "C"},
 		26: {"ASW", "SubsPlease", "VARYG"}, // cumulative outlier
 	}), 0)()
-	if got := LatestEpisode(19663); got != 5 {
+	if got := LatestEpisode(19663, 0); got != 5 {
 		t.Errorf("LatestEpisode (cumulative cluster) = %d, want 5 (per-season max, not 26)", got)
 	}
 }
@@ -221,7 +221,7 @@ func TestLatestEpisodeCumulativeOnly(t *testing.T) {
 		25: {"ASW", "SubsPlease", "VARYG"},
 		26: {"ASW", "SubsPlease", "VARYG"},
 	}), 0)()
-	if got := LatestEpisode(19663); got != 26 {
+	if got := LatestEpisode(19663, 0); got != 26 {
 		t.Errorf("LatestEpisode (cumulative only) = %d, want 26 (limitation)", got)
 	}
 }
@@ -238,7 +238,65 @@ func TestLatestEpisodeReupOfOldEpisode(t *testing.T) {
 		14: {"ASW", "DKB", "Erai-raws", "SubsPlease"},
 		15: {"ASW", "DKB", "Erai-raws"}, // real latest, fewest groups
 	}), 0)()
-	if got := LatestEpisode(18884); got != 15 {
+	if got := LatestEpisode(18884, 0); got != 15 {
 		t.Errorf("LatestEpisode (re-up of old ep) = %d, want 15 (re-ups must not win)", got)
 	}
+}
+
+// TestLatestEpisodeCappedByTotal: Yomi no Tsugai shape (aid 19451, MAL total 24)
+// — a unified multi-cour entry whose middle episodes (5-11) are under-subscribed,
+// so supported splits into [2,3,4] and [12,13,14,15,16] with a gap of exactly 8.
+// The gap-walk alone returns 4 (it mistakes 12-16 for cumulative numbering); with
+// the total cap the real max (16) wins.
+func TestLatestEpisodeCappedByTotal(t *testing.T) {
+	defer withToshoServer(t, toshoBody(map[int][]string{
+		2:  {"ToonsHub", "Tsundere-Raws", "VARYG"},
+		3:  {"ToonsHub", "Tsundere-Raws", "VARYG"},
+		4:  {"ToonsHub", "Tsundere-Raws", "VARYG"},
+		12: {"DKB", "SubsNoJutsu", "ToonsHub", "Tsundere-Raws", "VARYG"},
+		13: {"Anime Time", "CrappySubs", "DKB", "Judas", "SubsNoJutsu", "ToonsHub", "VARYG", "Yameii"},
+		14: {"ASW", "Anime Time", "CrappySubs", "DKB", "Erai-raws"},
+		15: {"ASW", "CrappySubs", "DKB", "Erai-raws", "Ironclad"},
+		16: {"ASW", "CrappySubs", "DKB", "Erai-raws", "Ironclad"},
+	}), 0)()
+	if got := LatestEpisode(19451, 24); got != 16 {
+		t.Errorf("LatestEpisode (capped by total 24) = %d, want 16 (not the gap-walk's 4)", got)
+	}
+	// Same feed, total unknown (0) -> falls back to the gap-walk -> 4, which is
+	// exactly the bug the cap fixes when the total is known.
+	if got := LatestEpisode(19451, 0); got != 4 {
+		t.Errorf("LatestEpisode (total unknown) = %d, want 4 (gap-walk fallback)", got)
+	}
+}
+
+// TestLatestEpisodeCappedDropsCumulative: a season-specific entry (total 12)
+// carrying both per-season [1,2] and cumulative [25,26] numbering. The cap must
+// still drop the cumulative outliers (> total) — a regression guard that adding
+// the cap didn't break the season-specific case.
+func TestLatestEpisodeCappedDropsCumulative(t *testing.T) {
+	defer withToshoServer(t, toshoBody(map[int][]string{
+		1:  {"DKB", "Erai-raws", "Judas", "Onalrie", "ToonsHub", "Trix"},
+		2:  {"DKB", "Erai-raws", "Judas", "Onalrie", "ToonsHub", "Trix"},
+		25: {"ASW", "SubsPlease", "VARYG"},
+		26: {"ASW", "SubsPlease", "VARYG"},
+	}), 0)()
+	if got := LatestEpisode(19663, 12); got != 2 {
+		t.Errorf("LatestEpisode (total 12) = %d, want 2 (cumulative 25/26 dropped by cap)", got)
+	}
+}
+
+// TestLatestEpisodeRealYomi hits the live feed for Yomi no Tsugai (aid 19451,
+// MAL total 24) — the reported bug: a single 24-ep entry whose middle episodes
+// are under-subscribed, so the gap-walk returns 4 instead of the true latest.
+// With the total cap the real latest (>= 13, <= 24) wins. Skipped unless
+// ANI_INTEGRATION=1.
+func TestLatestEpisodeRealYomi(t *testing.T) {
+	if os.Getenv("ANI_INTEGRATION") == "" {
+		t.Skip("skipping network integration test; set ANI_INTEGRATION=1 to run")
+	}
+	got := LatestEpisode(19451, 24)
+	if got < 13 || got > 24 {
+		t.Errorf("LatestEpisode(19451 Yomi no Tsugai) = %d, want 13..24 (total 24); gap-walk returned 4 before the fix", got)
+	}
+	t.Logf("Yomi no Tsugai latest episode via real feed: %d", got)
 }

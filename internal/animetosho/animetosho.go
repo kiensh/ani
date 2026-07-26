@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strconv"
 	"time"
@@ -33,6 +35,31 @@ func SetToshoBaseForTest(url string) func() {
 	old := toshoBase
 	toshoBase = url
 	return func() { toshoBase = old }
+}
+
+// debugLog is the always-on debug sink — a file set by main via SetDebugLog on
+// every run. Defaults to io.Discard so tests and library use stay silent.
+// Mirrors internal/mal/debug.go.
+var debugLog io.Writer = io.Discard
+
+// SetDebugLog sets the always-on debug log destination (called from main, which
+// opens <configdir>/ani/debug.log).
+func SetDebugLog(w io.Writer) { debugLog = w }
+
+// debugEcho, when true, also writes debug lines to stderr (driven by --debug).
+var debugEcho bool
+
+// SetDebugEcho toggles stderr echoing of debug lines (called from main under
+// --debug; the TUI's alt screen hides stderr, so debugLog is the reliable
+// record — main re-dumps the file after the TUI exits).
+func SetDebugEcho(b bool) { debugEcho = b }
+
+// dbg writes a debug line to the always-on log, and to stderr when debugEcho.
+func dbg(format string, args ...any) {
+	fmt.Fprintf(debugLog, format, args...)
+	if debugEcho {
+		fmt.Fprintf(os.Stderr, format, args...)
+	}
 }
 
 // Series is the nested anime metadata on a release.
@@ -279,22 +306,25 @@ const seasonGap = 8
 //     one-group previews and few-group cumulative outliers.
 //   - Re-uploads of old episodes have no effect — they don't introduce new
 //     episode numbers, so they can't make a stale episode look "latest".
-//   - When a season-specific aid carries BOTH per-season ("2") and cumulative
-//     ("26") numbering for the same episodes, the cumulative numbers form a high
+//   - total (the entry's MAL num_episodes, when known) is the primary
+//     disambiguator: a real episode of this entry can't exceed it, so any
+//     supported number above total is cross-season cumulative mislabeling (a
+//     few groups number across all seasons) and is dropped; the answer is the
+//     plain max of what remains. This handles unified multi-cour entries (e.g.
+//     Yomi no Tsugai, 24 eps) where under-subscribed middle episodes form a gap
+//     that would otherwise look like a per-season/cumulative split.
+//   - When total is unknown (0), fall back to the gap-based walk: if a
+//     season-specific aid carries BOTH per-season ("2") and cumulative ("26")
+//     numbering for the same episodes, the cumulative numbers form a high
 //     cluster separated from the per-season cluster by a large gap (≥ seasonGap);
-//     the per-season (low) cluster's max is the real latest aired.
+//     the per-season (low) cluster's max is taken as the real latest aired.
 //
 // Returns 0 — which the caller treats as "unknown, fall back to Jikan" — if no
 // episode reaches minGroups, or on error.
-//
-// Limitation: if per-season and cumulative numbering happen to be contiguous
-// (current season's episode count ≥ the cumulative offset), there's no gap to
-// split on and this can't tell them apart — it'd return the cumulative max. Not
-// observed in practice (the known cumulative case, 100-nin S3, has offset 24 ≫
-// its 12-episode season).
-func LatestEpisode(aid int) int {
+func LatestEpisode(aid, total int) int {
 	entries, err := SeriesReleasesPage(aid, 0, 0) // page 1, all episodes, newest-first
 	if err != nil {
+		dbg("LatestEpisode aid=%d total=%d fetch-err=%v -> 0\n", aid, total, err)
 		return 0
 	}
 	groups := map[int]map[string]struct{}{} // ep -> set of release groups
@@ -317,12 +347,33 @@ func LatestEpisode(aid int) int {
 		}
 	}
 	if len(supported) == 0 {
+		dbg("LatestEpisode aid=%d total=%d supported=[] -> 0\n", aid, total)
 		return 0
 	}
 	slices.Sort(supported)
 
-	// Walk the per-season cluster from the lowest episode, stopping at the first
-	// big gap (a per-season ↔ cumulative split). Its max is the latest aired.
+	// Known total: a real episode can't exceed it, so drop supported numbers
+	// above total (cross-season cumulative mislabeling) and return the plain
+	// max. Yomi no Tsugai: total=24, supported=[2,3,4,12,13,14,15,16] -> 16,
+	// not the gap-walk's 4.
+	if total > 0 {
+		latest := 0
+		for _, ep := range supported {
+			if ep <= total && ep > latest {
+				latest = ep
+			}
+		}
+		if latest > 0 {
+			dbg("LatestEpisode aid=%d total=%d supported=%v -> %d (capped)\n", aid, total, supported, latest)
+			return latest
+		}
+		// Every supported episode exceeded the total (only cumulative numbering
+		// reached minGroups) — fall through to the gap-walk fallback below.
+	}
+
+	// total unknown: walk the per-season cluster from the lowest episode,
+	// stopping at the first big gap (a per-season ↔ cumulative split). Its max
+	// is the latest aired.
 	latest := supported[0]
 	for i := 1; i < len(supported); i++ {
 		if supported[i]-supported[i-1] >= seasonGap {
@@ -330,5 +381,6 @@ func LatestEpisode(aid int) int {
 		}
 		latest = supported[i]
 	}
+	dbg("LatestEpisode aid=%d total=%d supported=%v -> %d (gap-walk)\n", aid, total, supported, latest)
 	return latest
 }
