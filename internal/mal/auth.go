@@ -6,6 +6,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -139,20 +140,175 @@ func buildOAuthHTTPClient() (*http.Client, error) {
 		}
 	}
 
+	// Tokens written before the Expiry fix have a zero expiry. The oauth2 library
+	// treats a zero Expiry as "never expires", so the refresh path never fired and
+	// the (now-stale) access token was reused forever. Force a past expiry so
+	// reuseTokenSource refreshes using the stored refresh_token on the next call —
+	// self-healing if the refresh_token is still valid. (ExpiresIn can't be used
+	// here: it's the token lifetime, not the time remaining.)
+	if tok != nil && tok.Expiry.IsZero() && tok.RefreshToken != "" {
+		tok.Expiry = time.Now().Add(-time.Hour)
+	}
+
 	if tok == nil {
 		t, err := malBrowserAuth(&conf)
 		if err != nil {
 			return nil, err
 		}
 		tok = t
-		_ = os.MkdirAll(filepath.Dir(tokenPath), 0o700)
-		if data, err := json.Marshal(tok); err == nil {
-			_ = os.WriteFile(tokenPath, data, 0o600)
-		}
+		_ = saveToken(tokenPath, tok)
 	}
 
 	src := &fileTokenSource{base: conf.TokenSource(context.Background(), tok), path: tokenPath}
 	return oauth2.NewClient(context.Background(), src), nil
+}
+
+// saveToken writes tok (0600) to path, creating the parent dir (0700).
+func saveToken(path string, tok *oauth2.Token) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	data, err := json.Marshal(tok)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+// resetOAuthClient clears the memoized OAuth client so the next Client() rebuilds
+// from the token file. Called by Login/Logout, which run from app.Run's loop after
+// the TUI has exited (no concurrent Client() call); without this the cached client
+// would keep holding the old (dead) token.
+func resetOAuthClient() {
+	oauthOnce = sync.Once{}
+	oauthCli = nil
+	oauthErr = nil
+}
+
+// Login forces a fresh browser OAuth flow: any existing token is removed first so
+// the user re-authorizes, then the new token is saved and the OAuth client cache is
+// reset so the next request uses it. debug controls the PKCE/exchange logging.
+func Login(debug bool) error {
+	authDebug = debug
+	config.LoadDotenv()
+	id, secret, ok := malCreds()
+	if !ok {
+		return fmt.Errorf("MAL credentials not set — put ANI_MAL_CLIENT_ID and ANI_MAL_CLIENT_SECRET in ./.env or ~/.config/ani/.env")
+	}
+	conf := malOAuth2
+	conf.ClientID = id
+	conf.ClientSecret = secret
+	_ = os.Remove(malTokenPath()) // ignore "not exist"; we want a clean re-auth
+	tok, err := malBrowserAuth(&conf)
+	if err != nil {
+		resetOAuthClient()
+		return err
+	}
+	if err := saveToken(malTokenPath(), tok); err != nil {
+		resetOAuthClient()
+		return fmt.Errorf("save token: %w", err)
+	}
+	resetOAuthClient()
+	return nil
+}
+
+// Logout removes the saved token (no error if there isn't one) and drops any cached
+// OAuth client so a later login/rebuild starts clean.
+func Logout() error {
+	if err := os.Remove(malTokenPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	resetOAuthClient()
+	return nil
+}
+
+// AuthStatusResult is the offline view of the saved MAL session.
+type AuthStatusResult struct {
+	LoggedIn    bool      // creds present AND an access token is on disk
+	Subject     string    // MAL user id from the access-token JWT "sub" claim
+	Expiry      time.Time // access-token expiry from the JWT "exp" claim (zero if unknown)
+	ExpiryKnown bool
+}
+
+// AuthStatus reads the saved token and decodes the access-token JWT for an offline
+// snapshot of the session (no network, no browser). The JWT exp is the source of
+// truth for expiry: the on-disk "expiry" field is zero for tokens written before the
+// fix. A missing/unreadable token file is not an error — it just means LoggedIn is
+// false.
+func AuthStatus() (AuthStatusResult, error) {
+	config.LoadDotenv()
+	_, _, credsOK := malCreds()
+	var res AuthStatusResult
+	data, err := os.ReadFile(malTokenPath())
+	if err != nil {
+		return res, nil
+	}
+	var tok oauth2.Token
+	if json.Unmarshal(data, &tok) != nil {
+		return res, nil
+	}
+	res.LoggedIn = credsOK && tok.AccessToken != ""
+	res.Subject, res.Expiry, res.ExpiryKnown = decodeJWTClaims(tok.AccessToken)
+	return res, nil
+}
+
+// decodeJWTClaims extracts the "sub" and "exp" claims from a JWT access token
+// without verifying the signature (we only display these). Returns known=false if
+// the token isn't a 3-part JWT or the payload won't decode.
+func decodeJWTClaims(token string) (sub string, exp time.Time, known bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", time.Time{}, false
+	}
+	var claims struct {
+		Sub string `json:"sub"`
+		Exp int64  `json:"exp"`
+	}
+	if json.Unmarshal(payload, &claims) != nil {
+		return "", time.Time{}, false
+	}
+	return claims.Sub, time.Unix(claims.Exp, 0).UTC(), true
+}
+
+// WhoAmI calls the MAL API for the authenticated user's profile (best-effort name
+// for the status overlay). Triggers refresh/network; returns an error on 401.
+func WhoAmI(debug bool) (*mal.User, error) {
+	c, err := Client(debug)
+	if err != nil {
+		return nil, err
+	}
+	u, _, err := c.User.MyInfo(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+// IsAuthError reports whether err looks like a MAL authentication failure: an
+// expired/rejected token (HTTP 401/403 from the API) or a failed token refresh.
+// Used by the TUI to hint "press L to log in" instead of showing a bare error.
+func IsAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var re *oauth2.RetrieveError
+	if errors.As(err, &re) { // oauth2 refresh / token-endpoint failure
+		return true
+	}
+	var mer *mal.ErrorResponse
+	if errors.As(err, &mer) && mer.Response != nil &&
+		(mer.Response.StatusCode == 401 || mer.Response.StatusCode == 403) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "401") ||
+		strings.Contains(s, "unauthorized") ||
+		strings.Contains(s, "invalid_grant") ||
+		strings.Contains(s, "invalid refresh token")
 }
 
 // malBrowserAuth runs the one-time OAuth2 PKCE flow: print the auth URL, catch
@@ -242,6 +398,13 @@ func malBrowserAuth(conf *oauth2.Config) (*oauth2.Token, error) {
 	}
 	if tok.AccessToken == "" {
 		return nil, fmt.Errorf("token exchange: empty access token in response: %s", string(body))
+	}
+	// The oauth2 library never populates Expiry from the wire "expires_in" on a
+	// plain Unmarshal — only inside its own token retrieval. Set it ourselves so
+	// reuseTokenSource refreshes (via the refresh_token) before the access token
+	// expires, instead of treating it as valid forever.
+	if tok.ExpiresIn > 0 {
+		tok.Expiry = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
 	}
 	return tok, nil
 }

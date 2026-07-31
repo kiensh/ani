@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -36,8 +37,10 @@ func (s AnimeSource) String() string {
 //   - SourceSeason + season == "Later" → upcoming ranking
 //   - SourceSeason + season == label   → that season's lineup
 //
-// The picker caches results so re-visits are instant.
-type AnimeLoad func(source AnimeSource, query, season string) []mal.Item
+// The picker caches results so re-visits are instant. A non-nil error means the
+// load failed; the picker renders it in the empty list (and, for auth errors,
+// hints to log in) instead of an opaque blank.
+type AnimeLoad func(source AnimeSource, query, season string) ([]mal.Item, error)
 
 // AnimeFilter holds the client-side status/sort + fuzzy state. (Season is a
 // top-level picker field: in Season it's the load key; in My List/search it's
@@ -281,6 +284,7 @@ const (
 	animeOverlayConfirm     // centered y/n modal for an actions-menu choice
 	animeOverlayScore       // 1-10 / Remove Score picker
 	animeOverlayEpisode     // set watched episodes (number input)
+	animeOverlayAuth        // MAL account/status modal (read-only + L/o actions)
 )
 
 type animeOverlay struct {
@@ -342,6 +346,8 @@ func (k animeOverlayKind) String() string {
 		return "Score"
 	case animeOverlayEpisode:
 		return "Episode"
+	case animeOverlayAuth:
+		return "Account"
 	}
 	return ""
 }
@@ -361,6 +367,7 @@ type animePicker struct {
 	load    AnimeLoad
 	cache   *animeCache
 	loading bool
+	loadErr error // non-nil when the last load failed; rendered in the empty list
 
 	// current real-world season (default + window anchor)
 	currentYear   int
@@ -371,6 +378,12 @@ type animePicker struct {
 
 	filter  AnimeFilter
 	overlay animeOverlay
+
+	// Status-overlay state: offline session snapshot + best-effort username.
+	authStatus      mal.AuthStatusResult
+	authName        string // MAL username (best-effort; "" while pending/unknown)
+	authNamePending bool
+	authNameFailed  bool
 
 	// applyStatus applies a per-anime status action (set/remove) to MAL. nil in
 	// the AnimeTosho fallback (no MAL), where Space is a no-op.
@@ -508,6 +521,7 @@ func (m *animePicker) Init() tea.Cmd { return m.loadCmd(m.source, m.query, m.sea
 // discards stale results.
 type itemsLoadedMsg struct {
 	items  []mal.Item
+	err    error
 	source AnimeSource
 	query  string
 	season string
@@ -521,9 +535,31 @@ func (m *animePicker) loadCmd(source AnimeSource, query, season string) tea.Cmd 
 		if items, ok := cache.get(key); ok {
 			return itemsLoadedMsg{items: items, source: source, query: query, season: season}
 		}
-		items := load(source, query, season)
-		cache.put(key, items)
-		return itemsLoadedMsg{items: items, source: source, query: query, season: season}
+		items, err := load(source, query, season)
+		if err == nil { // don't cache failures — let them retry on revisit
+			cache.put(key, items)
+		}
+		return itemsLoadedMsg{items: items, err: err, source: source, query: query, season: season}
+	}
+}
+
+// authNameMsg carries the best-effort MAL username for the status overlay. ok=false
+// means the fetch failed (e.g. expired token → 401); the overlay then shows the
+// offline id/expiry and "(name unavailable)".
+type authNameMsg struct {
+	name string
+	ok   bool
+}
+
+// fetchAuthNameCmd calls the MAL API for the logged-in user's name (best-effort).
+func (m *animePicker) fetchAuthNameCmd() tea.Cmd {
+	debug := m.debug
+	return func() tea.Msg {
+		u, err := mal.WhoAmI(debug)
+		if err != nil || u == nil {
+			return authNameMsg{ok: false}
+		}
+		return authNameMsg{name: u.Name, ok: true}
 	}
 }
 
@@ -593,6 +629,16 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case authNameMsg:
+		// Best-effort username for the status overlay; only relevant while it's open.
+		m.authNamePending = false
+		if msg.ok {
+			m.authName, m.authNameFailed = msg.name, false
+		} else {
+			m.authNameFailed = true
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.overlay.active() {
 			return m.handleOverlayKey(msg)
@@ -615,7 +661,12 @@ func (m *animePicker) applyLoaded(msg itemsLoadedMsg) (tea.Model, tea.Cmd) {
 	m.loading = false
 	m.cursor = 0
 	m.topItem = 0
+	m.loadErr = msg.err
 	m.applyFilter()
+	if msg.err != nil {
+		// Nothing to prefetch; the empty list renders the error line instead.
+		return m, nil
+	}
 	// Fresh cover cache; prefetchPageCmd drives its downloads page-by-page
 	// (first visible page first, then the rest) alongside the aired episodes.
 	m.cover = NewCoverCache()
@@ -830,6 +881,26 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filter.Filtering = true
 		m.filter.FuzzyText = ""
 		return m, nil
+	case "L":
+		// Re-run the MAL browser OAuth flow (handled by app.Run after the TUI exits).
+		m.result.Relogin = true
+		return m, tea.Batch(tea.Quit, m.quitCmd())
+	case "a":
+		// Account/status overlay: offline snapshot now, best-effort name async.
+		st, _ := mal.AuthStatus()
+		m.authStatus = st
+		m.authName = ""
+		m.authNameFailed = false
+		// Only fetch the name when there's a session — otherwise WhoAmI would run
+		// the browser OAuth flow (Client() launches it when no token is saved).
+		m.authNamePending = st.LoggedIn
+		m.overlay.kind = animeOverlayAuth
+		m.overlay.items = nil
+		m.overlay.cursor = 0
+		if st.LoggedIn {
+			return m, m.fetchAuthNameCmd()
+		}
+		return m, nil
 	case "enter":
 		if it := m.currentItemCopy(); it != nil {
 			// Carry the cached aired count so the release picker reuses it
@@ -996,6 +1067,21 @@ func (m *animePicker) seasonArchiveItems() []string {
 }
 
 func (m *animePicker) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Account/status modal: L re-logs in, o logs out, Esc closes; ignore other keys.
+	if m.overlay.kind == animeOverlayAuth {
+		switch msg.String() {
+		case "L":
+			m.result.Relogin = true
+			return m, tea.Batch(tea.Quit, m.quitCmd())
+		case "o":
+			m.result.Logout = true
+			return m, tea.Batch(tea.Quit, m.quitCmd())
+		case "esc":
+			m.overlay.close()
+			return m, nil
+		}
+		return m, nil
+	}
 	// Confirm modal: y/Enter applies the pending action; anything else cancels.
 	if m.overlay.kind == animeOverlayConfirm {
 		switch msg.String() {
@@ -1487,8 +1573,11 @@ func (m *animePicker) View() string {
 		}
 		return FaintStyle.Render(fmt.Sprintf("Loading %s…", label))
 	}
-	if m.overlay.kind == animeOverlayConfirm {
+	switch m.overlay.kind {
+	case animeOverlayConfirm:
 		return m.renderConfirmModal()
+	case animeOverlayAuth:
+		return m.renderAuthStatusModal()
 	}
 
 	// ---- LEFT pane (list / overlay) ----
@@ -1530,7 +1619,7 @@ func (m *animePicker) View() string {
 
 	header := m.headerText()
 	badges := m.renderBadges()
-	help := HelpStyle.Render("j/k nav  Tab source  t status  e season  s sort  Space set  / filter  Enter select  q quit")
+	help := HelpStyle.Render("j/k nav  Tab source  t status  e season  s sort  Space set  / filter  Enter select  L login  a account  q quit")
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
 	return lipgloss.JoinVertical(lipgloss.Left, header, badges, panes, help)
 }
@@ -1545,6 +1634,50 @@ func (m *animePicker) renderConfirmModal() string {
 	question := lipgloss.NewStyle().Bold(true).Foreground(questionColor).Render(m.overlay.text)
 	hint := lipgloss.NewStyle().Render("[Y] yes   [n] no  (Esc = no)")
 	body := ModalBorderStyle.Render(lipgloss.JoinVertical(lipgloss.Center, question, "", hint))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
+}
+
+// renderAuthStatusModal draws the centered MAL account/status overlay: login state,
+// best-effort username + id, token expiry, and the L/o/Esc actions. Offline fields
+// render instantly (AuthStatus); the username fills in via fetchAuthNameCmd.
+func (m *animePicker) renderAuthStatusModal() string {
+	st := m.authStatus
+	lines := []string{TitleStyle.Render("Account")}
+
+	status := FaintStyle.Render("not logged in — press L to log in")
+	if st.LoggedIn {
+		status = ProgressStyle.Render("logged in")
+	}
+	lines = append(lines, "Status: "+status)
+
+	if st.LoggedIn {
+		name := ""
+		switch {
+		case m.authNamePending:
+			name = FaintStyle.Render("…")
+		case m.authNameFailed:
+			name = FaintStyle.Render("(name unavailable)")
+		case m.authName != "":
+			name = m.authName
+		}
+		id := st.Subject
+		if id == "" {
+			id = "?"
+		}
+		lines = append(lines, fmt.Sprintf("User:   %s (id %s)", name, id))
+
+		switch {
+		case st.ExpiryKnown && st.Expiry.After(time.Now()):
+			lines = append(lines, "Token:  "+FaintStyle.Render("valid until "+st.Expiry.Format("2006-01-02")))
+		case st.ExpiryKnown:
+			lines = append(lines, "Token:  "+ErrorStyle.Render("EXPIRED — press L to re-login"))
+		default:
+			lines = append(lines, "Token:  "+FaintStyle.Render("expiry unknown"))
+		}
+	}
+
+	lines = append(lines, "", FaintStyle.Render("[L] re-login   [o] log out   Esc back"))
+	body := ModalBorderStyle.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
 }
 
@@ -1565,6 +1698,13 @@ func (m *animePicker) renderBadges() string {
 // renderList draws exactly pageSize lines (the visible slice, padded with blanks)
 // so the left pane never grows past its box and the header stays pinned.
 func (m *animePicker) renderList() string {
+	if len(m.view) == 0 && m.loadErr != nil {
+		msg := fmt.Sprintf("MAL error: %v", m.loadErr)
+		if mal.IsAuthError(m.loadErr) {
+			msg += " — press L to log in"
+		}
+		return ErrorStyle.Render(msg)
+	}
 	ps := m.pageSize()
 	end := m.topItem + ps
 	if end > len(m.view) {

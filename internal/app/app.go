@@ -21,6 +21,14 @@ import (
 // Run re-runs anime selection instead of exiting.
 var errBackToAnime = errors.New("back to anime selection")
 
+// errRelogin / errLogout signal that the anime picker requested a MAL auth action.
+// Run performs it after the TUI exits (so the browser flow runs in the normal
+// terminal), then re-resolves — MAL after login, AnimeTosho after logout.
+var (
+	errRelogin = errors.New("re-login")
+	errLogout  = errors.New("logout")
+)
+
 // ErrCancelled is returned when the user quits a picker without selecting. main
 // exits silently on it.
 var ErrCancelled = errors.New("cancelled")
@@ -35,6 +43,18 @@ const latestUploadsAID = -1
 func Run(opt *Options) error {
 	for {
 		aid, item, err := resolve(opt)
+		if errors.Is(err, errRelogin) {
+			if e := mal.Login(opt.Debug); e != nil {
+				fmt.Fprintf(os.Stderr, "ani: login failed: %v\n", e)
+			}
+			continue // re-resolve: MAL if login worked, else AnimeTosho
+		}
+		if errors.Is(err, errLogout) {
+			if e := mal.Logout(); e != nil {
+				fmt.Fprintf(os.Stderr, "ani: logout failed: %v\n", e)
+			}
+			continue // re-resolve: token gone → AnimeTosho
+		}
 		if err != nil {
 			return err
 		}
@@ -76,26 +96,22 @@ func resolveAnidb(aid int) (int, *mal.Item, error) {
 func resolveMal(opt *Options) (int, *mal.Item, error) {
 	query := opt.Query
 	source := tui.SourceSeason // default browse source
-	load := func(src tui.AnimeSource, q, season string) []mal.Item {
+	load := func(src tui.AnimeSource, q, season string) ([]mal.Item, error) {
 		if q != "" {
-			items, _ := mal.Search(q, opt.Debug)
-			return items
+			return mal.Search(q, opt.Debug)
 		}
 		switch src {
 		case tui.SourceList:
-			items, _ := mal.MyList("", opt.Debug)
-			return items
+			return mal.MyList("", opt.Debug)
 		default: // SourceSeason
 			if season == mal.SeasonLater {
-				items, _ := mal.Upcoming(opt.Debug)
-				return items
+				return mal.Upcoming(opt.Debug)
 			}
 			year, s, ok := mal.ParseSeasonLabel(season)
 			if !ok {
-				return nil
+				return nil, fmt.Errorf("invalid season %q", season)
 			}
-			items, _ := mal.Seasonal(year, s, opt.Debug)
-			return items
+			return mal.Seasonal(year, s, opt.Debug)
 		}
 	}
 	applyStatus := func(malID, watched int, act tui.StatusAction) bool {
@@ -125,6 +141,12 @@ func resolveMal(opt *Options) (int, *mal.Item, error) {
 	if err != nil {
 		return 0, nil, err
 	}
+	if res != nil && res.Relogin {
+		return 0, nil, errRelogin
+	}
+	if res != nil && res.Logout {
+		return 0, nil, errLogout
+	}
 	if res == nil || res.Quit || res.Anime == nil {
 		return 0, nil, ErrCancelled
 	}
@@ -151,7 +173,10 @@ func resolveMalDry(opt *Options, source tui.AnimeSource, query string, load tui.
 	if source == tui.SourceSeason && query == "" {
 		_, _, season = mal.CurrentSeason()
 	}
-	items := load(source, query, season)
+	items, err := load(source, query, season)
+	if err != nil {
+		return 0, nil, fmt.Errorf("load: %w", err)
+	}
 	if len(items) == 0 {
 		return 0, nil, fmt.Errorf("no anime found for %q", query)
 	}
@@ -280,7 +305,7 @@ func resolveAnimetosho(opt *Options) (int, *mal.Item, error) {
 	if len(items) == 0 {
 		return 0, nil, fmt.Errorf("no anime found")
 	}
-	load := func(tui.AnimeSource, string, string) []mal.Item { return items }
+	load := func(tui.AnimeSource, string, string) ([]mal.Item, error) { return items, nil }
 	if opt.DryRun {
 		// Dry-run: skip the anime picker, auto-pick the first series hit.
 		item := items[0]

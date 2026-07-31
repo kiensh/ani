@@ -24,6 +24,11 @@ type Result struct {
 	Action    string              // "play" or "download" (release picker: Enter / d)
 	Completed bool                // mark MAL completed (completed prompt)
 
+	// MAL auth actions requested from the anime picker (L / status overlay). The
+	// caller (app.Run) performs them after the TUI exits, then re-resolves.
+	Relogin bool // re-run the browser OAuth flow
+	Logout  bool // forget the saved MAL token
+
 	// Filter preferences from the release picker (persisted across sessions).
 	FilterGroup   string
 	FilterQuality string

@@ -27,6 +27,7 @@ var (
 	colorFaint    = lipgloss.Color("245") // grey
 	colorAccent   = lipgloss.Color("213") // magenta accent for headers
 	colorSuccess  = lipgloss.Color("41")  // green (completion success)
+	colorError    = lipgloss.Color("203") // salmon/red (errors, destructive)
 )
 
 // TitleStyle styles the main title of a pane.
@@ -46,6 +47,9 @@ var StudiosStyle = lipgloss.NewStyle().Foreground(colorStudios)
 
 // FaintStyle styles dim/secondary text (season, rank, help bar).
 var FaintStyle = lipgloss.NewStyle().Foreground(colorFaint)
+
+// ErrorStyle styles error text (failed MAL load, auth-failure hint).
+var ErrorStyle = lipgloss.NewStyle().Foreground(colorError)
 
 // SelectedStyle styles the currently focused list row. The explicit SetString
 // ensures the rendered output wraps the whole line (full reset at both ends),

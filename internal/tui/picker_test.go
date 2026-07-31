@@ -56,7 +56,7 @@ func loadReleases(m *releasePicker, all []*animetosho.Release) {
 
 // animeLoadAll returns an AnimeLoad that always returns the given items.
 func animeLoadAll(items []mal.Item) AnimeLoad {
-	return func(AnimeSource, string, string) []mal.Item { return items }
+	return func(AnimeSource, string, string) ([]mal.Item, error) { return items, nil }
 }
 
 // loadAnime seeds an anime picker as if a load completed for its current
@@ -413,9 +413,9 @@ func TestAnimePickerTabToggle(t *testing.T) {
 func TestSeasonSourceSwitch(t *testing.T) {
 	var seasons []string
 	items := []mal.Item{{MalID: 1, Title: "A"}}
-	load := func(_ AnimeSource, _ string, season string) []mal.Item {
+	load := func(_ AnimeSource, _ string, season string) ([]mal.Item, error) {
 		seasons = append(seasons, season)
-		return items
+		return items, nil
 	}
 	m := newAnimePicker(SourceSeason, "", load, nil, nil, nil, nil, nil, false)
 	loadAnime(m, items)
@@ -1323,4 +1323,73 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// newAnimePickerForTest builds a Season picker with a no-op load and a sized window.
+func newAnimePickerForTest() *animePicker {
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(nil), nil, nil, nil, nil, nil, false)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	return m
+}
+
+// TestAnimeLoadErrorRendered: a failed load sets loadErr and the empty list renders
+// the error (without a login hint for non-auth errors).
+func TestAnimeLoadErrorRendered(t *testing.T) {
+	m := newAnimePickerForTest()
+	model, _ := m.Update(itemsLoadedMsg{err: fmt.Errorf("boom: connection reset"), source: SourceSeason, season: m.season})
+	m = model.(*animePicker)
+	if m.loadErr == nil {
+		t.Fatal("expected loadErr set on load failure")
+	}
+	out := m.View()
+	if !strings.Contains(out, "MAL error: boom: connection reset") {
+		t.Fatalf("expected error line in view, got:\n%s", out)
+	}
+	if strings.Contains(out, "press L to log in") {
+		t.Fatal("non-auth error must not show the login hint")
+	}
+}
+
+// TestAnimeLoadAuthErrorHint: an auth-flavored error adds "press L to log in".
+func TestAnimeLoadAuthErrorHint(t *testing.T) {
+	m := newAnimePickerForTest()
+	model, _ := m.Update(itemsLoadedMsg{err: fmt.Errorf("GET /anime/season: 401 Unauthorized"), source: SourceSeason, season: m.season})
+	m = model.(*animePicker)
+	if !mal.IsAuthError(m.loadErr) {
+		t.Fatalf("expected IsAuthError, got %v", m.loadErr)
+	}
+	out := m.View()
+	if !strings.Contains(out, "press L to log in") {
+		t.Fatalf("expected login hint in view, got:\n%s", out)
+	}
+}
+
+// TestAuthOverlayKeys drives the account overlay's L/o/Esc actions and the global L.
+func TestAuthOverlayKeys(t *testing.T) {
+	// 'o' in the overlay → logout signal.
+	m := newAnimePickerForTest()
+	m.overlay.kind = animeOverlayAuth
+	if model, _ := m.Update(keyMsg('o')); !model.(*animePicker).result.Logout {
+		t.Fatal("expected result.Logout on 'o' in auth overlay")
+	}
+
+	// 'L' in the overlay → relogin signal.
+	m = newAnimePickerForTest()
+	m.overlay.kind = animeOverlayAuth
+	if model, _ := m.Update(keyMsg('L')); !model.(*animePicker).result.Relogin {
+		t.Fatal("expected result.Relogin on 'L' in auth overlay")
+	}
+
+	// Esc closes the overlay.
+	m = newAnimePickerForTest()
+	m.overlay.kind = animeOverlayAuth
+	if model, _ := m.Update(escMsg()); model.(*animePicker).overlay.kind == animeOverlayAuth {
+		t.Fatal("expected auth overlay closed on Esc")
+	}
+
+	// Global 'L' (no overlay) → relogin signal.
+	m = newAnimePickerForTest()
+	if model, _ := m.Update(keyMsg('L')); !model.(*animePicker).result.Relogin {
+		t.Fatal("expected result.Relogin on global 'L'")
+	}
 }
