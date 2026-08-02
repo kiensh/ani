@@ -759,11 +759,13 @@ func (m *animePicker) prefetchPageCmd(firstPage bool) tea.Cmd {
 // reveals cached covers with no re-fetch.
 //
 // AIRING COUNTS page by list-membership: page 1 = the user's own anime
-// (ListStatus != ""), page 2 = off-list anime. Page 2 is gated on page 1's covers
-// settling, so off-list aired work starts only after the on-list batch is already
-// in flight — the user sees their own shows' counts fill in first. Each chosen
-// airing item is marked dispatched (AiredCache) so it isn't re-fetched. Pure
-// selection — prefetchPageCmd wraps the result into cmds.
+// (ListStatus != ""), page 2 = off-list anime. Within each page, items are taken
+// in DISPLAY (sorted) order — m.view top-down, where the cursor sits — so the
+// first visible items get their counts first (then any filtered-out items).
+// Page 2 is gated on page 1's covers settling, so off-list aired work starts only
+// after the on-list batch is already in flight. Each chosen airing item is marked
+// dispatched (AiredCache) so it isn't re-fetched. Pure selection — prefetchPageCmd
+// wraps the result into cmds.
 func (m *animePicker) selectPrefetchPage(firstPage bool) (coverURLs []string, airedItems []mal.Item) {
 	pageSize := m.pageSize()
 	// ---- Covers: page by visibility ----
@@ -796,10 +798,24 @@ func (m *animePicker) selectPrefetchPage(firstPage bool) (coverURLs []string, ai
 		}
 	}
 
-	// ---- Airing counts: page by list-membership (on-list first) ----
-	for _, it := range m.items {
+	// ---- Airing counts: page by list-membership (on-list first), and within each
+	// page in DISPLAY (sorted) order — m.view top-down, where the cursor is — so the
+	// first visible items get their counts first. In-view items first, then any
+	// filtered-out items of this membership group. ----
+	inView := map[int]bool{}
+	for _, it := range m.view {
+		inView[it.MalID] = true
 		if (it.ListStatus != "") != firstPage {
 			continue // page 1 → on-list only; page 2 → off-list only
+		}
+		airedItems = m.maybeAppendAired(airedItems, it)
+	}
+	for _, it := range m.items {
+		if inView[it.MalID] {
+			continue
+		}
+		if (it.ListStatus != "") != firstPage {
+			continue
 		}
 		airedItems = m.maybeAppendAired(airedItems, it)
 	}

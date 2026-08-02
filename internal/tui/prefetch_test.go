@@ -105,6 +105,24 @@ func TestPrefetchCoversFollowView(t *testing.T) {
 	}
 }
 
+// TestPrefetchAiredFollowsViewOrder: within a page, airing items are taken in
+// display (m.view) order so the cursor's top-of-list items are processed first.
+func TestPrefetchAiredFollowsViewOrder(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, AirStatus: "currently_airing", ListStatus: "watching"},
+		{MalID: 2, AirStatus: "currently_airing", ListStatus: "watching"},
+		{MalID: 3, AirStatus: "currently_airing", ListStatus: "watching"},
+	}
+	m := newPrefetchPicker(items, func(*mal.Item) int { return 1 }, 10)
+	// Reorder the view (as a sort would): top is 3, 1, 2.
+	m.view = []mal.Item{items[2], items[0], items[1]}
+
+	_, aired := m.selectPrefetchPage(true)
+	if got := malIDs(aired); len(got) != 3 || got[0] != 3 || got[1] != 1 || got[2] != 2 {
+		t.Errorf("page1 aired = %v, want [3 1 2] (m.view order, cursor top first)", got)
+	}
+}
+
 // TestPrefetchSkipsNonAiring: covers are gathered for every item; aired episodes
 // only for currently_airing items (here all on-list, so page 1).
 func TestPrefetchSkipsNonAiring(t *testing.T) {
