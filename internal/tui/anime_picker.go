@@ -279,20 +279,20 @@ const (
 	animeOverlayStatus
 	animeOverlaySeason
 	animeOverlaySort
-	animeOverlayActions     // top-level actions menu (Set Status / Set Score / Remove)
-	animeOverlayStatusMenu  // "Set Status" sub-menu (Watching/Completed/...)
-	animeOverlayConfirm     // centered y/n modal for an actions-menu choice
-	animeOverlayScore       // 1-10 / Remove Score picker
-	animeOverlayEpisode     // set watched episodes (number input)
-	animeOverlayAuth        // MAL account/status modal (read-only + L/o actions)
+	animeOverlayActions    // top-level actions menu (Set Status / Set Score / Remove)
+	animeOverlayStatusMenu // "Set Status" sub-menu (Watching/Completed/...)
+	animeOverlayConfirm    // centered y/n modal for an actions-menu choice
+	animeOverlayScore      // 1-10 / Remove Score picker
+	animeOverlayEpisode    // set watched episodes (number input)
+	animeOverlayAuth       // MAL account/status modal (read-only + L/o actions)
 )
 
 type animeOverlay struct {
 	kind          animeOverlayKind
 	items         []string
 	cursor        int
-	text          string        // confirm-modal question
-	pendingAction StatusAction  // action to apply on confirm
+	text          string       // confirm-modal question
+	pendingAction StatusAction // action to apply on confirm
 }
 
 func (o *animeOverlay) active() bool { return o.kind != animeOverlayNone }
@@ -396,29 +396,29 @@ type animePicker struct {
 	applyWatched func(malID, watched int) bool
 
 	// latestEpisode returns the latest aired episode for the focused item (nil
-	// disables the "watched/aired/total" display). aired caches results by malID;
-	// a failed fetch (0) is intentionally not cached so it retries on next focus.
+	// disables the "watched/aired/total" display). aired is a session-scoped
+	// *AiredCache: each anime's count is computed at most once per session (incl.
+	// 0/failed — no retry), shared across pickers via app.Run.
 	latestEpisode func(item *mal.Item) int
-	aired         map[int]int
+	aired         *AiredCache
 
 	// latestEpisodePrefetch is the background prefetch variant (fast-only: no
 	// Jikan, skips aid-unresolved items). nil ⇒ covers are still paged but no
-	// aired prefetch. airedPrefetched dedups dispatch across pages/reloads.
+	// aired prefetch.
 	latestEpisodePrefetch func(item *mal.Item) int
-	airedPrefetched       map[int]bool
 
-	// prefetchSem caps concurrent aired-episode fetches for THIS instance. It's
-	// per-instance (not package-level) so orphaned goroutines from a previous
-	// picker (e.g. after going to the release picker and back) can't hold slots
-	// and stall this instance's prefetch.
+	// prefetchSem bounds concurrent aired-episode fetches. Animetosho times out
+	// (~30s) when too many hit it at once — a full season has ~90 airing anime and
+	// uncapped dispatch caused ~1/3 to time out. Per-instance so a torn-down
+	// picker's orphaned goroutines can't stall a new one.
 	prefetchSem chan struct{}
 
 	cursor  int
 	topItem int
 	debug   bool
 
-	cover       *CoverCache
-	coverText   string
+	cover        *CoverCache
+	coverText    string
 	coverHeights map[int]int // malID → actual rendered cover height (lines), so the placeholder matches on re-focus
 
 	width, height int
@@ -461,26 +461,25 @@ func animeCacheKey(source AnimeSource, query, season string) string {
 func newAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) int, latestEpisodePrefetch func(*mal.Item) int, debug bool) *animePicker {
 	y, s, label := mal.CurrentSeason()
 	ap := &animePicker{
-		source:               source,
-		query:                query,
-		load:                 load,
-		applyStatus:          applyStatus,
-		applyScore:           applyScore,
-		applyWatched:         applyWatched,
-		latestEpisode:        latestEpisode,
+		source:                source,
+		query:                 query,
+		load:                  load,
+		applyStatus:           applyStatus,
+		applyScore:            applyScore,
+		applyWatched:          applyWatched,
+		latestEpisode:         latestEpisode,
 		latestEpisodePrefetch: latestEpisodePrefetch,
-		aired:                map[int]int{},
-		airedPrefetched:      map[int]bool{},
-		prefetchSem:          make(chan struct{}, prefetchCap),
-		coverHeights:         map[int]int{},
-		cache:         &animeCache{m: map[string][]mal.Item{}},
-		loading:       true,
-		currentYear:   y,
-		currentSeason: s,
-		currentLabel:  label,
-		filter:        AnimeFilter{Sort: "popularity", Status: "All"},
-		debug:         debug,
-		result:        &Result{},
+		aired:                 NewAiredCache(),
+		prefetchSem:           make(chan struct{}, prefetchCap),
+		coverHeights:          map[int]int{},
+		cache:                 &animeCache{m: map[string][]mal.Item{}},
+		loading:               true,
+		currentYear:           y,
+		currentSeason:         s,
+		currentLabel:          label,
+		filter:                AnimeFilter{Sort: "popularity", Status: "All"},
+		debug:                 debug,
+		result:                &Result{},
 	}
 	ap.season = ap.defaultSeason()
 	ap.filter.Status = ap.defaultStatus()
@@ -601,12 +600,10 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case latestEpMsg:
-		// Cache the latest aired episode for the focused anime's metadata display.
-		// Only cache a real value: a failed fetch (0) leaves the slot empty so it
-		// retries on the next focus instead of poisoning the cache (the fetch
-		// already retries internally, so 0 means "genuinely unknown right now").
-		if m.latestEpisode != nil && msg.aired > 0 {
-			m.aired[msg.malID] = msg.aired
+		// Record the result for this anime. Per the once-per-session rule any count
+		// (incl. 0/failed) is kept — it won't be re-fetched again this session.
+		if m.latestEpisode != nil {
+			m.aired.put(msg.malID, msg.aired)
 		}
 		return m, nil
 
@@ -678,19 +675,31 @@ func (m *animePicker) applyLoaded(msg itemsLoadedMsg) (tea.Model, tea.Cmd) {
 // so the model schedules the next page.
 type prefetchPageDoneMsg struct{ firstPage bool }
 
-// prefetchCap bounds concurrent aired-episode fetches in the background (the
-// feed is an API, unlike the cover image CDN, which downloads uncapped).
-const prefetchCap = 6
+// prefetchCap bounds concurrent animetosho aired-episode fetches. Uncapped, a full
+// season's ~90 airing anime overwhelm animetosho (~1/3 time out at the 30s
+// deadline). 16 stays under where timeouts begin (verified: 0 errors at 16).
+const prefetchCap = 16
 
 // prefetchPageCmd prefetches one page of covers + aired episodes (see
 // selectPrefetchPage for what each page covers). The cover download is batched
 // behind a barrier that emits prefetchPageDoneMsg when it settles, so the model
-// schedules page 2. Aired cmds run independently of the barrier (semaphore-
-// capped, emit latestEpMsg as they finish) so slow aired fetches can't gate the
-// next page's covers. An empty page 1 still chains to page 2 (the work may be
-// entirely off-screen); an empty page 2 returns nil.
+// schedules page 2. Aired cmds run independently of the barrier (capped at
+// prefetchCap concurrent; emit latestEpMsg as they finish) so slow aired fetches
+// can't gate the next page's covers. An empty page 1 still chains to page 2 (the
+// work may be entirely off-screen); an empty page 2 returns nil.
 func (m *animePicker) prefetchPageCmd(firstPage bool) tea.Cmd {
 	coverURLs, airedItems := m.selectPrefetchPage(firstPage)
+	// Debug: confirm the on-list batch (page 1) is dispatched before off-list
+	// (page 2). The log order in debug.log shows the sequence.
+	page, label := 2, "off-list"
+	if firstPage {
+		page, label = 1, "on-list (my list)"
+	}
+	ids := make([]int, len(airedItems))
+	for i, it := range airedItems {
+		ids[i] = it.MalID
+	}
+	mal.LogDebug("DEBUG prefetch page %d (%s): %d aired items malIDs=%v\n", page, label, len(airedItems), ids)
 	if len(coverURLs) == 0 && len(airedItems) == 0 {
 		// Nothing on this page. Page 1 must still chain to page 2 — the work may
 		// be entirely off-screen (e.g. the default status filter hides everything
@@ -716,9 +725,12 @@ func (m *animePicker) prefetchPageCmd(firstPage bool) tea.Cmd {
 		return coverReadyMsg{}
 	})
 
-	// Aired episodes: one cmd per airing item, semaphore-capped. These run
-	// independently of the barrier — they emit latestEpMsg as they finish, so
-	// aired counts fill in without delaying the next page's covers.
+	// Aired episodes: one cmd per airing item, capped at prefetchCap concurrent
+	// (animetosho times out under a full season's ~90-at-once load). These run
+	// independently of the barrier — they emit latestEpMsg as they finish, so aired
+	// counts fill in without delaying the next page's covers. Each cmd only calls
+	// the injected fn; the shared *AiredCache is touched solely on the Update
+	// goroutine when latestEpMsg lands.
 	sem := m.prefetchSem
 	for _, it := range airedItems {
 		item := it
@@ -741,50 +753,53 @@ func (m *animePicker) prefetchPageCmd(firstPage bool) tea.Cmd {
 
 // selectPrefetchPage picks the cover URLs and airing items for one prefetch page.
 //
-// Page 1 (firstPage=true) is the visible page — m.view[:pageSize], in display
-// order — so the covers and aired counts the user actually sees load first.
+// COVERS page by visibility: page 1 is the visible page (m.view[:pageSize]) so the
+// covers the user sees load first; page 2 is the rest (view tail + filtered-out
+// items). Covers are gathered for ALL items so a status-filter change always
+// reveals cached covers with no re-fetch.
 //
-// Page 2 is the remainder: the rest of m.view PLUS every item filtered out of
-// the current view (status filter, etc.). Covers and airing counts are gathered
-// for ALL remaining items so that changing the status filter always reveals
-// already-cached covers/counts (no re-fetch, no focus delay).
-//
-// Each chosen airing item is marked dispatched (airedPrefetched) so it isn't
-// re-fetched. Pure selection — prefetchPageCmd wraps the result into cmds.
+// AIRING COUNTS page by list-membership: page 1 = the user's own anime
+// (ListStatus != ""), page 2 = off-list anime. Page 2 is gated on page 1's covers
+// settling, so off-list aired work starts only after the on-list batch is already
+// in flight — the user sees their own shows' counts fill in first. Each chosen
+// airing item is marked dispatched (AiredCache) so it isn't re-fetched. Pure
+// selection — prefetchPageCmd wraps the result into cmds.
 func (m *animePicker) selectPrefetchPage(firstPage bool) (coverURLs []string, airedItems []mal.Item) {
 	pageSize := m.pageSize()
+	// ---- Covers: page by visibility ----
 	if firstPage {
 		end := min(pageSize, len(m.view))
 		for _, it := range m.view[:end] {
 			if it.CoverURL != "" {
 				coverURLs = append(coverURLs, it.CoverURL)
 			}
-			airedItems = m.maybeAppendAired(airedItems, it)
 		}
-		return coverURLs, airedItems
-	}
-
-	// View tail: covers + airing counts for the rest of the visible list.
-	if pageSize < len(m.view) {
-		for _, it := range m.view[pageSize:] {
+	} else {
+		if pageSize < len(m.view) {
+			for _, it := range m.view[pageSize:] {
+				if it.CoverURL != "" {
+					coverURLs = append(coverURLs, it.CoverURL)
+				}
+			}
+		}
+		inView := map[int]bool{}
+		for _, it := range m.view {
+			inView[it.MalID] = true
+		}
+		for _, it := range m.items {
+			if inView[it.MalID] {
+				continue
+			}
 			if it.CoverURL != "" {
 				coverURLs = append(coverURLs, it.CoverURL)
 			}
-			airedItems = m.maybeAppendAired(airedItems, it)
 		}
 	}
-	// Filtered-out items: covers + airing counts, so a status-filter change shows
-	// both without re-fetching. (Skipped if already in the view above.)
-	inView := map[int]bool{}
-	for _, it := range m.view {
-		inView[it.MalID] = true
-	}
+
+	// ---- Airing counts: page by list-membership (on-list first) ----
 	for _, it := range m.items {
-		if inView[it.MalID] {
-			continue
-		}
-		if it.CoverURL != "" {
-			coverURLs = append(coverURLs, it.CoverURL)
+		if (it.ListStatus != "") != firstPage {
+			continue // page 1 → on-list only; page 2 → off-list only
 		}
 		airedItems = m.maybeAppendAired(airedItems, it)
 	}
@@ -797,13 +812,10 @@ func (m *animePicker) maybeAppendAired(items []mal.Item, it mal.Item) []mal.Item
 	if m.latestEpisodePrefetch == nil || it.MalID == 0 || it.AirStatus != "currently_airing" {
 		return items
 	}
-	if _, ok := m.aired[it.MalID]; ok {
+	if !m.aired.shouldFetch(it.MalID) {
 		return items
 	}
-	if m.airedPrefetched[it.MalID] {
-		return items
-	}
-	m.airedPrefetched[it.MalID] = true
+	m.aired.markDispatched(it.MalID)
 	return append(items, it)
 }
 
@@ -905,7 +917,7 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if it := m.currentItemCopy(); it != nil {
 			// Carry the cached aired count so the release picker reuses it
 			// instead of re-fetching on entry.
-			it.AiredEps = m.aired[it.MalID]
+			it.AiredEps = m.aired.value(it.MalID)
 			m.result.Anime = it
 			return m, tea.Batch(tea.Quit, m.quitCmd())
 		}
@@ -1508,9 +1520,10 @@ func (m *animePicker) latestEpisodeCmd() tea.Cmd {
 	if cur == nil || cur.MalID == 0 || cur.AirStatus != "currently_airing" {
 		return nil
 	}
-	if _, ok := m.aired[cur.MalID]; ok {
-		return nil // cached
+	if !m.aired.shouldFetch(cur.MalID) {
+		return nil // already computed (or in flight) this session
 	}
+	m.aired.markDispatched(cur.MalID)
 	item := cur // stable copy; safe for the background goroutine
 	fn := m.latestEpisode
 	return func() tea.Msg { return latestEpMsg{malID: item.MalID, aired: fn(item)} }
@@ -1753,7 +1766,7 @@ func (m *animePicker) renderMetadata() string {
 
 	lines = append(lines, TitleStyle.Render(wrap(cur.Title, width)))
 
-	progress := ui.FormatProgress(cur.WatchedEps, cur.TotalEps, m.aired[cur.MalID], cur.AirStatus == "currently_airing")
+	progress := ui.FormatProgress(cur.WatchedEps, cur.TotalEps, m.aired.value(cur.MalID), cur.AirStatus == "currently_airing")
 	if a := ui.MALAirShort(cur.AirStatus); a != "" {
 		progress += "  [" + a + "]"
 	}

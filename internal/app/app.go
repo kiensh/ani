@@ -41,8 +41,10 @@ const latestUploadsAID = -1
 // play/download → write back to MAL. Esc in the release picker returns to
 // anime selection.
 func Run(opt *Options) error {
+	aired := tui.NewAiredCache()       // session-scoped; shared across the anime + release pickers
+	go mal.WarmAidResolvers(opt.Debug) // overlap the one-time Fribb/AniDB map load with the first MAL fetch
 	for {
-		aid, item, err := resolve(opt)
+		aid, item, err := resolve(opt, aired)
 		if errors.Is(err, errRelogin) {
 			if e := mal.Login(opt.Debug); e != nil {
 				fmt.Fprintf(os.Stderr, "ani: login failed: %v\n", e)
@@ -58,7 +60,7 @@ func Run(opt *Options) error {
 		if err != nil {
 			return err
 		}
-		if err := releaseLoop(opt, aid, item); err != nil {
+		if err := releaseLoop(opt, aid, item, aired); err != nil {
 			if errors.Is(err, errBackToAnime) {
 				continue // Esc in release picker → re-resolve
 			}
@@ -71,12 +73,12 @@ func Run(opt *Options) error {
 // resolve picks an anime and returns its AniDB id + item. A numeric query is a
 // direct AniDB id (no MAL); otherwise MAL when logged in, else AnimeTosho
 // (series search by name, or latest uploads when no query).
-func resolve(opt *Options) (int, *mal.Item, error) {
+func resolve(opt *Options, aired *tui.AiredCache) (int, *mal.Item, error) {
 	if n, perr := strconv.Atoi(opt.Query); perr == nil && n > 0 {
 		return resolveAnidb(n)
 	}
 	if mal.LoggedIn() {
-		return resolveMal(opt)
+		return resolveMal(opt, aired)
 	}
 	return resolveAnimetosho(opt)
 }
@@ -93,7 +95,7 @@ func resolveAnidb(aid int) (int, *mal.Item, error) {
 // resolveMal runs the anime picker over MAL and resolves the AniDB id from the
 // picked item. Browse opens on Season (current); Tab → My List. A non-empty
 // query means search.
-func resolveMal(opt *Options) (int, *mal.Item, error) {
+func resolveMal(opt *Options, aired *tui.AiredCache) (int, *mal.Item, error) {
 	query := opt.Query
 	source := tui.SourceSeason // default browse source
 	load := func(src tui.AnimeSource, q, season string) ([]mal.Item, error) {
@@ -137,7 +139,7 @@ func resolveMal(opt *Options) (int, *mal.Item, error) {
 		// flow is non-interactive (the release picker dry-runs separately).
 		return resolveMalDry(opt, source, query, load)
 	}
-	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetchFn(opt), opt.Debug)
+	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetchFn(opt), aired, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -315,7 +317,7 @@ func resolveAnimetosho(opt *Options) (int, *mal.Item, error) {
 		}
 		return item.AnidbAID, &item, nil
 	}
-	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, opt.Debug)
+	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -343,18 +345,18 @@ func seriesToItems(ss []animetosho.SeriesSummary) []mal.Item {
 // The latest-uploads sentinel (aid == latestUploadsAID) fetches the newest
 // releases site-wide with the episode filter disabled. Returns errBackToAnime
 // when the user backs out.
-func releaseLoop(opt *Options, aid int, item *mal.Item) error {
+func releaseLoop(opt *Options, aid int, item *mal.Item, aired *tui.AiredCache) error {
 	if aid == latestUploadsAID {
-		return latestLoop(opt, item)
+		return latestLoop(opt, item, aired)
 	}
 	cache := &episodeCache{data: map[int][]*animetosho.Release{}}
-	return playLoop(opt, item, cachedFetch(aid, cache), false)
+	return playLoop(opt, item, cachedFetch(aid, cache), false, aired)
 }
 
 // latestLoop is the no-arg AnimeTosho landing screen: the newest uploads in one
 // flat list (episode filter disabled), no MAL write-back (the synthetic item
 // has no MAL id).
-func latestLoop(opt *Options, item *mal.Item) error {
+func latestLoop(opt *Options, item *mal.Item, aired *tui.AiredCache) error {
 	var cached []*animetosho.Release
 	fetch := func(int) []*animetosho.Release {
 		if cached == nil {
@@ -362,14 +364,14 @@ func latestLoop(opt *Options, item *mal.Item) error {
 		}
 		return cached
 	}
-	return playLoop(opt, item, fetch, true)
+	return playLoop(opt, item, fetch, true, aired)
 }
 
 // playLoop drives the release picker and the play/download + MAL write-back,
 // looping for the next episode until cancelled or backed out of.
-func playLoop(opt *Options, item *mal.Item, fetch func(int) []*animetosho.Release, disableEpisode bool) error {
+func playLoop(opt *Options, item *mal.Item, fetch func(int) []*animetosho.Release, disableEpisode bool, aired *tui.AiredCache) error {
 	for {
-		pick, action, err := pickReleaseTUI(item, opt, fetch, disableEpisode)
+		pick, action, err := pickReleaseTUI(item, opt, fetch, disableEpisode, aired)
 		if err != nil {
 			return err // errBackToAnime propagates to Run
 		}
@@ -429,7 +431,7 @@ func cachedFetch(aid int, cache *episodeCache) func(int) []*animetosho.Release {
 // first release so exec commands can be printed without a TUI. Returns the
 // chosen release and action ("play"/"download"); disableEpisode suppresses the
 // episode filter (latest-uploads view).
-func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*animetosho.Release, disableEpisode bool) (*animetosho.Release, string, error) {
+func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*animetosho.Release, disableEpisode bool, aired *tui.AiredCache) (*animetosho.Release, string, error) {
 	if opt.DryRun {
 		ep := 0
 		if !disableEpisode {
@@ -444,7 +446,7 @@ func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*animetosho.
 		return view[0], "play", nil
 	}
 	res, err := tui.RunReleasePicker(item, opt.Group, opt.Quality, opt.Sort, fetch, disableEpisode, player.CopyToClipboard,
-		latestEpisodeFn(opt), opt.Debug)
+		latestEpisodeFn(opt), aired, opt.Debug)
 	if err != nil {
 		return nil, "", err
 	}

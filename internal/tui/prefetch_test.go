@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"bytes"
+	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -31,11 +34,12 @@ func malIDs(items []mal.Item) []int {
 	return out
 }
 
-// TestPrefetchPagingSplit: page 1 is the first pageSize items; the rest only after.
+// TestPrefetchPagingSplit: covers page by visibility (first pageSize); aired pages
+// by list-membership (on-list in page 1, off-list in page 2).
 func TestPrefetchPagingSplit(t *testing.T) {
 	items := []mal.Item{
-		{MalID: 1, AirStatus: "currently_airing", CoverURL: "u1"},
-		{MalID: 2, AirStatus: "currently_airing", CoverURL: "u2"},
+		{MalID: 1, AirStatus: "currently_airing", CoverURL: "u1", ListStatus: "watching"},
+		{MalID: 2, AirStatus: "currently_airing", CoverURL: "u2", ListStatus: "watching"},
 		{MalID: 3, AirStatus: "currently_airing", CoverURL: "u3"},
 		{MalID: 4, AirStatus: "currently_airing", CoverURL: "u4"},
 	}
@@ -43,7 +47,7 @@ func TestPrefetchPagingSplit(t *testing.T) {
 
 	covers1, aired1 := m.selectPrefetchPage(true)
 	if len(aired1) != 2 || aired1[0].MalID != 1 || aired1[1].MalID != 2 {
-		t.Errorf("page1 aired = %v, want [1 2]", malIDs(aired1))
+		t.Errorf("page1 aired (on-list) = %v, want [1 2]", malIDs(aired1))
 	}
 	if len(covers1) != 2 || covers1[0] != "u1" || covers1[1] != "u2" {
 		t.Errorf("page1 covers = %v, want [u1 u2]", covers1)
@@ -51,19 +55,19 @@ func TestPrefetchPagingSplit(t *testing.T) {
 
 	covers2, aired2 := m.selectPrefetchPage(false)
 	if len(aired2) != 2 || aired2[0].MalID != 3 || aired2[1].MalID != 4 {
-		t.Errorf("page2 aired = %v, want [3 4]", malIDs(aired2))
+		t.Errorf("page2 aired (off-list) = %v, want [3 4]", malIDs(aired2))
 	}
 	if len(covers2) != 2 || covers2[0] != "u3" || covers2[1] != "u4" {
 		t.Errorf("page2 covers = %v, want [u3 u4]", covers2)
 	}
 }
 
-// TestPrefetchDefaultPageSize: with an unknown layout (height 0) page 1 uses the
-// default (~20), the rest is the remainder.
+// TestPrefetchDefaultPageSize: with an unknown layout (height 0) the cover page
+// uses the default (~20); the rest is the remainder. (Covers page by visibility.)
 func TestPrefetchDefaultPageSize(t *testing.T) {
 	items := make([]mal.Item, 25)
 	for i := range items {
-		items[i] = mal.Item{MalID: i + 1, AirStatus: "currently_airing"}
+		items[i] = mal.Item{MalID: i + 1, AirStatus: "currently_airing", CoverURL: "u"}
 	}
 	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil,
 		func(*mal.Item) int { return 1 }, false)
@@ -72,42 +76,42 @@ func TestPrefetchDefaultPageSize(t *testing.T) {
 	loadAnime(m, items)
 	m.height = 0 // unknown layout
 
-	_, aired1 := m.selectPrefetchPage(true)
-	if len(aired1) != 20 {
-		t.Errorf("page1 (height 0) aired = %d, want 20 (default)", len(aired1))
+	covers1, _ := m.selectPrefetchPage(true)
+	if len(covers1) != 20 {
+		t.Errorf("page1 (height 0) covers = %d, want 20 (default page size)", len(covers1))
 	}
-	_, aired2 := m.selectPrefetchPage(false)
-	if len(aired2) != 5 {
-		t.Errorf("page2 aired = %d, want 5 (remainder)", len(aired2))
+	covers2, _ := m.selectPrefetchPage(false)
+	if len(covers2) != 5 {
+		t.Errorf("page2 covers = %d, want 5 (remainder)", len(covers2))
 	}
 }
 
-// TestPrefetchOrderMatchesView: page 1 follows m.view order, independent of
-// m.items load order.
-func TestPrefetchOrderMatchesView(t *testing.T) {
+// TestPrefetchCoversFollowView: page-1 covers follow m.view order, independent of
+// m.items load order. (Aired pages by membership, so it's not view-ordered.)
+func TestPrefetchCoversFollowView(t *testing.T) {
 	items := []mal.Item{
-		{MalID: 10, AirStatus: "currently_airing"},
-		{MalID: 20, AirStatus: "currently_airing"},
-		{MalID: 30, AirStatus: "currently_airing"},
-		{MalID: 40, AirStatus: "currently_airing"},
+		{MalID: 10, AirStatus: "currently_airing", CoverURL: "u10"},
+		{MalID: 20, AirStatus: "currently_airing", CoverURL: "u20"},
+		{MalID: 30, AirStatus: "currently_airing", CoverURL: "u30"},
+		{MalID: 40, AirStatus: "currently_airing", CoverURL: "u40"},
 	}
 	m := newPrefetchPicker(items, func(*mal.Item) int { return 1 }, 2)
 	// Reorder the view (as a sort would) so the top is 40, 30.
 	m.view = []mal.Item{items[3], items[2], items[1], items[0]}
 
-	_, aired1 := m.selectPrefetchPage(true)
-	if len(aired1) != 2 || aired1[0].MalID != 40 || aired1[1].MalID != 30 {
-		t.Errorf("page1 aired = %v, want [40 30] (m.view order)", malIDs(aired1))
+	covers1, _ := m.selectPrefetchPage(true)
+	if len(covers1) != 2 || covers1[0] != "u40" || covers1[1] != "u30" {
+		t.Errorf("page1 covers = %v, want [u40 u30] (m.view order)", covers1)
 	}
 }
 
 // TestPrefetchSkipsNonAiring: covers are gathered for every item; aired episodes
-// only for currently_airing items.
+// only for currently_airing items (here all on-list, so page 1).
 func TestPrefetchSkipsNonAiring(t *testing.T) {
 	items := []mal.Item{
-		{MalID: 1, AirStatus: "currently_airing", CoverURL: "u1"},
-		{MalID: 2, AirStatus: "finished_airing", CoverURL: "u2"},
-		{MalID: 3, AirStatus: "currently_airing", CoverURL: "u3"},
+		{MalID: 1, AirStatus: "currently_airing", CoverURL: "u1", ListStatus: "watching"},
+		{MalID: 2, AirStatus: "finished_airing", CoverURL: "u2", ListStatus: "watching"},
+		{MalID: 3, AirStatus: "currently_airing", CoverURL: "u3", ListStatus: "watching"},
 	}
 	m := newPrefetchPicker(items, func(*mal.Item) int { return 1 }, 10)
 
@@ -121,15 +125,15 @@ func TestPrefetchSkipsNonAiring(t *testing.T) {
 }
 
 // TestPrefetchIdempotentAndCacheSkip: already-cached items are skipped, and
-// re-selecting a page yields nothing new (airedPrefetched dedups).
+// re-selecting a page yields nothing new (the aired cache dedups dispatch).
 func TestPrefetchIdempotentAndCacheSkip(t *testing.T) {
 	items := []mal.Item{
-		{MalID: 1, AirStatus: "currently_airing"},
-		{MalID: 2, AirStatus: "currently_airing"},
-		{MalID: 3, AirStatus: "currently_airing"},
+		{MalID: 1, AirStatus: "currently_airing", ListStatus: "watching"},
+		{MalID: 2, AirStatus: "currently_airing", ListStatus: "watching"},
+		{MalID: 3, AirStatus: "currently_airing", ListStatus: "watching"},
 	}
 	m := newPrefetchPicker(items, func(*mal.Item) int { return 1 }, 10)
-	m.aired[2] = 7 // already cached → skip
+	m.aired.put(2, 7) // already cached → skip
 
 	_, aired := m.selectPrefetchPage(true)
 	if len(aired) != 2 || aired[0].MalID != 1 || aired[1].MalID != 3 {
@@ -356,26 +360,56 @@ func TestPrefetchPageDoneHandler(t *testing.T) {
 	}
 }
 
-// TestPrefetchSemaphorePerInstance: each picker gets its own semaphore (cap
-// prefetchCap), distinct from other instances — so orphaned goroutines from a
-// previous picker (e.g. after going to release and back) can't stall this one.
-func TestPrefetchSemaphorePerInstance(t *testing.T) {
-	m1 := newAnimePicker(SourceSeason, "", animeLoadAll(nil), nil, nil, nil, nil, nil, false)
-	m2 := newAnimePicker(SourceSeason, "", animeLoadAll(nil), nil, nil, nil, nil, nil, false)
-	if cap(m1.prefetchSem) != prefetchCap {
-		t.Errorf("m1.prefetchSem cap = %d, want %d", cap(m1.prefetchSem), prefetchCap)
+// TestPrefetchFocusCacheHitAndFallback: after the prefetch fills m.aired,
+// focusing that item issues no new fetch; focusing an uncached item invokes the
+// full latestEpisode fn (the Jikan-fallback path is preserved for focus).
+func TestPrefetchFocusCacheHitAndFallback(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, AirStatus: "currently_airing"},
+		{MalID: 2, AirStatus: "currently_airing"},
 	}
-	if m1.prefetchSem == nil || m1.prefetchSem == m2.prefetchSem {
-		t.Errorf("pickers must have distinct non-nil sems; m1=%p m2=%p", m1.prefetchSem, m2.prefetchSem)
+	calls := 0
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil,
+		func(*mal.Item) int { calls++; return 9 }, // focus fn (full)
+		func(*mal.Item) int { return 0 },          // prefetch fn (unused here)
+		false)
+	m.filter.Status = "All"
+	m.filter.Sort = "relevance"
+	loadAnime(m, items)
+	m.height = 50
+	m.paneHeight = 13 // pageSize 10
+
+	// Prefetch fills aired[1].
+	m.Update(latestEpMsg{malID: 1, aired: 3})
+	if n, _ := m.aired.get(1); n != 3 {
+		t.Fatalf("aired[1] = %d, want 3", n)
+	}
+
+	// Focusing the cached item → no fetch.
+	m.cursor = 0
+	if cmd := m.latestEpisodeCmd(); cmd != nil {
+		t.Errorf("focus on cached item: latestEpisodeCmd non-nil, want nil (cache hit)")
+	}
+
+	// Focusing the uncached item → a fetch cmd that invokes the full fn.
+	m.cursor = 1
+	cmd := m.latestEpisodeCmd()
+	if cmd == nil {
+		t.Fatal("focus on uncached item: latestEpisodeCmd = nil, want a fetch cmd")
+	}
+	before := calls
+	m.Update(cmd())
+	if calls != before+1 {
+		t.Errorf("focus fallback: calls = %d, want %d", calls, before+1)
 	}
 }
 
 // TestPrefetchSemaphoreCap: a picker's semaphore bounds concurrent in-flight
-// aired fetches to prefetchCap.
+// aired fetches to prefetchCap (animetosho times out under heavier load).
 func TestPrefetchSemaphoreCap(t *testing.T) {
 	m := newAnimePicker(SourceSeason, "", animeLoadAll(nil), nil, nil, nil, nil, nil, false)
 	sem := m.prefetchSem
-	const n = 50
+	const n = 64
 	var inFlight, maxInFlight int32
 	var wg sync.WaitGroup
 	wg.Add(n)
@@ -401,46 +435,33 @@ func TestPrefetchSemaphoreCap(t *testing.T) {
 	}
 }
 
-// TestPrefetchFocusCacheHitAndFallback: after the prefetch fills m.aired,
-// focusing that item issues no new fetch; focusing an uncached item invokes the
-// full latestEpisode fn (the Jikan-fallback path is preserved for focus).
-func TestPrefetchFocusCacheHitAndFallback(t *testing.T) {
+// TestPrefetchDebugLogsListFirst verifies the prefetch pages on-list (my list)
+// airing items in page 1 and off-list in page 2, and logs that order so the
+// "my list first" priority is observable in the debug log.
+func TestPrefetchDebugLogsListFirst(t *testing.T) {
+	var buf bytes.Buffer
+	mal.SetDebugLog(&buf)
+	defer mal.SetDebugLog(io.Discard)
+
 	items := []mal.Item{
-		{MalID: 1, AirStatus: "currently_airing"},
-		{MalID: 2, AirStatus: "currently_airing"},
+		{MalID: 1, AirStatus: "currently_airing", ListStatus: "watching"},
+		{MalID: 2, AirStatus: "currently_airing", ListStatus: "plan_to_watch"},
+		{MalID: 3, AirStatus: "currently_airing"}, // off-list
 	}
-	calls := 0
-	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil,
-		func(*mal.Item) int { calls++; return 9 }, // focus fn (full)
-		func(*mal.Item) int { return 0 },          // prefetch fn (unused here)
-		false)
-	m.filter.Status = "All"
-	m.filter.Sort = "relevance"
-	loadAnime(m, items)
-	m.height = 50
-	m.paneHeight = 13 // pageSize 10
+	m := newPrefetchPicker(items, func(*mal.Item) int { return 1 }, 10)
+	m.prefetchPageCmd(true)  // page 1 → on-list
+	m.prefetchPageCmd(false) // page 2 → off-list
 
-	// Prefetch fills m.aired[1].
-	m.Update(latestEpMsg{malID: 1, aired: 3})
-	if m.aired[1] != 3 {
-		t.Fatalf("aired[1] = %d, want 3", m.aired[1])
+	out := buf.String()
+	i1 := strings.Index(out, "page 1 (on-list (my list))")
+	i2 := strings.Index(out, "page 2 (off-list)")
+	if i1 < 0 {
+		t.Errorf("missing page-1 (on-list) log line:\n%s", out)
 	}
-
-	// Focusing the cached item → no fetch.
-	m.cursor = 0
-	if cmd := m.latestEpisodeCmd(); cmd != nil {
-		t.Errorf("focus on cached item: latestEpisodeCmd non-nil, want nil (cache hit)")
+	if i2 < 0 || !strings.Contains(out, "malIDs=[3]") {
+		t.Errorf("page-2 (off-list) log missing or didn't carry the off-list item:\n%s", out)
 	}
-
-	// Focusing the uncached item → a fetch cmd that invokes the full fn.
-	m.cursor = 1
-	cmd := m.latestEpisodeCmd()
-	if cmd == nil {
-		t.Fatal("focus on uncached item: latestEpisodeCmd = nil, want a fetch cmd")
-	}
-	before := calls
-	m.Update(cmd())
-	if calls != before+1 {
-		t.Errorf("focus fallback: calls = %d, want %d", calls, before+1)
+	if i1 < 0 || i2 < 0 || i1 > i2 {
+		t.Errorf("expected page-1 log before page-2:\n%s", out)
 	}
 }

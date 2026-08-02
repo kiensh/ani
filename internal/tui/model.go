@@ -43,11 +43,14 @@ type Result struct {
 // anime (nil disables); latestEpisodePrefetch is the fast-only background variant
 // that pages the aired-episode prefetch (nil disables aired prefetch; covers are
 // still paged). Returns the selected anime, or Quit=true on cancel.
-func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) int, latestEpisodePrefetch func(*mal.Item) int, debug bool) (*Result, error) {
+func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) int, latestEpisodePrefetch func(*mal.Item) int, aired *AiredCache, debug bool) (*Result, error) {
 	if load == nil {
 		return &Result{Quit: true}, nil
 	}
 	m := newAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetch, debug)
+	if aired != nil {
+		m.aired = aired // reuse the session cache across Esc-from-releases
+	}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
 	if err != nil {
@@ -67,11 +70,11 @@ func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 // the episode filter (latest-uploads view). copyMagnet backs the Space menu's
 // "Copy Magnet URL"; latestEpisode backs the "watched/aired/total" header (nil
 // disables each).
-func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(*mal.Item) int, debug bool) (*Result, error) {
+func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(*mal.Item) int, aired *AiredCache, debug bool) (*Result, error) {
 	if item == nil || fetch == nil {
 		return &Result{Quit: true}, nil
 	}
-	m := newReleasePicker(item, group, quality, sortName, fetch, disableEpisode, copyMagnet, latestEpisode, debug)
+	m := newReleasePicker(item, group, quality, sortName, fetch, disableEpisode, copyMagnet, latestEpisode, aired, debug)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
 	if err != nil {

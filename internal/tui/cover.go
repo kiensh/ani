@@ -95,11 +95,23 @@ func (c *CoverCache) downloadAll(urls []string) tea.Cmd {
 	}
 }
 
+// coverHTTP pools connections to the cover CDN. A fresh &http.Client{} per download
+// (as before) shares DefaultTransport, which keeps only ~2 idle conns per host —
+// so a list's worth of concurrent cover downloads serialized. Pooling lets them
+// run in parallel.
+var coverHTTP = &http.Client{
+	Timeout: 20 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        400,
+		MaxIdleConnsPerHost: 200,
+		MaxConnsPerHost:     0,
+	},
+}
+
 // downloadOne fetches a single URL into a temp file inside the cache dir. The
 // extension is derived from the URL path so kitten icat sniffs the format.
 func (c *CoverCache) downloadOne(url string) (string, error) {
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := coverHTTP.Get(url)
 	if err != nil {
 		return "", err
 	}

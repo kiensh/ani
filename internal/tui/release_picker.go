@@ -48,9 +48,13 @@ type releasePicker struct {
 	toast      string // transient confirmation line (e.g. "✓ Magnet copied")
 
 	// latestEpisode returns the latest aired episode for m.item (nil disables
-	// the "watched/aired/total" header). aired caches the result for m.item.
+	// the "watched/aired/total" header). aired is the display value for m.item;
+	// airedCache is the shared session cache (once-per-session), shared with the
+	// anime picker — airedFetchCmd consults it so a count already computed this
+	// session (even 0) isn't re-fetched on entering releases.
 	latestEpisode func(*mal.Item) int
 	aired         int
+	airedCache    *AiredCache
 
 	view    []*animetosho.Release // filter.Apply(all)
 	cursor  int
@@ -61,7 +65,7 @@ type releasePicker struct {
 	result *Result
 }
 
-func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(*mal.Item) int, debug bool) *releasePicker {
+func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(*mal.Item) int, aired *AiredCache, debug bool) *releasePicker {
 	rp := &releasePicker{
 		item:            item,
 		debug:           debug,
@@ -70,6 +74,7 @@ func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch fun
 		episodeDisabled: disableEpisode,
 		copyMagnet:      copyMagnet,
 		latestEpisode:   latestEpisode,
+		airedCache:      aired,
 		result:          &Result{},
 	}
 	// Reuse the aired count cached by the anime picker (if any), so the header
@@ -120,6 +125,14 @@ func (m *releasePicker) airedFetchCmd() tea.Cmd {
 	if m.aired != 0 || m.item == nil || m.item.MalID == 0 || m.latestEpisode == nil {
 		return nil
 	}
+	// Once-per-session: if the anime picker (or an earlier release-picker entry)
+	// already computed this anime's count — even a 0 — don't re-fetch it.
+	if m.airedCache != nil && !m.airedCache.shouldFetch(m.item.MalID) {
+		return nil
+	}
+	if m.airedCache != nil {
+		m.airedCache.markDispatched(m.item.MalID)
+	}
 	item := m.item
 	fn := m.latestEpisode
 	return func() tea.Msg { return latestEpMsg{malID: item.MalID, aired: fn(item)} }
@@ -142,6 +155,9 @@ func (m *releasePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case latestEpMsg:
 		if m.item != nil && msg.malID == m.item.MalID {
 			m.aired = msg.aired
+			if m.airedCache != nil {
+				m.airedCache.put(msg.malID, msg.aired) // record for the session
+			}
 		}
 		return m, nil
 
