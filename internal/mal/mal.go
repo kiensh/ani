@@ -136,14 +136,15 @@ func MyList(status mal.AnimeStatus, debug bool) ([]Item, error) {
 }
 
 // Search returns MAL anime matching a text query (a single MAL /anime?q= call,
-// results as MAL ranks them).
+// results as MAL ranks them). nsfw=true so gray/black titles (ecchi etc.) are
+// returned — otherwise MAL hides them. Single page of 100 (MAL's max for search).
 func Search(q string, debug bool) ([]Item, error) {
 	c, err := Client(debug)
 	if err != nil {
 		return nil, err
 	}
-	dbg(debug, "DEBUG MAL GET /anime?q=%s\n", q)
-	anime, _, err := c.Anime.List(context.Background(), q, ExtraFields, mal.Limit(20))
+	dbg(debug, "DEBUG MAL GET /anime?q=%s nsfw=true\n", q)
+	anime, _, err := c.Anime.List(context.Background(), q, ExtraFields, mal.NSFW(true), mal.Limit(100))
 	if err != nil {
 		return nil, err
 	}
@@ -333,44 +334,65 @@ func jikanGet(u string, out any) error {
 }
 
 // Seasonal returns the seasonal anime lineup for a given year/season (e.g.
-// summer 2026), sorted by MAL's default. Up to 100 titles; each carries
-// my_list_status when authenticated, so client-side status filtering works.
+// summer 2026), sorted by MAL's default, paging through ALL titles (a season can
+// have 300+). nsfw=true so gray/black titles (ecchi etc.) are returned — otherwise
+// MAL hides them and they look "missing". Each carries my_list_status when
+// authenticated, so client-side status filtering works.
 func Seasonal(year int, season Season, debug bool) ([]Item, error) {
 	c, err := Client(debug)
 	if err != nil {
 		return nil, err
 	}
-	dbg(debug, "DEBUG MAL GET /anime/season/%d/%s\n", year, season)
-	anime, _, err := c.Anime.Seasonal(context.Background(), year, mal.AnimeSeason(season),
-		ExtraFields, mal.Limit(100))
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Item, 0, len(anime))
-	for _, a := range anime {
-		out = append(out, animeToItem(a))
+	const (
+		pageSize = 100
+		maxTotal = 500 // safety cap (~5 pages); a season rarely exceeds this
+	)
+	var out []Item
+	for offset := 0; offset < maxTotal; offset += pageSize {
+		dbg(debug, "DEBUG MAL GET /anime/season/%d/%s offset=%d nsfw=true\n", year, season, offset)
+		anime, _, err := c.Anime.Seasonal(context.Background(), year, mal.AnimeSeason(season),
+			ExtraFields, mal.NSFW(true), mal.Limit(pageSize), mal.Offset(offset))
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range anime {
+			out = append(out, animeToItem(a))
+		}
+		if len(anime) < pageSize {
+			break
+		}
 	}
 	return out, nil
 }
 
 // Upcoming returns the top upcoming/TBA anime via the official MAL "upcoming"
-// ranking. Authenticated, so each item carries my_list_status — "Not in My List"
-// works on it. (The /season/later web page isn't exposed by Jikan or the
-// Seasonal API.)
+// ranking, paging past the first 100. Authenticated, so each item carries
+// my_list_status — "Not in My List" works on it. (The /season/later web page
+// isn't exposed by Jikan or the Seasonal API. The ranking endpoint has no nsfw
+// param, so nsfw filtering isn't applied here.)
 func Upcoming(debug bool) ([]Item, error) {
 	c, err := Client(debug)
 	if err != nil {
 		return nil, err
 	}
-	dbg(debug, "DEBUG MAL GET /anime/ranking/upcoming\n")
-	anime, _, err := c.Anime.Ranking(context.Background(), mal.AnimeRankingUpcoming,
-		ExtraFields, mal.Limit(100))
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Item, 0, len(anime))
-	for _, a := range anime {
-		out = append(out, animeToItem(a))
+	const (
+		pageSize = 100
+		maxTotal = 500
+	)
+	var out []Item
+	for offset := 0; offset < maxTotal; offset += pageSize {
+		dbg(debug, "DEBUG MAL GET /anime/ranking/upcoming offset=%d\n", offset)
+		anime, _, err := c.Anime.Ranking(context.Background(), mal.AnimeRankingUpcoming,
+			ExtraFields, mal.Limit(pageSize), mal.Offset(offset))
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range anime {
+			out = append(out, animeToItem(a))
+		}
+		if len(anime) < pageSize {
+			break
+		}
 	}
 	return out, nil
 }
