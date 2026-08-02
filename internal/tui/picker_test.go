@@ -1161,6 +1161,34 @@ func TestReleasePickerReusesCachedAired(t *testing.T) {
 	}
 }
 
+// TestReleasePickerAiredFromSessionCache: when item.AiredEps is 0 (the anime was
+// picked before its count was cached) but the session AiredCache holds the count
+// (e.g. a prior release-picker entry fetched it), a re-entry must reuse the cached
+// value — not leave the header at "?" nor re-fetch. Guards the play→re-enter bug.
+func TestReleasePickerAiredFromSessionCache(t *testing.T) {
+	all := []*animetosho.Release{mkRel("a", "1080p", 1, false)}
+	calls := 0
+	fn := func(*mal.Item) int { calls++; return 9 }
+
+	cache := NewAiredCache()
+	cache.put(5, 7) // the session already has 7 for malID 5
+
+	m := newReleasePicker(&mal.Item{MalID: 5, TotalEps: 12}, "", "", "newest",
+		fetchAll(all), false, nil, fn, cache, false)
+	if m.aired != 0 {
+		t.Errorf("seed: m.aired = %d, want 0 (item.AiredEps is 0)", m.aired)
+	}
+	if cmd := m.airedFetchCmd(); cmd != nil {
+		t.Errorf("airedFetchCmd = non-nil; want nil (cache has it, no fetch)")
+	}
+	if calls != 0 {
+		t.Errorf("latestEpisode called %d times; want 0 (cached)", calls)
+	}
+	if m.aired != 7 {
+		t.Errorf("after airedFetchCmd: m.aired = %d, want 7 (reused from cache)", m.aired)
+	}
+}
+
 // TestReleasePickerActionsMenu verifies Space → Play/Download/Copy Magnet menu.
 func TestReleasePickerActionsMenu(t *testing.T) {
 	all := []*animetosho.Release{mkRel("a", "1080p", 1, false)}

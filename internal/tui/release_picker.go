@@ -126,8 +126,12 @@ func (m *releasePicker) airedFetchCmd() tea.Cmd {
 		return nil
 	}
 	// Once-per-session: if the anime picker (or an earlier release-picker entry)
-	// already computed this anime's count — even a 0 — don't re-fetch it.
+	// already computed this anime's count — even a 0 — don't re-fetch it. Reuse the
+	// cached value into m.aired too: item.AiredEps can be stale/0 when the anime
+	// was picked before its count was cached, and without this a re-entry after
+	// play would leave the header at "?".
 	if m.airedCache != nil && !m.airedCache.shouldFetch(m.item.MalID) {
+		m.aired = m.airedCache.value(m.item.MalID)
 		return nil
 	}
 	if m.airedCache != nil {
