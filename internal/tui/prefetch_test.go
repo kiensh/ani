@@ -15,9 +15,9 @@ import (
 // newPrefetchPicker builds a Season picker showing all items in input order
 // (Sort=relevance), with a given pageSize. prefetch is the background aired-episode
 // fn (nil disables aired prefetch). The focus latestEpisode fn is a no-op.
-func newPrefetchPicker(items []mal.Item, prefetch func(*mal.Item) int, pageSize int) *animePicker {
+func newPrefetchPicker(items []mal.Item, prefetch func(*mal.Item) float64, pageSize int) *animePicker {
 	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil,
-		func(*mal.Item) int { return 0 }, prefetch, false)
+		func(*mal.Item) float64 { return 0 }, prefetch, false)
 	m.filter.Status = "All"
 	m.filter.Sort = "relevance"
 	loadAnime(m, items)
@@ -43,7 +43,7 @@ func TestPrefetchPagingSplit(t *testing.T) {
 		{MalID: 3, AirStatus: "currently_airing", CoverURL: "u3"},
 		{MalID: 4, AirStatus: "currently_airing", CoverURL: "u4"},
 	}
-	m := newPrefetchPicker(items, func(*mal.Item) int { return 5 }, 2)
+	m := newPrefetchPicker(items, func(*mal.Item) float64 { return 5 }, 2)
 
 	covers1, aired1 := m.selectPrefetchPage(true)
 	if len(aired1) != 2 || aired1[0].MalID != 1 || aired1[1].MalID != 2 {
@@ -70,7 +70,7 @@ func TestPrefetchDefaultPageSize(t *testing.T) {
 		items[i] = mal.Item{MalID: i + 1, AirStatus: "currently_airing", CoverURL: "u"}
 	}
 	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil,
-		func(*mal.Item) int { return 1 }, false)
+		func(*mal.Item) float64 { return 1 }, false)
 	m.filter.Status = "All"
 	m.filter.Sort = "relevance"
 	loadAnime(m, items)
@@ -78,11 +78,11 @@ func TestPrefetchDefaultPageSize(t *testing.T) {
 
 	covers1, _ := m.selectPrefetchPage(true)
 	if len(covers1) != 20 {
-		t.Errorf("page1 (height 0) covers = %d, want 20 (default page size)", len(covers1))
+		t.Errorf("page1 (height 0) covers = %v, want 20 (default page size)", len(covers1))
 	}
 	covers2, _ := m.selectPrefetchPage(false)
 	if len(covers2) != 5 {
-		t.Errorf("page2 covers = %d, want 5 (remainder)", len(covers2))
+		t.Errorf("page2 covers = %v, want 5 (remainder)", len(covers2))
 	}
 }
 
@@ -95,7 +95,7 @@ func TestPrefetchCoversFollowView(t *testing.T) {
 		{MalID: 30, AirStatus: "currently_airing", CoverURL: "u30"},
 		{MalID: 40, AirStatus: "currently_airing", CoverURL: "u40"},
 	}
-	m := newPrefetchPicker(items, func(*mal.Item) int { return 1 }, 2)
+	m := newPrefetchPicker(items, func(*mal.Item) float64 { return 1 }, 2)
 	// Reorder the view (as a sort would) so the top is 40, 30.
 	m.view = []mal.Item{items[3], items[2], items[1], items[0]}
 
@@ -113,7 +113,7 @@ func TestPrefetchAiredFollowsViewOrder(t *testing.T) {
 		{MalID: 2, AirStatus: "currently_airing", ListStatus: "watching"},
 		{MalID: 3, AirStatus: "currently_airing", ListStatus: "watching"},
 	}
-	m := newPrefetchPicker(items, func(*mal.Item) int { return 1 }, 10)
+	m := newPrefetchPicker(items, func(*mal.Item) float64 { return 1 }, 10)
 	// Reorder the view (as a sort would): top is 3, 1, 2.
 	m.view = []mal.Item{items[2], items[0], items[1]}
 
@@ -131,7 +131,7 @@ func TestPrefetchSkipsNonAiring(t *testing.T) {
 		{MalID: 2, AirStatus: "finished_airing", CoverURL: "u2", ListStatus: "watching"},
 		{MalID: 3, AirStatus: "currently_airing", CoverURL: "u3", ListStatus: "watching"},
 	}
-	m := newPrefetchPicker(items, func(*mal.Item) int { return 1 }, 10)
+	m := newPrefetchPicker(items, func(*mal.Item) float64 { return 1 }, 10)
 
 	covers, aired := m.selectPrefetchPage(true)
 	if len(covers) != 3 {
@@ -150,7 +150,7 @@ func TestPrefetchIdempotentAndCacheSkip(t *testing.T) {
 		{MalID: 2, AirStatus: "currently_airing", ListStatus: "watching"},
 		{MalID: 3, AirStatus: "currently_airing", ListStatus: "watching"},
 	}
-	m := newPrefetchPicker(items, func(*mal.Item) int { return 1 }, 10)
+	m := newPrefetchPicker(items, func(*mal.Item) float64 { return 1 }, 10)
 	m.aired.put(2, 7) // already cached → skip
 
 	_, aired := m.selectPrefetchPage(true)
@@ -173,7 +173,7 @@ func TestPrefetchCoversAllItemsAcrossFilter(t *testing.T) {
 		{MalID: 3, AirStatus: "currently_airing", CoverURL: "u3"},
 		{MalID: 4, AirStatus: "finished_airing", CoverURL: "u4"}, // filtered out
 	}
-	m := newPrefetchPicker(all, func(*mal.Item) int { return 1 }, 10)
+	m := newPrefetchPicker(all, func(*mal.Item) float64 { return 1 }, 10)
 	// Simulate a status filter: the view shows only the airing items.
 	m.view = []mal.Item{all[0], all[2]}
 
@@ -199,7 +199,7 @@ func TestPrefetchAiredAcrossFilter(t *testing.T) {
 		{MalID: 3, AirStatus: "currently_airing"}, // in view
 		{MalID: 4, AirStatus: "currently_airing"}, // filtered out
 	}
-	m := newPrefetchPicker(all, func(*mal.Item) int { return 5 }, 10)
+	m := newPrefetchPicker(all, func(*mal.Item) float64 { return 5 }, 10)
 	m.view = []mal.Item{all[0], all[2]} // status filter hides 2 and 4
 
 	_, aired1 := m.selectPrefetchPage(true)
@@ -230,7 +230,7 @@ func TestPrefetchEmptyViewChainsToPage2(t *testing.T) {
 		{MalID: 1, AirStatus: "currently_airing", CoverURL: "u1"},
 		{MalID: 2, AirStatus: "currently_airing", CoverURL: "u2"},
 	}
-	m := newPrefetchPicker(all, func(*mal.Item) int { return 5 }, 10)
+	m := newPrefetchPicker(all, func(*mal.Item) float64 { return 5 }, 10)
 	m.view = nil // status filter hides everything
 
 	// Page 1 selects nothing…
@@ -269,7 +269,7 @@ func TestPrefetchCoversEverythingAfterBothPages(t *testing.T) {
 		{MalID: 4, AirStatus: "currently_airing", CoverURL: "u4"},
 		{MalID: 5, AirStatus: "finished_airing", CoverURL: "u5"},
 	}
-	m := newPrefetchPicker(all, func(*mal.Item) int { return 7 }, 3)
+	m := newPrefetchPicker(all, func(*mal.Item) float64 { return 7 }, 3)
 	// Status filter: view shows only the finished items (2, 5).
 	m.view = []mal.Item{all[1], all[4]}
 
@@ -305,7 +305,7 @@ func TestPrefetchAiredIdempotentAfterBothPages(t *testing.T) {
 		{MalID: 2, AirStatus: "currently_airing"},
 		{MalID: 3, AirStatus: "currently_airing"},
 	}
-	m := newPrefetchPicker(all, func(*mal.Item) int { return 5 }, 2)
+	m := newPrefetchPicker(all, func(*mal.Item) float64 { return 5 }, 2)
 	m.selectPrefetchPage(true)
 	m.selectPrefetchPage(false)
 
@@ -341,12 +341,12 @@ func TestPrefetchDisabledNoAired(t *testing.T) {
 func TestPrefetchPageCmdEmptyHandling(t *testing.T) {
 	nonEmpty := newPrefetchPicker(
 		[]mal.Item{{MalID: 1, AirStatus: "currently_airing", CoverURL: "u"}},
-		func(*mal.Item) int { return 1 }, 10)
+		func(*mal.Item) float64 { return 1 }, 10)
 	if nonEmpty.prefetchPageCmd(true) == nil {
 		t.Errorf("page1 with items = nil, want non-nil")
 	}
 
-	empty := newPrefetchPicker(nil, func(*mal.Item) int { return 1 }, 10)
+	empty := newPrefetchPicker(nil, func(*mal.Item) float64 { return 1 }, 10)
 	cmd := empty.prefetchPageCmd(true)
 	if cmd == nil {
 		t.Fatal("empty page1 cmd = nil, want a chaining cmd")
@@ -368,7 +368,7 @@ func TestPrefetchPageDoneHandler(t *testing.T) {
 		{MalID: 3, AirStatus: "currently_airing"},
 		{MalID: 4, AirStatus: "currently_airing"},
 	}
-	m := newPrefetchPicker(items, func(*mal.Item) int { return 1 }, 2)
+	m := newPrefetchPicker(items, func(*mal.Item) float64 { return 1 }, 2)
 
 	if _, cmd := m.Update(prefetchPageDoneMsg{firstPage: true}); cmd == nil {
 		t.Fatal("firstPage done: cmd = nil, want a page-2 cmd")
@@ -388,8 +388,8 @@ func TestPrefetchFocusCacheHitAndFallback(t *testing.T) {
 	}
 	calls := 0
 	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil,
-		func(*mal.Item) int { calls++; return 9 }, // focus fn (full)
-		func(*mal.Item) int { return 0 },          // prefetch fn (unused here)
+		func(*mal.Item) float64 { calls++; return 9 }, // focus fn (full)
+		func(*mal.Item) float64 { return 0 },          // prefetch fn (unused here)
 		false)
 	m.filter.Status = "All"
 	m.filter.Sort = "relevance"
@@ -400,7 +400,7 @@ func TestPrefetchFocusCacheHitAndFallback(t *testing.T) {
 	// Prefetch fills aired[1].
 	m.Update(latestEpMsg{malID: 1, aired: 3})
 	if n, _ := m.aired.get(1); n != 3 {
-		t.Fatalf("aired[1] = %d, want 3", n)
+		t.Fatalf("aired[1] = %v, want 3", n)
 	}
 
 	// Focusing the cached item → no fetch.
@@ -418,7 +418,7 @@ func TestPrefetchFocusCacheHitAndFallback(t *testing.T) {
 	before := calls
 	m.Update(cmd())
 	if calls != before+1 {
-		t.Errorf("focus fallback: calls = %d, want %d", calls, before+1)
+		t.Errorf("focus fallback: calls = %v, want %v", calls, before+1)
 	}
 }
 
@@ -449,7 +449,7 @@ func TestPrefetchSemaphoreCap(t *testing.T) {
 	}
 	wg.Wait()
 	if maxInFlight > int32(prefetchCap) {
-		t.Errorf("max concurrent prefetch = %d, want <= %d", maxInFlight, prefetchCap)
+		t.Errorf("max concurrent prefetch = %v, want <= %v", maxInFlight, prefetchCap)
 	}
 }
 
@@ -466,7 +466,7 @@ func TestPrefetchDebugLogsListFirst(t *testing.T) {
 		{MalID: 2, AirStatus: "currently_airing", ListStatus: "plan_to_watch"},
 		{MalID: 3, AirStatus: "currently_airing"}, // off-list
 	}
-	m := newPrefetchPicker(items, func(*mal.Item) int { return 1 }, 10)
+	m := newPrefetchPicker(items, func(*mal.Item) float64 { return 1 }, 10)
 	m.prefetchPageCmd(true)  // page 1 → on-list
 	m.prefetchPageCmd(false) // page 2 → off-list
 

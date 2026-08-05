@@ -54,10 +54,11 @@ func TestColoredStatus(t *testing.T) {
 
 func TestFormatProgress(t *testing.T) {
 	cases := []struct {
-		name                  string
-		watched, total, aired int
-		airing                bool
-		want                  string
+		name   string
+		watched, total int
+		aired  float64
+		airing bool
+		want   string
 	}{
 		{"airing, 4 aired of 12", 0, 12, 4, true, "ep 0/4/12"},
 		{"airing, caught up", 4, 12, 4, true, "ep 4/4/12"},
@@ -70,7 +71,7 @@ func TestFormatProgress(t *testing.T) {
 	}
 	for _, c := range cases {
 		if got := FormatProgress(c.watched, c.total, c.aired, c.airing); got != c.want {
-			t.Errorf("%s: FormatProgress(%d,%d,%d,%v) = %q, want %q", c.name, c.watched, c.total, c.aired, c.airing, got, c.want)
+			t.Errorf("%s: FormatProgress(%v,%v,%v,%v) = %q, want %q", c.name, c.watched, c.total, c.aired, c.airing, got, c.want)
 		}
 	}
 }

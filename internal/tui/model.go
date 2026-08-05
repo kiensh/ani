@@ -12,17 +12,18 @@ import (
 
 	"ani/internal/animetosho"
 	"ani/internal/mal"
+	"ani/internal/playable"
 )
 
 // Result is what a TUI screen returns to its caller. Each Run* function fills
 // in the fields relevant to its screen; Quit is set when the user backed out.
 type Result struct {
-	Quit      bool                // user quit without selecting
-	Back      bool                // user wants to return to the previous screen
-	Anime     *mal.Item           // selected anime (anime picker)
-	Release   *animetosho.Release // selected release (release picker)
-	Action    string              // "play" or "download" (release picker: Enter / d)
-	Completed bool                // mark MAL completed (completed prompt)
+	Quit      bool              // user quit without selecting
+	Back      bool              // user wants to return to the previous screen
+	Anime     *mal.Item         // selected anime (anime picker)
+	Release   *playable.Release // selected release (release picker)
+	Action    string            // "play" or "download" (release picker: Enter / d)
+	Completed bool              // mark MAL completed (completed prompt)
 
 	// MAL auth actions requested from the anime picker (L / status overlay). The
 	// caller (app.Run) performs them after the TUI exits, then re-resolves.
@@ -43,7 +44,7 @@ type Result struct {
 // anime (nil disables); latestEpisodePrefetch is the fast-only background variant
 // that pages the aired-episode prefetch (nil disables aired prefetch; covers are
 // still paged). Returns the selected anime, or Quit=true on cancel.
-func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) int, latestEpisodePrefetch func(*mal.Item) int, aired *AiredCache, debug bool) (*Result, error) {
+func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) float64, latestEpisodePrefetch func(*mal.Item) float64, aired *AiredCache, debug bool) (*Result, error) {
 	if load == nil {
 		return &Result{Quit: true}, nil
 	}
@@ -70,11 +71,11 @@ func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 // the episode filter (latest-uploads view). copyMagnet backs the Space menu's
 // "Copy Magnet URL"; latestEpisode backs the "watched/aired/total" header (nil
 // disables each).
-func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(*mal.Item) int, aired *AiredCache, debug bool) (*Result, error) {
+func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*playable.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(*mal.Item) float64, aired *AiredCache, defaultEpisode int, debug bool) (*Result, error) {
 	if item == nil || fetch == nil {
 		return &Result{Quit: true}, nil
 	}
-	m := newReleasePicker(item, group, quality, sortName, fetch, disableEpisode, copyMagnet, latestEpisode, aired, debug)
+	m := newReleasePicker(item, group, quality, sortName, fetch, disableEpisode, copyMagnet, latestEpisode, aired, defaultEpisode, debug)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
 	if err != nil {

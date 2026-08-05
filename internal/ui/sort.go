@@ -7,26 +7,27 @@ import (
 	"strings"
 
 	"ani/internal/animetosho"
+	"ani/internal/playable"
 )
 
 // ---- sorting (client-side; the API ignores sort params) ----
 
-func sortByDateDesc(rs []*animetosho.Release) {
-	sort.SliceStable(rs, func(i, j int) bool { return rs[i].Entry.DateAdded > rs[j].Entry.DateAdded })
+func sortByDateDesc(rs []*playable.Release) {
+	sort.SliceStable(rs, func(i, j int) bool { return rs[i].DateAdded > rs[j].DateAdded })
 }
-func sortByDateAsc(rs []*animetosho.Release) {
-	sort.SliceStable(rs, func(i, j int) bool { return rs[i].Entry.DateAdded < rs[j].Entry.DateAdded })
+func sortByDateAsc(rs []*playable.Release) {
+	sort.SliceStable(rs, func(i, j int) bool { return rs[i].DateAdded < rs[j].DateAdded })
 }
-func sortBySizeAsc(rs []*animetosho.Release) {
-	sort.SliceStable(rs, func(i, j int) bool { return rs[i].Entry.SizeBytes < rs[j].Entry.SizeBytes })
+func sortBySizeAsc(rs []*playable.Release) {
+	sort.SliceStable(rs, func(i, j int) bool { return rs[i].SizeBytes < rs[j].SizeBytes })
 }
-func sortBySizeDesc(rs []*animetosho.Release) {
-	sort.SliceStable(rs, func(i, j int) bool { return rs[i].Entry.SizeBytes > rs[j].Entry.SizeBytes })
+func sortBySizeDesc(rs []*playable.Release) {
+	sort.SliceStable(rs, func(i, j int) bool { return rs[i].SizeBytes > rs[j].SizeBytes })
 }
 
 // SortedReleases returns a sorted copy of rs for the named sort order.
-func SortedReleases(rs []*animetosho.Release, sortName string) []*animetosho.Release {
-	cp := append([]*animetosho.Release(nil), rs...)
+func SortedReleases(rs []*playable.Release, sortName string) []*playable.Release {
+	cp := append([]*playable.Release(nil), rs...)
 	switch NormalizeSort(sortName) {
 	case "oldest":
 		sortByDateAsc(cp)
@@ -53,11 +54,11 @@ func NormalizeSort(s string) string {
 
 // FilterByGroup keeps only releases whose group matches (case-insensitive).
 // Empty or "All" returns everything.
-func FilterByGroup(rs []*animetosho.Release, group string) []*animetosho.Release {
+func FilterByGroup(rs []*playable.Release, group string) []*playable.Release {
 	if group == "" || strings.EqualFold(group, "All") {
 		return rs
 	}
-	out := make([]*animetosho.Release, 0)
+	out := make([]*playable.Release, 0)
 	for _, r := range rs {
 		if strings.EqualFold(r.Group, group) {
 			out = append(out, r)

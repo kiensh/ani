@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"ani/internal/animetosho"
 	"ani/internal/mal"
+	"ani/internal/playable"
 	"ani/internal/tui"
 
 	gomal "github.com/nstratos/go-myanimelist/mal"
@@ -14,7 +14,7 @@ import (
 // MalWriteBack updates MAL progress after a play/download (best-effort, no-op
 // when the item has no MAL id — e.g. a direct AniDB id or the latest-uploads
 // view). Prompts to mark the series completed when the last episode is reached.
-func MalWriteBack(item *mal.Item, pick *animetosho.Release, opt *Options) {
+func MalWriteBack(item *mal.Item, pick *playable.Release, opt *Options) {
 	if item == nil || item.MalID == 0 || pick.IsBatch {
 		return
 	}

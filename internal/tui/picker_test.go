@@ -7,8 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"ani/internal/animetosho"
 	"ani/internal/mal"
+	"ani/internal/playable"
 )
 
 // keyMsg builds a tea.KeyMsg for a single rune keypress.
@@ -39,13 +39,13 @@ func overlaySelect(t *testing.T, m *animePicker, label string) {
 
 // fetchAll returns a fetch func that always returns the given releases
 // regardless of episode — lets tests inject a fixed release set.
-func fetchAll(all []*animetosho.Release) func(int) []*animetosho.Release {
-	return func(int) []*animetosho.Release { return all }
+func fetchAll(all []*playable.Release) func(int) []*playable.Release {
+	return func(int) []*playable.Release { return all }
 }
 
 // loadReleases seeds a picker as if a fetch completed for its current filter
 // episode, so tests can drive filters/overlays/navigation against a populated list.
-func loadReleases(m *releasePicker, all []*animetosho.Release) {
+func loadReleases(m *releasePicker, all []*playable.Release) {
 	m.all = all
 	m.groups = DistinctGroups(all)
 	m.qualities = DistinctQualities(all)
@@ -135,13 +135,13 @@ func TestAnimePickerFilterNav(t *testing.T) {
 	m.Update(keyMsg('/'))
 	m.Update(keyMsg('g'))
 	if m.cursor != 0 {
-		t.Errorf("filter 'g' moved cursor to %d, want 0", m.cursor)
+		t.Errorf("filter 'g' moved cursor to %v, want 0", m.cursor)
 	}
 	if m.filter.FuzzyText != "g" {
 		t.Errorf("FuzzyText = %q, want 'g'", m.filter.FuzzyText)
 	}
 	if len(m.view) != 1 {
-		t.Errorf("view len = %d, want 1 (only Gamma)", len(m.view))
+		t.Errorf("view len = %v, want 1 (only Gamma)", len(m.view))
 	}
 }
 
@@ -213,11 +213,11 @@ func TestAnimePickerRemoveG(t *testing.T) {
 	m.Update(keyMsg('j'))
 	m.Update(keyMsg('G'))
 	if m.cursor != 1 {
-		t.Errorf("after j then G, cursor = %d, want 1 (G must be a no-op)", m.cursor)
+		t.Errorf("after j then G, cursor = %v, want 1 (G must be a no-op)", m.cursor)
 	}
 	m.Update(keyMsg('g'))
 	if m.cursor != 1 {
-		t.Errorf("after g, cursor = %d, want 1 (g must be a no-op)", m.cursor)
+		t.Errorf("after g, cursor = %v, want 1 (g must be a no-op)", m.cursor)
 	}
 }
 
@@ -233,11 +233,11 @@ func TestAnimePickerCyclicNav(t *testing.T) {
 	m.cursor = 0
 	m.Update(keyMsg('k'))
 	if m.cursor != 2 {
-		t.Errorf("k at first: cursor = %d, want 2 (wrap to last)", m.cursor)
+		t.Errorf("k at first: cursor = %v, want 2 (wrap to last)", m.cursor)
 	}
 	m.Update(keyMsg('j'))
 	if m.cursor != 0 {
-		t.Errorf("j at last: cursor = %d, want 0 (wrap to first)", m.cursor)
+		t.Errorf("j at last: cursor = %v, want 0 (wrap to first)", m.cursor)
 	}
 }
 
@@ -264,7 +264,7 @@ func TestAnimePickerStatusFilter(t *testing.T) {
 		t.Errorf("Status = %q, want Completed", m.filter.Status)
 	}
 	if len(m.view) != 2 {
-		t.Errorf("view len = %d, want 2 (completed items)", len(m.view))
+		t.Errorf("view len = %v, want 2 (completed items)", len(m.view))
 	}
 	if m.overlay.active() {
 		t.Errorf("overlay still active after Enter")
@@ -357,15 +357,15 @@ func TestSortAnimesRelevance(t *testing.T) {
 func TestAnimePickerStatusOptionsBySource(t *testing.T) {
 	listM := newAnimePicker(SourceList, "", animeLoadAll([]mal.Item{{}}), nil, nil, nil, nil, nil, false)
 	if n := len(listM.statusOptions()); n != 6 {
-		t.Errorf("My List status options = %d, want 6", n)
+		t.Errorf("My List status options = %v, want 6", n)
 	}
 	seasonM := newAnimePicker(SourceSeason, "", animeLoadAll([]mal.Item{{}}), nil, nil, nil, nil, nil, false)
 	if n := len(seasonM.statusOptions()); n != 8 {
-		t.Errorf("Season status options = %d, want 8", n)
+		t.Errorf("Season status options = %v, want 8", n)
 	}
 	searchM := newAnimePicker(SourceSeason, "x", animeLoadAll([]mal.Item{{}}), nil, nil, nil, nil, nil, false)
 	if n := len(searchM.statusOptions()); n != 8 {
-		t.Errorf("Search status options = %d, want 8", n)
+		t.Errorf("Search status options = %v, want 8", n)
 	}
 }
 
@@ -562,10 +562,10 @@ func TestAnimePickerSetCompletedSetsWatchedTotal(t *testing.T) {
 	m.Update(cmd())
 
 	if gotWatched != 12 {
-		t.Errorf("applyStatus got watched = %d, want 12 (total) for completed", gotWatched)
+		t.Errorf("applyStatus got watched = %v, want 12 (total) for completed", gotWatched)
 	}
 	if m.items[0].WatchedEps != 12 {
-		t.Errorf("local WatchedEps = %d, want 12 (reflected)", m.items[0].WatchedEps)
+		t.Errorf("local WatchedEps = %v, want 12 (reflected)", m.items[0].WatchedEps)
 	}
 	if m.items[0].ListStatus != "completed" {
 		t.Errorf("ListStatus = %q, want completed", m.items[0].ListStatus)
@@ -649,7 +649,7 @@ func TestAnimePickerRemoveFromList(t *testing.T) {
 		lm.Update(cmd())
 	}
 	if len(lm.items) != 0 {
-		t.Errorf("My List: items len = %d after remove, want 0", len(lm.items))
+		t.Errorf("My List: items len = %v after remove, want 0", len(lm.items))
 	}
 
 	// Season source: ListStatus clears (item stays, now Not in My List).
@@ -665,7 +665,7 @@ func TestAnimePickerRemoveFromList(t *testing.T) {
 		sm.Update(scmd())
 	}
 	if len(sm.items) != 1 {
-		t.Errorf("Season: items len = %d after remove, want 1 (cleared, not dropped)", len(sm.items))
+		t.Errorf("Season: items len = %v after remove, want 1 (cleared, not dropped)", len(sm.items))
 	}
 	if sm.items[0].ListStatus != "" {
 		t.Errorf("Season: ListStatus = %q after remove, want empty", sm.items[0].ListStatus)
@@ -718,11 +718,11 @@ func TestActionGroups(t *testing.T) {
 		t.Errorf("watching sub-menu should hide Set Watching: %v", watching)
 	}
 	if len(watching) != 4 {
-		t.Errorf("watching sub-menu = %d options, want 4: %v", len(watching), watching)
+		t.Errorf("watching sub-menu = %v options, want 4: %v", len(watching), watching)
 	}
 	all := statusActionLabels("")
 	if len(all) != 5 {
-		t.Errorf("off-list status sub-menu = %d options, want 5: %v", len(all), all)
+		t.Errorf("off-list status sub-menu = %v options, want 5: %v", len(all), all)
 	}
 }
 
@@ -773,7 +773,7 @@ func TestAnimePickerSetScore(t *testing.T) {
 		t.Errorf("applyScore got malID=%d score=%d, want 1/7", gotMalID, gotScore)
 	}
 	if m.items[0].Score != 7 {
-		t.Errorf("item.Score = %d, want 7", m.items[0].Score)
+		t.Errorf("item.Score = %v, want 7", m.items[0].Score)
 	}
 
 	// Remove Score → 0.
@@ -784,10 +784,10 @@ func TestAnimePickerSetScore(t *testing.T) {
 	_, cmd = m.Update(enterMsg())
 	m.Update(cmd())
 	if gotScore != 0 {
-		t.Errorf("Remove Score: applyScore got %d, want 0", gotScore)
+		t.Errorf("Remove Score: applyScore got %v, want 0", gotScore)
 	}
 	if m.items[0].Score != 0 {
-		t.Errorf("item.Score = %d, want 0", m.items[0].Score)
+		t.Errorf("item.Score = %v, want 0", m.items[0].Score)
 	}
 
 	// Off-list item: Set Score (and Remove) hidden.
@@ -803,7 +803,7 @@ func TestAnimePickerSetScore(t *testing.T) {
 // watched/aired/total once the latest-aired fetch resolves.
 func TestAnimePickerLatestEpisode(t *testing.T) {
 	items := []mal.Item{{MalID: 1, Title: "Airing A", TotalEps: 12, WatchedEps: 0, AirStatus: "currently_airing", ListStatus: "watching"}}
-	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, func(*mal.Item) int { return 4 }, nil, false)
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, func(*mal.Item) float64 { return 4 }, nil, false)
 	loadAnime(m, items)
 	// Size the picker directly — going through Update(tea.WindowSizeMsg) would run
 	// focusCmd, which dispatches (and marks in-flight) the focus fetch, defeating
@@ -822,7 +822,7 @@ func TestAnimePickerLatestEpisode(t *testing.T) {
 	}
 	m.Update(cmd()) // latestEpMsg → cache aired[1]=4
 	if n, _ := m.aired.get(1); n != 4 {
-		t.Errorf("aired cache for 1 = %d, want 4", n)
+		t.Errorf("aired cache for 1 = %v, want 4", n)
 	}
 	if !strings.Contains(m.View(), "ep 0/4/12") {
 		t.Errorf("after fetch, metadata should show 'ep 0/4/12'")
@@ -834,14 +834,14 @@ func TestAnimePickerLatestEpisode(t *testing.T) {
 // latestEpisodeCmd then returns nil (no retry) for the rest of the session.
 func TestAnimePickerLatestEpisodeOncePerSession(t *testing.T) {
 	items := []mal.Item{{MalID: 1, Title: "Airing A", TotalEps: 12, AirStatus: "currently_airing", ListStatus: "watching"}}
-	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, func(*mal.Item) int { return 4 }, nil, false)
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, func(*mal.Item) float64 { return 4 }, nil, false)
 	loadAnime(m, items)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
 
 	// A failed fetch (0) is stored too — once-per-session, no retry.
 	m.Update(latestEpMsg{malID: 1, aired: 0})
 	if v, ok := m.aired.get(1); !ok || v != 0 {
-		t.Errorf("after a 0 result, aired cache = (%d,%v); want (0,true) so it isn't refetched", v, ok)
+		t.Errorf("after a 0 result, aired cache = (%v,%v); want (0,true) so it isn't refetched", v, ok)
 	}
 	// Already computed this session → no new fetch is dispatched.
 	if cmd := m.latestEpisodeCmd(); cmd != nil {
@@ -859,8 +859,8 @@ func TestAiredCacheSharedAcrossPickers(t *testing.T) {
 
 	items := []mal.Item{{MalID: 1, Title: "A", AirStatus: "currently_airing", ListStatus: "watching"}}
 	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil,
-		func(*mal.Item) int { t.Errorf("focus fetch ran; item should be cached"); return 0 },
-		func(*mal.Item) int { t.Errorf("prefetch ran; item should be cached"); return 0 },
+		func(*mal.Item) float64 { t.Errorf("focus fetch ran; item should be cached"); return 0 },
+		func(*mal.Item) float64 { t.Errorf("prefetch ran; item should be cached"); return 0 },
 		false)
 	m.aired = cache // mirror RunAnimePicker's override
 	loadAnime(m, items)
@@ -869,7 +869,7 @@ func TestAiredCacheSharedAcrossPickers(t *testing.T) {
 	m.fixScroll()
 
 	if n, _ := m.aired.get(1); n != 5 {
-		t.Errorf("shared cache lost entry: get(1)=%d, want 5", n)
+		t.Errorf("shared cache lost entry: get(1)=%v, want 5", n)
 	}
 	if cmd := m.latestEpisodeCmd(); cmd != nil {
 		t.Errorf("latestEpisodeCmd = non-nil; want nil (cached across pickers)")
@@ -882,13 +882,13 @@ func TestAiredCacheSharedAcrossPickers(t *testing.T) {
 // ---- release picker ----
 
 func TestReleasePickerRender(t *testing.T) {
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("Erai-raws", "1080p", 1, false),
 		mkRel("SubsPlease", "1080p", 2, false),
 		mkRel("EMBER", "720p", 1, false),
 	}
 	item := &mal.Item{Title: "Frieren", TotalEps: 28, WatchedEps: 11}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
@@ -909,12 +909,12 @@ func TestReleasePickerRender(t *testing.T) {
 // applied and returns to normal mode (no select/quit). Guards the filter.go
 // change that makes the fuzzy text persist beyond Filtering mode.
 func TestReleasePickerFilterEnterAccepts(t *testing.T) {
-	all := []*animetosho.Release{
-		{Entry: &animetosho.Entry{Title: "Alpha 1080p"}, Group: "A", Resolution: "1080p"},
-		{Entry: &animetosho.Entry{Title: "Beta 720p"}, Group: "B", Resolution: "720p"},
+	all := []*playable.Release{
+		{Title: "Alpha 1080p", Group: "A", Resolution: "1080p"},
+		{Title: "Beta 720p", Group: "B", Resolution: "720p"},
 	}
 	item := &mal.Item{Title: "Show"}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
 	loadReleases(m, all)
 	m.filter.Episode = 0 // disable the default episode filter so only fuzzy applies
 	m.applyFilter()
@@ -948,43 +948,43 @@ func TestReleasePickerFilterEnterAccepts(t *testing.T) {
 }
 
 func TestReleasePickerDefaultFilters(t *testing.T) {
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("a", "720p", 1, false),
 		mkRel("b", "1080p", 2, false),
 		mkRel("c", "2160p", 3, false),
 		mkRel("d", "1080p", 4, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 10}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
 	loadReleases(m, all)
 	if m.filter.Quality != "" {
 		t.Errorf("default quality = %q, want \"\" (all)", m.filter.Quality)
 	}
 	if m.filter.Episode != 11 {
-		t.Errorf("default episode = %d, want 11", m.filter.Episode)
+		t.Errorf("default episode = %v, want 11", m.filter.Episode)
 	}
 }
 
 func TestReleasePickerDefaultEpisodeFinished(t *testing.T) {
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("a", "1080p", 12, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 12}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
 	loadReleases(m, all)
 	if m.filter.Episode != 0 {
-		t.Errorf("default episode (finished) = %d, want 0", m.filter.Episode)
+		t.Errorf("default episode (finished) = %v, want 0", m.filter.Episode)
 	}
 }
 
 // TestReleasePickerEpisodeDisabled verifies that with disableEpisode the default
 // episode filter is 0 and 'e' is a no-op (latest-uploads mode).
 func TestReleasePickerEpisodeDisabled(t *testing.T) {
-	all := []*animetosho.Release{mkRel("a", "1080p", 5, false)}
+	all := []*playable.Release{mkRel("a", "1080p", 5, false)}
 	item := &mal.Item{Title: "Latest uploads"}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), true, nil, nil, nil, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), true, nil, nil, nil, 0, false)
 	if m.filter.Episode != 0 {
-		t.Errorf("disabled default episode = %d, want 0", m.filter.Episode)
+		t.Errorf("disabled default episode = %v, want 0", m.filter.Episode)
 	}
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
@@ -995,12 +995,12 @@ func TestReleasePickerEpisodeDisabled(t *testing.T) {
 }
 
 func TestReleasePickerOverlayGroup(t *testing.T) {
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("Erai-raws", "1080p", 1, false),
 		mkRel("SubsPlease", "1080p", 2, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
@@ -1023,12 +1023,12 @@ func TestReleasePickerOverlayGroup(t *testing.T) {
 }
 
 func TestReleasePickerOverlayQuality(t *testing.T) {
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("a", "1080p", 1, false),
 		mkRel("b", "720p", 2, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
@@ -1043,13 +1043,13 @@ func TestReleasePickerOverlayQuality(t *testing.T) {
 }
 
 func TestReleasePickerOverlayEpisodeEnter(t *testing.T) {
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("a", "1080p", 1, false),
 		mkRel("b", "1080p", 5, false),
 		mkRel("c", "1080p", 5, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
 	loadReleases(m, all)
 	m.filter.Episode = 0
 	m.applyFilter()
@@ -1059,23 +1059,23 @@ func TestReleasePickerOverlayEpisodeEnter(t *testing.T) {
 	m.Update(keyMsg('5'))
 	m.Update(enterMsg())
 	if m.filter.Episode != 5 {
-		t.Errorf("Episode = %d, want 5", m.filter.Episode)
+		t.Errorf("Episode = %v, want 5", m.filter.Episode)
 	}
 	m.Update(releasesLoadedMsg{releases: all, ep: 5})
 	if len(m.view) != 2 {
-		t.Errorf("after ep=5 filter, view len = %d, want 2", len(m.view))
+		t.Errorf("after ep=5 filter, view len = %v, want 2", len(m.view))
 	}
 }
 
 func TestReleasePickerOverlayEpisodeEscCancels(t *testing.T) {
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("a", "1080p", 6, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 5}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
 	loadReleases(m, all)
 	if m.filter.Episode != 6 {
-		t.Fatalf("setup: default episode = %d, want 6", m.filter.Episode)
+		t.Fatalf("setup: default episode = %v, want 6", m.filter.Episode)
 	}
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.Update(keyMsg('e'))
@@ -1083,16 +1083,16 @@ func TestReleasePickerOverlayEpisodeEscCancels(t *testing.T) {
 	m.Update(keyMsg('0'))
 	m.Update(escMsg())
 	if m.filter.Episode != 6 {
-		t.Errorf("Esc after typing: Episode = %d, want 6 (cancel restores)", m.filter.Episode)
+		t.Errorf("Esc after typing: Episode = %v, want 6 (cancel restores)", m.filter.Episode)
 	}
 }
 
 func TestReleasePickerSortOverlay(t *testing.T) {
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("a", "1080p", 1, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
@@ -1114,11 +1114,11 @@ func TestReleasePickerSortOverlay(t *testing.T) {
 // TestReleasePickerEnterPlaysDDownloads verifies Enter selects play and 'd'
 // selects download (the play/download prompt is gone).
 func TestReleasePickerEnterPlaysDDownloads(t *testing.T) {
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("a", "1080p", 1, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
@@ -1128,7 +1128,7 @@ func TestReleasePickerEnterPlaysDDownloads(t *testing.T) {
 	}
 
 	// Fresh picker for the 'd' case.
-	m = newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, false)
+	m = newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.Update(keyMsg('d'))
@@ -1141,20 +1141,20 @@ func TestReleasePickerEnterPlaysDDownloads(t *testing.T) {
 // count on the item (AiredEps), the release picker seeds m.aired from it and
 // skips the aired fetch — so entering the release screen doesn't re-fetch.
 func TestReleasePickerReusesCachedAired(t *testing.T) {
-	all := []*animetosho.Release{mkRel("a", "1080p", 1, false)}
-	fn := func(*mal.Item) int { return 9 }
+	all := []*playable.Release{mkRel("a", "1080p", 1, false)}
+	fn := func(*mal.Item) float64 { return 9 }
 
-	cached := newReleasePicker(&mal.Item{MalID: 5, TotalEps: 12, AiredEps: 7}, "", "", "newest", fetchAll(all), false, nil, fn, nil, false)
+	cached := newReleasePicker(&mal.Item{MalID: 5, TotalEps: 12, AiredEps: 7}, "", "", "newest", fetchAll(all), false, nil, fn, nil, 0, false)
 	if cached.aired != 7 {
-		t.Errorf("cached: m.aired = %d, want 7 (reused from item.AiredEps)", cached.aired)
+		t.Errorf("cached: m.aired = %v, want 7 (reused from item.AiredEps)", cached.aired)
 	}
 	if cached.airedFetchCmd() != nil {
 		t.Errorf("cached: airedFetchCmd = non-nil, want nil (no re-fetch)")
 	}
 
-	uncached := newReleasePicker(&mal.Item{MalID: 5, TotalEps: 12}, "", "", "newest", fetchAll(all), false, nil, fn, nil, false)
+	uncached := newReleasePicker(&mal.Item{MalID: 5, TotalEps: 12}, "", "", "newest", fetchAll(all), false, nil, fn, nil, 0, false)
 	if uncached.aired != 0 {
-		t.Errorf("uncached: m.aired = %d, want 0", uncached.aired)
+		t.Errorf("uncached: m.aired = %v, want 0", uncached.aired)
 	}
 	if uncached.airedFetchCmd() == nil {
 		t.Errorf("uncached: airedFetchCmd = nil, want a fetch cmd")
@@ -1166,17 +1166,17 @@ func TestReleasePickerReusesCachedAired(t *testing.T) {
 // (e.g. a prior release-picker entry fetched it), a re-entry must reuse the cached
 // value — not leave the header at "?" nor re-fetch. Guards the play→re-enter bug.
 func TestReleasePickerAiredFromSessionCache(t *testing.T) {
-	all := []*animetosho.Release{mkRel("a", "1080p", 1, false)}
+	all := []*playable.Release{mkRel("a", "1080p", 1, false)}
 	calls := 0
-	fn := func(*mal.Item) int { calls++; return 9 }
+	fn := func(*mal.Item) float64 { calls++; return 9 }
 
 	cache := NewAiredCache()
 	cache.put(5, 7) // the session already has 7 for malID 5
 
 	m := newReleasePicker(&mal.Item{MalID: 5, TotalEps: 12}, "", "", "newest",
-		fetchAll(all), false, nil, fn, cache, false)
+		fetchAll(all), false, nil, fn, cache, 0, false)
 	if m.aired != 0 {
-		t.Errorf("seed: m.aired = %d, want 0 (item.AiredEps is 0)", m.aired)
+		t.Errorf("seed: m.aired = %v, want 0 (item.AiredEps is 0)", m.aired)
 	}
 	if cmd := m.airedFetchCmd(); cmd != nil {
 		t.Errorf("airedFetchCmd = non-nil; want nil (cache has it, no fetch)")
@@ -1185,21 +1185,21 @@ func TestReleasePickerAiredFromSessionCache(t *testing.T) {
 		t.Errorf("latestEpisode called %d times; want 0 (cached)", calls)
 	}
 	if m.aired != 7 {
-		t.Errorf("after airedFetchCmd: m.aired = %d, want 7 (reused from cache)", m.aired)
+		t.Errorf("after airedFetchCmd: m.aired = %v, want 7 (reused from cache)", m.aired)
 	}
 }
 
 // TestReleasePickerActionsMenu verifies Space → Play/Download/Copy Magnet menu.
 func TestReleasePickerActionsMenu(t *testing.T) {
-	all := []*animetosho.Release{mkRel("a", "1080p", 1, false)}
-	all[0].Entry.Magnet = "magnet:?xt=urn:btih:FAKE"
+	all := []*playable.Release{mkRel("a", "1080p", 1, false)}
+	all[0].Magnet = "magnet:?xt=urn:btih:FAKE"
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
 
 	var copied string
 	copyFn := func(s string) error { copied = s; return nil }
 
 	// Play via the menu quits with action "play".
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, copyFn, nil, nil, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, copyFn, nil, nil, 0, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.Update(spaceMsg())
@@ -1212,7 +1212,7 @@ func TestReleasePickerActionsMenu(t *testing.T) {
 	}
 
 	// Copy Magnet via the menu: copies the magnet, sets a toast, does NOT select.
-	m2 := newReleasePicker(item, "", "", "newest", fetchAll(all), false, copyFn, nil, nil, false)
+	m2 := newReleasePicker(item, "", "", "newest", fetchAll(all), false, copyFn, nil, nil, 0, false)
 	loadReleases(m2, all)
 	m2.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m2.Update(spaceMsg())
@@ -1230,9 +1230,9 @@ func TestReleasePickerActionsMenu(t *testing.T) {
 }
 
 func TestReleasePickerEscBack(t *testing.T) {
-	all := []*animetosho.Release{mkRel("a", "1080p", 1, false)}
+	all := []*playable.Release{mkRel("a", "1080p", 1, false)}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.Update(escMsg())
@@ -1244,13 +1244,13 @@ func TestReleasePickerEscBack(t *testing.T) {
 // TestReleasePickerCyclicNav: 'k' at the first release wraps to the last; 'j' at
 // the last wraps to the first.
 func TestReleasePickerCyclicNav(t *testing.T) {
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("a", "1080p", 1, false),
 		mkRel("b", "1080p", 2, false),
 		mkRel("c", "1080p", 3, false),
 	}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
 	loadReleases(m, all)
 	m.filter.Episode = 0 // show all episodes so all 3 releases are in view
 	m.applyFilter()
@@ -1259,18 +1259,18 @@ func TestReleasePickerCyclicNav(t *testing.T) {
 	m.cursor = 0
 	m.Update(keyMsg('k'))
 	if m.cursor != 2 {
-		t.Errorf("k at first: cursor = %d, want 2 (wrap to last)", m.cursor)
+		t.Errorf("k at first: cursor = %v, want 2 (wrap to last)", m.cursor)
 	}
 	m.Update(keyMsg('j'))
 	if m.cursor != 0 {
-		t.Errorf("j at last: cursor = %d, want 0 (wrap to first)", m.cursor)
+		t.Errorf("j at last: cursor = %v, want 0 (wrap to first)", m.cursor)
 	}
 }
 
 func TestReleasePickerEscInOverlayCancels(t *testing.T) {
-	all := []*animetosho.Release{mkRel("a", "1080p", 1, false)}
+	all := []*playable.Release{mkRel("a", "1080p", 1, false)}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}
-	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, false)
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
 	loadReleases(m, all)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	m.Update(keyMsg('g'))

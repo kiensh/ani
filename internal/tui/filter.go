@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"ani/internal/animetosho"
+	"ani/internal/playable"
 	"ani/internal/ui"
 )
 
@@ -63,10 +63,10 @@ func (f *Filter) SetEpisode(n int) {
 
 // Apply runs the filter/sort pipeline over a sorted-all release slice and
 // returns the visible subset. Order: group → quality → episode → fuzzy → sort.
-func (f *Filter) Apply(all []*animetosho.Release) []*animetosho.Release {
+func (f *Filter) Apply(all []*playable.Release) []*playable.Release {
 	rs := ui.FilterByGroup(all, f.Group)
 	if f.Quality != "" {
-		filtered := make([]*animetosho.Release, 0, len(rs))
+		filtered := make([]*playable.Release, 0, len(rs))
 		for _, r := range rs {
 			if matchResolution(r.Resolution, f.Quality) {
 				filtered = append(filtered, r)
@@ -75,7 +75,7 @@ func (f *Filter) Apply(all []*animetosho.Release) []*animetosho.Release {
 		rs = filtered
 	}
 	if f.Episode > 0 {
-		filtered := make([]*animetosho.Release, 0, len(rs))
+		filtered := make([]*playable.Release, 0, len(rs))
 		for _, r := range rs {
 			if !r.IsBatch && r.Episode == f.Episode {
 				filtered = append(filtered, r)
@@ -85,9 +85,9 @@ func (f *Filter) Apply(all []*animetosho.Release) []*animetosho.Release {
 	}
 	if f.FuzzyText != "" {
 		needle := strings.ToLower(f.FuzzyText)
-		filtered := make([]*animetosho.Release, 0, len(rs))
+		filtered := make([]*playable.Release, 0, len(rs))
 		for _, r := range rs {
-			if fuzzyMatch(strings.ToLower(r.Entry.Title), needle) {
+			if fuzzyMatch(strings.ToLower(r.Title), needle) {
 				filtered = append(filtered, r)
 			}
 		}
@@ -143,7 +143,7 @@ func dropLastWord(s string) string {
 
 // DistinctGroups returns the ordered, de-duplicated set of non-empty release
 // groups present in all (insertion order). Used by the group-filter overlay.
-func DistinctGroups(all []*animetosho.Release) []string {
+func DistinctGroups(all []*playable.Release) []string {
 	seen := map[string]bool{}
 	out := make([]string, 0)
 	for _, r := range all {
@@ -161,7 +161,7 @@ func DistinctGroups(all []*animetosho.Release) []string {
 // from highest to lowest ("2160p" → "480p"). Only heights that appear are
 // returned; used by the quality-filter overlay so it never offers an empty
 // option.
-func DistinctQualities(all []*animetosho.Release) []string {
+func DistinctQualities(all []*playable.Release) []string {
 	want := []string{"2160p", "1080p", "720p", "480p"}
 	present := map[string]bool{}
 	for _, r := range all {
@@ -222,7 +222,7 @@ func isDigits(s string) bool {
 
 // DefaultQuality returns the highest available quality in all, or "" if none
 // recognized. Used as the release picker's initial quality filter.
-func DefaultQuality(all []*animetosho.Release) string {
+func DefaultQuality(all []*playable.Release) string {
 	if qs := DistinctQualities(all); len(qs) > 0 {
 		return qs[0]
 	}

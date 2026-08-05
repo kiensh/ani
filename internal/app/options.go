@@ -12,4 +12,5 @@ type Options struct {
 	Quality string // quality filter (from config)
 	Sort    string // newest | oldest | smallest | largest
 	Query   string // positional search argument (name or anidb id)
+	Source  string // provider: "torrent" (default) | "anidb"
 }

@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strconv"
 	"time"
+
+	"ani/internal/playable"
 )
 
 const (
@@ -128,6 +130,33 @@ func ToReleases(entries []Entry) []*Release {
 	out := make([]*Release, 0, len(entries))
 	for i := range entries {
 		out = append(out, ToRelease(&entries[i]))
+	}
+	return out
+}
+
+// Playable projects this torrent release into a provider-agnostic playable.Release
+// (the type the release picker pipeline consumes). Magnet/size/seeders/date come
+// along so the torrent UI renders and plays as before.
+func (r *Release) Playable() *playable.Release {
+	return &playable.Release{
+		Title:      r.Entry.Title,
+		Group:      r.Group,
+		Resolution: r.Resolution,
+		Episode:    r.Episode,
+		IsBatch:    r.IsBatch,
+		DateAdded:  r.Entry.DateAdded,
+		SizeBytes:  r.Entry.SizeBytes,
+		Seeders:    r.Entry.Seeders,
+		Leechers:   r.Entry.Leechers,
+		Magnet:     r.Entry.Magnet,
+	}
+}
+
+// ToPlayables projects a slice of torrent releases into playable releases.
+func ToPlayables(rs []*Release) []*playable.Release {
+	out := make([]*playable.Release, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, r.Playable())
 	}
 	return out
 }

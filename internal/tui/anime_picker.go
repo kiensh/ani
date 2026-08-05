@@ -399,13 +399,13 @@ type animePicker struct {
 	// disables the "watched/aired/total" display). aired is a session-scoped
 	// *AiredCache: each anime's count is computed at most once per session (incl.
 	// 0/failed — no retry), shared across pickers via app.Run.
-	latestEpisode func(item *mal.Item) int
+	latestEpisode func(item *mal.Item) float64
 	aired         *AiredCache
 
 	// latestEpisodePrefetch is the background prefetch variant (fast-only: no
 	// Jikan, skips aid-unresolved items). nil ⇒ covers are still paged but no
 	// aired prefetch.
-	latestEpisodePrefetch func(item *mal.Item) int
+	latestEpisodePrefetch func(item *mal.Item) float64
 
 	// prefetchSem bounds concurrent aired-episode fetches. Animetosho times out
 	// (~30s) when too many hit it at once — a full season has ~90 airing anime and
@@ -458,7 +458,7 @@ func animeCacheKey(source AnimeSource, query, season string) string {
 	return fmt.Sprintf("%d|%s|%s", source, query, season)
 }
 
-func newAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) int, latestEpisodePrefetch func(*mal.Item) int, debug bool) *animePicker {
+func newAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) float64, latestEpisodePrefetch func(*mal.Item) float64, debug bool) *animePicker {
 	y, s, label := mal.CurrentSeason()
 	ap := &animePicker{
 		source:                source,
@@ -933,7 +933,7 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if it := m.currentItemCopy(); it != nil {
 			// Carry the cached aired count so the release picker reuses it
 			// instead of re-fetching on entry.
-			it.AiredEps = m.aired.value(it.MalID)
+			it.AiredEps = int(m.aired.value(it.MalID))
 			m.result.Anime = it
 			return m, tea.Batch(tea.Quit, m.quitCmd())
 		}

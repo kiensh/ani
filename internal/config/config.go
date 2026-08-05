@@ -17,6 +17,11 @@ type Config struct {
 	Sort    string `json:"sort"`    // default sort: newest|oldest|smallest|largest
 	Player  string `json:"player"`  // streaming player, default mpv
 	Dir     string `json:"dir"`     // default download dir, "" = cwd
+	Source  string `json:"source"`  // provider: "torrent" (default) | "anidb"
+
+	// Per-provider filter preferences (so switching providers doesn't clobber).
+	AnidbGroup   string `json:"anidb_group"`   // anidb audio filter: "" | "sub" | "dub"
+	AnidbQuality string `json:"anidb_quality"` // anidb resolution filter: "" | "1080p" | ...
 
 	// AnidbOverrides maps a MAL anime id to a user-chosen AniDB id (set by the
 	// manual animetosho-series fallback), so an anime resolved once by hand
@@ -66,11 +71,19 @@ func Load() Config {
 }
 
 // SaveFilters persists the user's release filter preferences to config.json.
-func SaveFilters(group, quality, sort string) {
+// SaveFilters persists the release picker's filter choices, scoped to the
+// provider so switching between torrent and anidb doesn't clobber each other's
+// group/quality. Sort is shared (it's just display ordering).
+func SaveFilters(group, quality, sort, source string) {
 	cfg := Load()
-	cfg.Group = group
-	cfg.Quality = quality
 	cfg.Sort = sort
+	if source == "anidb" {
+		cfg.AnidbGroup = group
+		cfg.AnidbQuality = quality
+	} else {
+		cfg.Group = group
+		cfg.Quality = quality
+	}
 	save(cfg)
 }
 

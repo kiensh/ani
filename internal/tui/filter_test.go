@@ -3,12 +3,11 @@ package tui
 import (
 	"testing"
 
-	"ani/internal/animetosho"
+	"ani/internal/playable"
 )
 
-func mkRel(group, res string, ep int, batch bool) *animetosho.Release {
-	return &animetosho.Release{
-		Entry:      &animetosho.Entry{ReleaseGroup: group, Resolution: res, Series: animetosho.Series{EpisodeNumber: ep}, IsBatch: batch},
+func mkRel(group, res string, ep int, batch bool) *playable.Release {
+	return &playable.Release{
 		Group:      group,
 		Resolution: res,
 		Episode:    ep,
@@ -18,13 +17,13 @@ func mkRel(group, res string, ep int, batch bool) *animetosho.Release {
 
 func TestDropLastWord(t *testing.T) {
 	cases := map[string]string{
-		"frieren 1080p":      "frieren",
-		"frieren 1080p web":  "frieren 1080p",
-		"frieren":            "",
-		"frieren ":           "",
-		"":                   "",
-		"  fired  ":          "",
-		"a b c":              "a b",
+		"frieren 1080p":     "frieren",
+		"frieren 1080p web": "frieren 1080p",
+		"frieren":           "",
+		"frieren ":          "",
+		"":                  "",
+		"  fired  ":         "",
+		"a b c":             "a b",
 	}
 	for in, want := range cases {
 		if got := dropLastWord(in); got != want {
@@ -51,7 +50,7 @@ func TestResolutionHeight(t *testing.T) {
 }
 
 func TestDistinctQualities(t *testing.T) {
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("a", "1920x1080", 1, false),
 		mkRel("b", "1280x720", 2, false),
 		mkRel("c", "3840x2160", 3, false),
@@ -72,7 +71,7 @@ func TestDistinctQualities(t *testing.T) {
 
 func TestDistinctQualitiesOrdering(t *testing.T) {
 	// Out-of-order inputs still come back highest-first.
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("a", "720p", 1, false),
 		mkRel("b", "480p", 2, false),
 		mkRel("c", "1080p", 3, false),
@@ -90,14 +89,14 @@ func TestDistinctQualitiesOrdering(t *testing.T) {
 }
 
 func TestDefaultQuality(t *testing.T) {
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("a", "720p", 1, false),
 		mkRel("b", "1080p", 2, false),
 	}
 	if q := DefaultQuality(all); q != "1080p" {
 		t.Errorf("DefaultQuality = %q, want 1080p", q)
 	}
-	none := []*animetosho.Release{mkRel("a", "weird", 1, false)}
+	none := []*playable.Release{mkRel("a", "weird", 1, false)}
 	if q := DefaultQuality(none); q != "" {
 		t.Errorf("DefaultQuality(no recognized) = %q, want \"\"", q)
 	}
@@ -123,7 +122,7 @@ func TestDefaultEpisode(t *testing.T) {
 }
 
 func TestDistinctGroups(t *testing.T) {
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("Erai-raws", "1080p", 1, false),
 		mkRel("SubsPlease", "1080p", 2, false),
 		mkRel("Erai-raws", "720p", 3, false),
@@ -142,7 +141,7 @@ func TestDistinctGroups(t *testing.T) {
 }
 
 func TestFilterApplyQuality(t *testing.T) {
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("a", "1080p", 1, false),
 		mkRel("b", "720p", 2, false),
 		mkRel("c", "1080p", 3, false),
@@ -155,7 +154,7 @@ func TestFilterApplyQuality(t *testing.T) {
 }
 
 func TestFilterApplyEpisode(t *testing.T) {
-	all := []*animetosho.Release{
+	all := []*playable.Release{
 		mkRel("a", "1080p", 1, false),
 		mkRel("b", "1080p", 2, false),
 		mkRel("c", "1080p", 0, true), // batch excluded

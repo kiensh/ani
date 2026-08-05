@@ -9,9 +9,11 @@ import (
 	"strconv"
 	"sync"
 
+	"ani/internal/anidb"
 	"ani/internal/animetosho"
 	"ani/internal/config"
 	"ani/internal/mal"
+	"ani/internal/playable"
 	"ani/internal/player"
 	"ani/internal/tui"
 	"ani/internal/ui"
@@ -153,6 +155,10 @@ func resolveMal(opt *Options, aired *tui.AiredCache) (int, *mal.Item, error) {
 		return 0, nil, ErrCancelled
 	}
 	item := res.Anime
+	// anidb (streaming) resolves by title in streamLoop — no AniDB aid needed.
+	if opt.Source == "anidb" {
+		return 0, item, nil
+	}
 	aid := item.AnidbAID
 	if aid == 0 {
 		aid = resolveAnidbFromMAL(item, opt)
@@ -184,6 +190,10 @@ func resolveMalDry(opt *Options, source tui.AnimeSource, query string, load tui.
 	}
 	item := items[0]
 	fmt.Fprintf(os.Stderr, "DRY-RUN: auto-picked %q\n", item.Title)
+	// anidb resolves by title in streamLoop — no aid needed.
+	if opt.Source == "anidb" {
+		return 0, &item, nil
+	}
 	aid := item.AnidbAID
 	if aid == 0 {
 		aid = resolveAnidbFromMAL(&item, opt)
@@ -200,18 +210,21 @@ func resolveMalDry(opt *Options, source tui.AnimeSource, query string, load tui.
 // latest episode from its releases (a same-day proxy for "aired"). Jikan's
 // episode feed is the fallback — authoritative but rate-limited — when the aid
 // can't be resolved or AnimeTosho has no releases. nil item → 0.
-func latestEpisodeFn(opt *Options) func(*mal.Item) int {
-	return func(item *mal.Item) int {
+func latestEpisodeFn(opt *Options) func(*mal.Item) float64 {
+	return func(item *mal.Item) float64 {
 		if item == nil {
 			return 0
 		}
+		if opt.Source == "anidb" {
+			return anidb.AiredCount(item.Title)
+		}
 		if aid := resolveAidFast(item, opt); aid > 0 {
 			if n := animetosho.LatestEpisode(aid, item.TotalEps); n > 0 {
-				return n
+				return float64(n)
 			}
 		}
 		n, _ := mal.LatestEpisode(item.MalID, opt.Debug)
-		return n
+		return float64(n)
 	}
 }
 
@@ -222,16 +235,19 @@ func latestEpisodeFn(opt *Options) func(*mal.Item) int {
 // and the background prefetch never calls Jikan (rate-limited, errors for some).
 // Returns 0 when skipped/unknown; the focus path (latestEpisodeFn) still tries
 // the full chain (incl. Jikan) on demand for items the prefetch didn't fill.
-func latestEpisodePrefetchFn(opt *Options) func(*mal.Item) int {
-	return func(item *mal.Item) int {
+func latestEpisodePrefetchFn(opt *Options) func(*mal.Item) float64 {
+	return func(item *mal.Item) float64 {
 		if item == nil {
 			return 0
+		}
+		if opt.Source == "anidb" {
+			return anidb.AiredCount(item.Title)
 		}
 		aid := resolveAidFast(item, opt)
 		if aid <= 0 {
 			return 0
 		}
-		return animetosho.LatestEpisode(aid, item.TotalEps)
+		return float64(animetosho.LatestEpisode(aid, item.TotalEps))
 	}
 }
 
@@ -293,9 +309,13 @@ func resolveAnidbManual(item *mal.Item, opt *Options) int {
 	return aid
 }
 
-// resolveAnimetosho is the no-MAL path. A text query searches AnimeTosho series
-// and lets the user pick; no query returns the latest-uploads sentinel.
+// resolveAnimetosho is the no-MAL path. A text query searches the provider's
+// series and lets the user pick; no query returns the latest-uploads sentinel
+// (animetosho only — anidb has no equivalent).
 func resolveAnimetosho(opt *Options) (int, *mal.Item, error) {
+	if opt.Source == "anidb" {
+		return resolveAnidbNoLogin(opt)
+	}
 	if opt.Query == "" {
 		return latestUploadsAID, &mal.Item{Title: "Latest uploads"}, nil
 	}
@@ -331,6 +351,40 @@ func resolveAnimetosho(opt *Options) (int, *mal.Item, error) {
 	return item.AnidbAID, item, nil
 }
 
+// resolveAnidbNoLogin is the no-MAL anidb path: search anidb.app by query, let the
+// user pick, then return the item (aid=0 — anidb resolves by title in streamLoop).
+// Unlike animetosho there's no "latest uploads" landing, so a query is required.
+func resolveAnidbNoLogin(opt *Options) (int, *mal.Item, error) {
+	if opt.Query == "" {
+		return 0, nil, fmt.Errorf("anidb mode requires a search query (run: ani <title>)")
+	}
+	shows, err := anidb.Search(opt.Query)
+	if err != nil {
+		return 0, nil, err
+	}
+	items := make([]mal.Item, 0, len(shows))
+	for _, s := range shows {
+		items = append(items, mal.Item{Title: s.Name})
+	}
+	if len(items) == 0 {
+		return 0, nil, fmt.Errorf("no anime found")
+	}
+	load := func(tui.AnimeSource, string, string) ([]mal.Item, error) { return items, nil }
+	if opt.DryRun {
+		item := items[0]
+		fmt.Fprintf(os.Stderr, "DRY-RUN: auto-picked %q\n", item.Title)
+		return 0, &item, nil
+	}
+	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, opt.Debug)
+	if err != nil {
+		return 0, nil, err
+	}
+	if res == nil || res.Quit || res.Anime == nil {
+		return 0, nil, ErrCancelled
+	}
+	return 0, res.Anime, nil
+}
+
 // seriesToItems projects AnimeTosho series-search hits into picker items (title
 // + AniDB id; no cover — the picker shows a blank cover area).
 func seriesToItems(ss []animetosho.SeriesSummary) []mal.Item {
@@ -346,43 +400,107 @@ func seriesToItems(ss []animetosho.SeriesSummary) []mal.Item {
 // releases site-wide with the episode filter disabled. Returns errBackToAnime
 // when the user backs out.
 func releaseLoop(opt *Options, aid int, item *mal.Item, aired *tui.AiredCache) error {
+	if opt.Source == "anidb" {
+		return streamLoop(opt, item, aired)
+	}
 	if aid == latestUploadsAID {
 		return latestLoop(opt, item, aired)
 	}
-	cache := &episodeCache{data: map[int][]*animetosho.Release{}}
-	return playLoop(opt, item, cachedFetch(aid, cache), false, aired)
+	cache := &episodeCache{data: map[int][]*playable.Release{}}
+	return playLoop(opt, item, cachedFetch(aid, cache), false, aired, func(*mal.Item) int { return 0 })
+}
+
+// streamLoop resolves the anime on anidb.app (by title) and runs the same
+// pick → play → write-back loop via playLoop, but with an anidb fetch closure that
+// returns audio×resolution stream variants as playable.Release items. The release
+// picker's group filter = sub/dub, quality filter = resolution — same UI, different
+// backend.
+func streamLoop(opt *Options, item *mal.Item, aired *tui.AiredCache) error {
+	show, err := anidb.ResolveShow(item.Title)
+	if err != nil {
+		return fmt.Errorf("anidb: resolve %q: %w", item.Title, err)
+	}
+	// anidb uses cumulative episode numbering (e.g. Slime S4 = eps 73–88). Compute
+	// a default-episode function that recomputes each play-loop iteration from the
+	// CURRENT item.WatchedEps (updated by MalWriteBack after each play), so the
+	// picker advances to watched+1 after watching. Falls back to the latest
+	// available when watched+1 doesn't exist on anidb yet.
+	defaultEpFn := func(*mal.Item) int { return 0 }
+	if eps, e := anidb.Episodes(show.ID); e == nil && len(eps) > 0 {
+		offset := anidb.EpisodeOffset(eps)
+		available := map[int]bool{}
+		maxAvail := 0
+		for _, ep := range eps {
+			if ep.Number >= 1 && ep.Number == float64(int(ep.Number)) && !ep.Filler {
+				malEp := int(ep.Number - offset)
+				available[malEp] = true
+				if malEp > maxAvail {
+					maxAvail = malEp
+				}
+			}
+		}
+		defaultEpFn = func(item *mal.Item) int {
+			malDefault := tui.DefaultEpisode(item.WatchedEps, item.TotalEps)
+			if malDefault > 0 && available[malDefault] {
+				return malDefault
+			}
+			return maxAvail
+		}
+	}
+	fetch := func(ep int) []*playable.Release {
+		if ep == 0 {
+			ep = 1
+		}
+		rels, e := anidb.FetchReleases(show.ID, ep)
+		if e != nil {
+			mal.LogDebug("anidb fetch ep %d: %v\n", ep, e)
+			return nil
+		}
+		return rels
+	}
+	return playLoop(opt, item, fetch, false, aired, defaultEpFn)
 }
 
 // latestLoop is the no-arg AnimeTosho landing screen: the newest uploads in one
 // flat list (episode filter disabled), no MAL write-back (the synthetic item
 // has no MAL id).
 func latestLoop(opt *Options, item *mal.Item, aired *tui.AiredCache) error {
-	var cached []*animetosho.Release
-	fetch := func(int) []*animetosho.Release {
+	var cached []*playable.Release
+	fetch := func(int) []*playable.Release {
 		if cached == nil {
-			cached, _ = animetosho.LatestReleases(200)
+			r, _ := animetosho.LatestReleases(200)
+			cached = animetosho.ToPlayables(r)
 		}
 		return cached
 	}
-	return playLoop(opt, item, fetch, true, aired)
+	return playLoop(opt, item, fetch, true, aired, func(*mal.Item) int { return 0 })
 }
 
 // playLoop drives the release picker and the play/download + MAL write-back,
 // looping for the next episode until cancelled or backed out of.
-func playLoop(opt *Options, item *mal.Item, fetch func(int) []*animetosho.Release, disableEpisode bool, aired *tui.AiredCache) error {
+func playLoop(opt *Options, item *mal.Item, fetch func(int) []*playable.Release, disableEpisode bool, aired *tui.AiredCache, defaultEpisodeFn func(*mal.Item) int) error {
 	for {
-		pick, action, err := pickReleaseTUI(item, opt, fetch, disableEpisode, aired)
+		pick, action, err := pickReleaseTUI(item, opt, fetch, disableEpisode, aired, defaultEpisodeFn(item))
 		if err != nil {
 			return err // errBackToAnime propagates to Run
 		}
 		AnnouncePick(pick)
 		// action comes from the release picker (Enter = play, d = download).
-		if action == "download" {
-			if err := player.RunDownload(pick.Entry.Magnet, opt.Dir, opt.DryRun); err != nil {
+		if pick.IsStream() {
+			// anidb stream: play via mpv+URL. Download isn't applicable.
+			if action == "download" {
+				fmt.Fprintln(os.Stderr, "ani: download not supported for streams")
+			} else {
+				if err := player.RunPlayURL(pick.StreamURL, pick.Title, opt.Player, opt.DryRun); err != nil {
+					return err
+				}
+			}
+		} else if action == "download" {
+			if err := player.RunDownload(pick.Magnet, opt.Dir, opt.DryRun); err != nil {
 				return err
 			}
 		} else {
-			if err := player.RunPlay(pick.Entry.Magnet, pick.Entry.Title, opt.Player, opt.DryRun); err != nil {
+			if err := player.RunPlay(pick.Magnet, pick.Title, opt.Player, opt.DryRun); err != nil {
 				return err
 			}
 		}
@@ -399,16 +517,16 @@ func playLoop(opt *Options, item *mal.Item, fetch func(int) []*animetosho.Releas
 // re-visiting an episode (or the prefetched next one) is instant.
 type episodeCache struct {
 	mu   sync.Mutex
-	data map[int][]*animetosho.Release
+	data map[int][]*playable.Release
 }
 
-func (c *episodeCache) get(ep int) []*animetosho.Release {
+func (c *episodeCache) get(ep int) []*playable.Release {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.data[ep]
 }
 
-func (c *episodeCache) put(ep int, r []*animetosho.Release) {
+func (c *episodeCache) put(ep int, r []*playable.Release) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.data[ep] = r
@@ -416,14 +534,15 @@ func (c *episodeCache) put(ep int, r []*animetosho.Release) {
 
 // cachedFetch returns an episode fetch func that serves from the cache, falling
 // back to animetosho.FetchReleases(aid, ep) and caching the result.
-func cachedFetch(aid int, cache *episodeCache) func(int) []*animetosho.Release {
-	return func(ep int) []*animetosho.Release {
+func cachedFetch(aid int, cache *episodeCache) func(int) []*playable.Release {
+	return func(ep int) []*playable.Release {
 		if r := cache.get(ep); r != nil {
 			return r
 		}
 		r, _ := animetosho.FetchReleases(aid, ep)
-		cache.put(ep, r)
-		return r
+		p := animetosho.ToPlayables(r)
+		cache.put(ep, p)
+		return p
 	}
 }
 
@@ -431,10 +550,10 @@ func cachedFetch(aid int, cache *episodeCache) func(int) []*animetosho.Release {
 // first release so exec commands can be printed without a TUI. Returns the
 // chosen release and action ("play"/"download"); disableEpisode suppresses the
 // episode filter (latest-uploads view).
-func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*animetosho.Release, disableEpisode bool, aired *tui.AiredCache) (*animetosho.Release, string, error) {
+func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*playable.Release, disableEpisode bool, aired *tui.AiredCache, defaultEpisode int) (*playable.Release, string, error) {
 	if opt.DryRun {
-		ep := 0
-		if !disableEpisode {
+		ep := defaultEpisode
+		if ep == 0 && !disableEpisode {
 			ep = tui.DefaultEpisode(item.WatchedEps, item.TotalEps)
 		}
 		all := fetch(ep)
@@ -446,7 +565,7 @@ func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*animetosho.
 		return view[0], "play", nil
 	}
 	res, err := tui.RunReleasePicker(item, opt.Group, opt.Quality, opt.Sort, fetch, disableEpisode, player.CopyToClipboard,
-		latestEpisodeFn(opt), aired, opt.Debug)
+		latestEpisodeFn(opt), aired, defaultEpisode, opt.Debug)
 	if err != nil {
 		return nil, "", err
 	}
@@ -456,7 +575,7 @@ func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*animetosho.
 		opt.Group = res.FilterGroup
 		opt.Quality = res.FilterQuality
 		opt.Sort = res.FilterSort
-		config.SaveFilters(res.FilterGroup, res.FilterQuality, res.FilterSort)
+		config.SaveFilters(res.FilterGroup, res.FilterQuality, res.FilterSort, opt.Source)
 	}
 	if res != nil && res.Back {
 		return nil, "", errBackToAnime
@@ -472,12 +591,16 @@ func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*animetosho.
 }
 
 // AnnouncePick prints the chosen release to stdout.
-func AnnouncePick(r *animetosho.Release) {
+func AnnouncePick(r *playable.Release) {
 	grp := r.Group
 	if grp == "" {
 		grp = "?"
 	}
-	fmt.Printf("\n> [%s] %s\n  %s, %d seeders\n", grp, r.Entry.Title, ui.HumanSize(r.Entry.SizeBytes), r.Entry.Seeders)
+	if r.IsStream() {
+		fmt.Printf("\n> [%s] %s %s\n", grp, r.Title, r.Resolution)
+	} else {
+		fmt.Printf("\n> [%s] %s\n  %s, %d seeders\n", grp, r.Title, ui.HumanSize(r.SizeBytes), r.Seeders)
+	}
 }
 
 // OrDefault returns v when non-empty, else def.
@@ -490,7 +613,7 @@ func OrDefault(v, def string) string {
 
 // PrintUsage writes the CLI help text to w.
 func PrintUsage(w *os.File) {
-	fmt.Fprintln(w, `ani — a MyAnimeList TUI that streams from Anime Tosho
+	fmt.Fprintln(w, `ani — a MyAnimeList TUI that streams anime
 
 Usage:
   ani [query|anidb-id]
@@ -503,5 +626,9 @@ Logged-in flow:  browse My List / This Season / Search  ->  pick a release
                  ->  Enter plays  /  d downloads  ->  MAL progress write-back
 Not logged in:   AnimeTosho series search, or the latest uploads.
 
-Config: $XDG_CONFIG_HOME/ani/config.json  (player, dir, group/quality/sort)`)
+Provider: set "source" in config.json to "torrent" (default: AnimeTosho torrents
+          via webtorrent) or "anidb" (anidb.app streaming via mpv — sub/dub +
+          quality selection in the release picker).
+
+Config: $XDG_CONFIG_HOME/ani/config.json  (player, dir, group/quality/sort, source)`)
 }

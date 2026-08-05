@@ -26,7 +26,7 @@ func toshoEpBody(ep int, groups []string) string {
 // TestLatestEpisodePrefetchNilItem: a nil item short-circuits to 0.
 func TestLatestEpisodePrefetchNilItem(t *testing.T) {
 	if got := latestEpisodePrefetchFn(&Options{})(nil); got != 0 {
-		t.Errorf("prefetch(nil) = %d, want 0", got)
+		t.Errorf("prefetch(nil) = %v, want 0", got)
 	}
 }
 
@@ -42,7 +42,7 @@ func TestLatestEpisodePrefetchResolvable(t *testing.T) {
 
 	got := latestEpisodePrefetchFn(&Options{})(&mal.Item{AnidbAID: 12345})
 	if got != 7 {
-		t.Errorf("prefetch(resolvable aid) = %d, want 7", got)
+		t.Errorf("prefetch(resolvable aid) = %v, want 7", got)
 	}
 }
 
@@ -58,6 +58,6 @@ func TestLatestEpisodePrefetchEmptyNoFallback(t *testing.T) {
 
 	got := latestEpisodePrefetchFn(&Options{})(&mal.Item{AnidbAID: 12345})
 	if got != 0 {
-		t.Errorf("prefetch(empty feed) = %d, want 0 (no Jikan fallback in prefetch)", got)
+		t.Errorf("prefetch(empty feed) = %v, want 0 (no Jikan fallback in prefetch)", got)
 	}
 }

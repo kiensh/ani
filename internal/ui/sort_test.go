@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"ani/internal/animetosho"
+	"ani/internal/playable"
 )
 
 func TestDedupSeries(t *testing.T) {
@@ -26,14 +27,14 @@ func TestDedupSeries(t *testing.T) {
 	}
 }
 
-func mkReleases() []*animetosho.Release {
-	mk := func(title, date string, size int64, group string, ep int, batch bool) *animetosho.Release {
-		return &animetosho.Release{
-			Entry: &animetosho.Entry{Title: title, DateAdded: date, SizeBytes: size, ReleaseGroup: group, Series: animetosho.Series{EpisodeNumber: ep}, IsBatch: batch},
+func mkReleases() []*playable.Release {
+	mk := func(title, date string, size int64, group string, ep int, batch bool) *playable.Release {
+		return &playable.Release{
+			Title: title, DateAdded: date, SizeBytes: size,
 			Group: group, Episode: ep, IsBatch: batch,
 		}
 	}
-	return []*animetosho.Release{
+	return []*playable.Release{
 		mk("a", "2026-01-01T00:00:00Z", 100, "Erai-raws", 1, false),
 		mk("b", "2026-03-01T00:00:00Z", 300, "SubsPlease", 2, false),
 		mk("c", "2026-02-01T00:00:00Z", 200, "Erai-raws", 0, true),
@@ -44,23 +45,23 @@ func TestSortedReleases(t *testing.T) {
 	rs := mkReleases()
 
 	newest := SortedReleases(rs, "newest")
-	if newest[0].Entry.Title != "b" || newest[2].Entry.Title != "a" {
+	if newest[0].Title != "b" || newest[2].Title != "a" {
 		t.Errorf("newest order wrong: %v", titles(newest))
 	}
 	oldest := SortedReleases(rs, "oldest")
-	if oldest[0].Entry.Title != "a" || oldest[2].Entry.Title != "b" {
+	if oldest[0].Title != "a" || oldest[2].Title != "b" {
 		t.Errorf("oldest order wrong: %v", titles(oldest))
 	}
 	smallest := SortedReleases(rs, "smallest")
-	if smallest[0].Entry.SizeBytes != 100 || smallest[2].Entry.SizeBytes != 300 {
+	if smallest[0].SizeBytes != 100 || smallest[2].SizeBytes != 300 {
 		t.Errorf("smallest order wrong: %v", sizes(smallest))
 	}
 	largest := SortedReleases(rs, "largest")
-	if largest[0].Entry.SizeBytes != 300 || largest[2].Entry.SizeBytes != 100 {
+	if largest[0].SizeBytes != 300 || largest[2].SizeBytes != 100 {
 		t.Errorf("largest order wrong: %v", sizes(largest))
 	}
 	// original must be untouched
-	if rs[0].Entry.Title != "a" {
+	if rs[0].Title != "a" {
 		t.Errorf("SortedReleases mutated its input")
 	}
 }
@@ -79,18 +80,18 @@ func TestFilterByGroup(t *testing.T) {
 	}
 }
 
-func titles(rs []*animetosho.Release) []string {
+func titles(rs []*playable.Release) []string {
 	out := make([]string, len(rs))
 	for i, r := range rs {
-		out[i] = r.Entry.Title
+		out[i] = r.Title
 	}
 	return out
 }
 
-func sizes(rs []*animetosho.Release) []int64 {
+func sizes(rs []*playable.Release) []int64 {
 	out := make([]int64, len(rs))
 	for i, r := range rs {
-		out[i] = r.Entry.SizeBytes
+		out[i] = r.SizeBytes
 	}
 	return out
 }

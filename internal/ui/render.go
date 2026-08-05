@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"ani/internal/animetosho"
 	"ani/internal/mal"
+	"ani/internal/playable"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -23,11 +23,11 @@ func RenderMALLine(m mal.Item) string {
 //     unknown aired count (no Jikan data) or unknown total. e.g. "0/4/12",
 //     "0/?/12", "0/4/?", "0/?" "?".
 //   - not airing: "ep watched/total" (or "watched/?"); "" when nothing is known.
-func FormatProgress(watched, total, aired int, airing bool) string {
+func FormatProgress(watched, total int, aired float64, airing bool) string {
 	if airing {
 		a := "?"
 		if aired > 0 {
-			a = strconv.Itoa(aired)
+			a = formatAired(aired)
 		}
 		t := "?"
 		if total > 0 {
@@ -42,6 +42,16 @@ func FormatProgress(watched, total, aired int, airing bool) string {
 		return fmt.Sprintf("ep %d/?", watched)
 	}
 	return ""
+}
+
+// formatAired renders an aired episode count: whole numbers without a decimal
+// ("16"), fractional as-is ("3.5"). Used by FormatProgress so specials like 3.5
+// are visible in the "watched/aired/total" display.
+func formatAired(aired float64) string {
+	if aired == float64(int(aired)) {
+		return strconv.Itoa(int(aired))
+	}
+	return strconv.FormatFloat(aired, 'f', -1, 64)
 }
 
 // MALListStatusShort turns a MAL status code into a display label.
@@ -117,11 +127,7 @@ func MALAirShort(s string) string {
 }
 
 // RenderReleaseLine renders the tab-delimited concise line for a release.
-func RenderReleaseLine(r *animetosho.Release) string {
-	date := "??-??"
-	if t, err := time.Parse(time.RFC3339, r.Entry.DateAdded); err == nil {
-		date = t.Format("06-01-02") // YY-MM-DD, leads the line (sorted by date)
-	}
+func RenderReleaseLine(r *playable.Release) string {
 	grp := r.Group
 	if grp == "" {
 		grp = "?"
@@ -136,13 +142,21 @@ func RenderReleaseLine(r *animetosho.Release) string {
 	} else if r.Episode > 0 {
 		eps = fmt.Sprintf("ep%d", r.Episode)
 	}
-	// Every field is a fixed rune-width so the columns line up across rows.
-	// The group is bracketed at its natural width, then padded as a whole to
-	// 16 runes so the padding sits OUTSIDE the brackets: "[erai-raw]      ".
-	// Truncate caps the group at 14 runes so "[grp]" never exceeds 16.
+
+	// Stream items (anidb): show audio [sub]/[dub] + resolution + episode, no
+	// torrent-specific date/size/seeders.
+	if r.IsStream() {
+		return fmt.Sprintf("       %-16s %-5s %-5s", "["+Truncate(grp, 14)+"]", res, eps)
+	}
+
+	// Torrent items: date, group, resolution, episode, size, seeders, leechers.
+	date := "??-??"
+	if t, err := time.Parse(time.RFC3339, r.DateAdded); err == nil {
+		date = t.Format("06-01-02") // YY-MM-DD, leads the line (sorted by date)
+	}
 	return fmt.Sprintf("%s %-16s %-5s %-5s %9s %5d↑ %3d↓",
-		date, "["+Truncate(grp, 14)+"]", res, eps, HumanSize(r.Entry.SizeBytes),
-		r.Entry.Seeders, r.Entry.Leechers)
+		date, "["+Truncate(grp, 14)+"]", res, eps, HumanSize(r.SizeBytes),
+		r.Seeders, r.Leechers)
 }
 
 // HumanSize formats a byte count with a binary unit suffix.
@@ -225,7 +239,7 @@ func cprint(color, text string, width int) {
 // MALItemHeader renders the progress/status header shown above the release list.
 // aired is the latest aired episode (0 if unknown) for the "watched/aired/total"
 // form on airing anime.
-func MALItemHeader(item *mal.Item, aired int) string {
+func MALItemHeader(item *mal.Item, aired float64) string {
 	if item == nil {
 		return ""
 	}

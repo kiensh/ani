@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"ani/internal/animetosho"
+	"ani/internal/anidb"
 	"ani/internal/app"
 	"ani/internal/config"
 	"ani/internal/mal"
@@ -52,6 +53,7 @@ func run(args []string) error {
 			logFile = f
 			mal.SetDebugLog(f)
 			animetosho.SetDebugLog(f)
+			anidb.SetDebugLog(f)
 			if debug {
 				animetosho.SetDebugEcho(true)
 				fmt.Fprintf(os.Stderr, "ani debug log → %s\n", logPath)
@@ -60,15 +62,22 @@ func run(args []string) error {
 	}
 
 	cfg := config.Load()
+	// Select the per-provider group/quality so switching providers doesn't
+	// clobber each other's filter preferences.
+	group, quality := cfg.Group, cfg.Quality
+	if cfg.Source == "anidb" {
+		group, quality = cfg.AnidbGroup, cfg.AnidbQuality
+	}
 	o := &app.Options{
 		Debug:   debug,
 		DryRun:  dryRun,
-		Group:   cfg.Group,
-		Quality: cfg.Quality,
+		Group:   group,
+		Quality: quality,
 		Sort:    ui.NormalizeSort(cfg.Sort),
 		Player:  app.OrDefault(cfg.Player, "mpv"),
 		Dir:     cfg.Dir,
 		Query:   query,
+		Source:  cfg.Source,
 	}
 	runErr := app.Run(o)
 

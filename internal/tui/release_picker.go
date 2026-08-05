@@ -8,8 +8,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"ani/internal/animetosho"
 	"ani/internal/mal"
+	"ani/internal/playable"
 	"ani/internal/ui"
 )
 
@@ -23,7 +23,7 @@ import (
 // overlay, e episode overlay, s cycle sort, / fuzzy filter, Enter select, Esc
 // back to anime selection, q quit.
 type releasePicker struct {
-	all       []*animetosho.Release
+	all       []*playable.Release
 	groups    []string // distinct groups, for the group overlay
 	qualities []string // distinct qualities present, for the quality overlay
 	item      *mal.Item
@@ -32,7 +32,7 @@ type releasePicker struct {
 	// fetch returns the releases for a given episode (cached + scoped by the
 	// caller). Invoked on demand: initially for the default episode, and again
 	// whenever the user changes the episode filter.
-	fetch    func(int) []*animetosho.Release
+	fetch    func(int) []*playable.Release
 	fetching bool // a fetch is in flight; show "Loading…" in the list area
 
 	// episodeDisabled suppresses the episode filter (the 'e' overlay and the
@@ -52,11 +52,11 @@ type releasePicker struct {
 	// airedCache is the shared session cache (once-per-session), shared with the
 	// anime picker — airedFetchCmd consults it so a count already computed this
 	// session (even 0) isn't re-fetched on entering releases.
-	latestEpisode func(*mal.Item) int
-	aired         int
+	latestEpisode func(*mal.Item) float64
+	aired         float64
 	airedCache    *AiredCache
 
-	view    []*animetosho.Release // filter.Apply(all)
+	view    []*playable.Release // filter.Apply(all)
 	cursor  int
 	topItem int
 
@@ -65,7 +65,7 @@ type releasePicker struct {
 	result *Result
 }
 
-func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*animetosho.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(*mal.Item) int, aired *AiredCache, debug bool) *releasePicker {
+func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*playable.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(*mal.Item) float64, aired *AiredCache, defaultEpisode int, debug bool) *releasePicker {
 	rp := &releasePicker{
 		item:            item,
 		debug:           debug,
@@ -80,15 +80,20 @@ func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch fun
 	// Reuse the aired count cached by the anime picker (if any), so the header
 	// shows immediately and Init doesn't re-fetch it.
 	if item != nil {
-		rp.aired = item.AiredEps
+		rp.aired = float64(item.AiredEps)
 	}
 	rp.filter.Group = group
 	rp.filter.Quality = quality
 	rp.filter.Sort = ui.NormalizeSort(sortName)
-	// Default filter: next-unwatched episode (quality left at "all" — no default).
+	// Default filter: caller may pass a specific episode (e.g. anidb's latest
+	// available); otherwise compute next-unwatched from the MAL item.
 	// Skipped when the episode filter is disabled (latest-uploads view).
 	if !disableEpisode && rp.filter.Episode == 0 && item != nil {
-		rp.filter.Episode = DefaultEpisode(item.WatchedEps, item.TotalEps)
+		if defaultEpisode > 0 {
+			rp.filter.Episode = defaultEpisode
+		} else {
+			rp.filter.Episode = DefaultEpisode(item.WatchedEps, item.TotalEps)
+		}
 	}
 	return rp
 }
@@ -96,7 +101,7 @@ func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch fun
 // releasesLoadedMsg carries the releases for one episode fetch. ep lets Update
 // discard stale results when the user changed the episode again mid-fetch.
 type releasesLoadedMsg struct {
-	releases []*animetosho.Release
+	releases []*playable.Release
 	ep       int
 }
 
@@ -111,7 +116,7 @@ func (m *releasePicker) fetchCmd(ep int) tea.Cmd {
 // latestEpMsg carries the latest aired episode for the header anime.
 type latestEpMsg struct {
 	malID int
-	aired int
+	aired float64
 }
 
 func (m *releasePicker) Init() tea.Cmd {
@@ -371,8 +376,8 @@ func (m *releasePicker) applyAction() (tea.Model, tea.Cmd) {
 		m.result.Action = "download"
 		return m, tea.Quit
 	case "Copy Magnet URL":
-		if m.copyMagnet != nil && cur.Entry.Magnet != "" {
-			m.copyMagnet(cur.Entry.Magnet)
+		if m.copyMagnet != nil && cur.Magnet != "" {
+			m.copyMagnet(cur.Magnet)
 			m.toast = "✓ Magnet copied to clipboard"
 			return m, tea.Tick(toastHold, func(time.Time) tea.Msg { return clearToastMsg{} })
 		}
@@ -441,7 +446,7 @@ func (m *releasePicker) applyFilter() {
 	m.fixScroll()
 }
 
-func (m *releasePicker) currentRelease() *animetosho.Release {
+func (m *releasePicker) currentRelease() *playable.Release {
 	if m.cursor < 0 || m.cursor >= len(m.view) {
 		return nil
 	}
@@ -613,10 +618,10 @@ func (m *releasePicker) renderPreview() string {
 	if cur == nil {
 		lines = append(lines, FaintStyle.Render("(no releases match)"))
 	} else {
-		lines = append(lines, TitleStyle.Render(ui.Truncate(cur.Entry.Title, width)))
+		lines = append(lines, TitleStyle.Render(ui.Truncate(cur.Title, width)))
 		detail := ui.RenderReleaseLine(cur)
 		lines = append(lines, ProgressStyle.Render(ui.Truncate(detail, width)))
-		if magnet := cur.Entry.Magnet; magnet != "" {
+		if magnet := cur.Magnet; magnet != "" {
 			short := magnet
 			if len([]rune(short)) > width-9 {
 				short = string([]rune(short)[:width-10]) + "…"

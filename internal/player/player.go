@@ -34,6 +34,21 @@ func RunPlay(magnet, title, player string, dryRun bool) error {
 	return RunWithSignals(exec.Command("webtorrent", args...), dryRun)
 }
 
+// RunPlayURL plays a direct stream URL (HLS m3u8) in mpv — used by the anidb
+// streaming provider. Unlike RunPlay (webtorrent+magnet), this launches mpv
+// directly with the URL; mpv handles HLS natively (no referrer needed, per the
+// Phase 0.5 probe).
+func RunPlayURL(streamURL, title, player string, dryRun bool) error {
+	if player == "" {
+		player = "mpv"
+	}
+	if streamURL == "" {
+		return fmt.Errorf("release has no stream URL")
+	}
+	args := []string{streamURL, "--force-media-title=" + title}
+	return RunWithSignals(exec.Command(player, args...), dryRun)
+}
+
 // WriteMpvTitleConfig writes an mpv include file setting the window and media
 // title. Returns the path and a cleanup func.
 func WriteMpvTitleConfig(title string) (path string, cleanup func(), ok bool) {
