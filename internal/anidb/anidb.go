@@ -339,16 +339,13 @@ func resolveVariants(embedURL string) ([]variant, error) {
 
 // ---- Helpers ----
 
-// cleanQuery drops subtitle/season-suffix clutter to help anidb search match MAL titles.
-// Only cuts at " - " (space-dash-space, a subtitle separator). Does NOT cut at ":"
-// because colons are often part of the main anime title (e.g. "Re:Zero",
-// "Kono Subarashii Sekai ni Shukufuku wo!").
+// cleanQuery trims the MAL title for anidb search. The full title (including
+// season/subtitle qualifiers like " - Ryoushu no Youjo" or "4th Season") is
+// passed as-is — cutting at " - " or ":" strips season identifiers and makes
+// the search match the wrong (earlier) season. anidb's search handles long
+// romanized titles fine.
 func cleanQuery(title string) string {
-	q := title
-	if i := strings.Index(q, " - "); i > 0 {
-		q = q[:i]
-	}
-	return strings.TrimSpace(q)
+	return strings.TrimSpace(title)
 }
 
 func htmlUnesc(s string) string {
