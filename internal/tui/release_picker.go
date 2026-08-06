@@ -42,6 +42,7 @@ type releasePicker struct {
 
 	filter  Filter
 	overlay filterOverlay
+	palette Palette // `:` command menu (every action, fuzzy-searchable)
 
 	// copyMagnet copies a magnet URI to the clipboard (nil disables Copy Magnet).
 	copyMagnet func(string) error
@@ -171,6 +172,9 @@ func (m *releasePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.palette.Active() {
+			return m.handlePaletteKey(msg)
+		}
 		if m.overlay.active() {
 			return m.handleOverlayKey(msg)
 		}
@@ -270,6 +274,10 @@ func (m *releasePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "/":
 		m.filter.Filtering = true
 		m.filter.FuzzyText = ""
+		return m, nil
+	case ":":
+		// Command palette: every release-picker action, fuzzy-searchable.
+		m.palette.Open(m.releaseCommands())
 		return m, nil
 	case " ":
 		// Open the per-release actions menu (Play / Download / Copy Magnet).
@@ -381,6 +389,102 @@ func (m *releasePicker) applyAction() (tea.Model, tea.Cmd) {
 			m.toast = "✓ Magnet copied to clipboard"
 			return m, tea.Tick(toastHold, func(time.Time) tea.Msg { return clearToastMsg{} })
 		}
+	}
+	return m, nil
+}
+
+// handlePaletteKey drives the `:` command menu. On a selection it runs the
+// chosen intent via applyCommand; Esc/Ctrl-C just close.
+func (m *releasePicker) handlePaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	done, sel := m.palette.HandleKey(msg)
+	if done && sel {
+		return m.applyCommand(m.palette.Selected().Intent)
+	}
+	return m, nil
+}
+
+// releaseCommands builds the palette's command list from live state: the groups
+// and qualities present in the current episode's releases, the sort options, the
+// per-release actions (when a release is focused), and the view actions.
+func (m *releasePicker) releaseCommands() []Command {
+	var cmds []Command
+	cmds = append(cmds, Command{Category: "Filter", Title: "All groups", Intent: "group:", Keywords: "group audio"})
+	for _, g := range m.groups {
+		cmds = append(cmds, Command{Category: "Filter", Title: "Group: " + g, Intent: "group:" + g, Keywords: "group audio"})
+	}
+	cmds = append(cmds, Command{Category: "Filter", Title: "All qualities", Intent: "quality:", Keywords: "quality resolution"})
+	for _, q := range m.qualities {
+		cmds = append(cmds, Command{Category: "Filter", Title: "Quality: " + q, Intent: "quality:" + q, Keywords: "quality resolution"})
+	}
+	if !m.episodeDisabled {
+		cmds = append(cmds, Command{Category: "Filter", Title: "Set episode…", Intent: "episode", Keywords: "filter number"})
+	}
+	for _, o := range releaseSortOptions {
+		cmds = append(cmds, Command{Category: "Sort", Title: "Sort: " + o.label, Intent: "sort:" + o.value, Keywords: "order"})
+	}
+	if cur := m.currentRelease(); cur != nil {
+		cmds = append(cmds,
+			Command{Category: "Release", Title: "Play focused", Intent: "play", Keywords: "stream watch"},
+			Command{Category: "Release", Title: "Download focused", Intent: "download", Keywords: "save"},
+		)
+		if m.copyMagnet != nil {
+			cmds = append(cmds, Command{Category: "Release", Title: "Copy magnet URL", Intent: "copy-magnet", Keywords: "clipboard link"})
+		}
+	}
+	cmds = append(cmds,
+		Command{Category: "View", Title: "Filter list…", Intent: "filter", Keywords: "search fuzzy"},
+		Command{Category: "View", Title: "Back to anime", Intent: "back", Keywords: "esc return"},
+		Command{Category: "View", Title: "Quit", Intent: "quit", Keywords: "exit"},
+	)
+	return cmds
+}
+
+// applyCommand runs a palette intent, reusing the same mutators/flags as the
+// direct keys and the Space actions menu. group:/quality:/sort: carry the value
+// as a suffix ("All" → empty value).
+func (m *releasePicker) applyCommand(intent string) (tea.Model, tea.Cmd) {
+	switch {
+	case intent == "play":
+		if cur := m.currentRelease(); cur != nil {
+			m.result.Release = cur
+			m.result.Action = "play"
+			return m, tea.Quit
+		}
+	case intent == "download":
+		if cur := m.currentRelease(); cur != nil {
+			m.result.Release = cur
+			m.result.Action = "download"
+			return m, tea.Quit
+		}
+	case intent == "copy-magnet":
+		cur := m.currentRelease()
+		if m.copyMagnet != nil && cur != nil && cur.Magnet != "" {
+			m.copyMagnet(cur.Magnet)
+			m.toast = "✓ Magnet copied to clipboard"
+			return m, tea.Tick(toastHold, func(time.Time) tea.Msg { return clearToastMsg{} })
+		}
+	case intent == "episode":
+		if !m.episodeDisabled {
+			m.overlay.openEpisode(m.filter.Episode)
+		}
+	case intent == "filter":
+		m.filter.Filtering = true
+		m.filter.FuzzyText = ""
+	case intent == "back":
+		m.result.Back = true
+		return m, tea.Quit
+	case intent == "quit":
+		m.result.Quit = true
+		return m, tea.Quit
+	case strings.HasPrefix(intent, "group:"):
+		m.filter.Group = strings.TrimPrefix(intent, "group:")
+		m.applyFilter()
+	case strings.HasPrefix(intent, "quality:"):
+		m.filter.Quality = strings.TrimPrefix(intent, "quality:")
+		m.applyFilter()
+	case strings.HasPrefix(intent, "sort:"):
+		m.filter.Sort = strings.TrimPrefix(intent, "sort:")
+		m.applyFilter()
 	}
 	return m, nil
 }
@@ -519,6 +623,11 @@ func (m *releasePicker) View() string {
 			Width(m.width).
 			Height(m.listHeight()).
 			Render(m.loadingText())
+	case m.palette.Active():
+		listArea = OverlayBorderStyle.
+			Width(m.width).
+			Height(m.listHeight()).
+			Render(m.palette.View(m.width-2, m.pageSize()))
 	case m.overlay.active():
 		listArea = OverlayBorderStyle.
 			Width(m.width).
@@ -570,7 +679,7 @@ func (m *releasePicker) renderBadges() string {
 	return strings.Join(parts, " ")
 }
 
-const rpHelpText = "j/k nav  g group  r quality  e episode  s sort  Space act  / filter  Enter play  d download  Esc back  q quit"
+const rpHelpText = "j/k move  Enter play  / filter  : command  d download  Esc back  q quit"
 
 // renderList draws the visible slice of the filtered list with a cursor glyph.
 // Each line is rendered independently with a full style reset so the selected

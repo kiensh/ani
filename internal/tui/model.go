@@ -30,6 +30,10 @@ type Result struct {
 	Relogin bool // re-run the browser OAuth flow
 	Logout  bool // forget the saved MAL token
 
+	// SourceSwitch requests a provider change ("torrent"/"anidb") from the anime
+	// picker; app.Run applies it (persist + re-resolve under the new provider).
+	SourceSwitch string
+
 	// Filter preferences from the release picker (persisted across sessions).
 	FilterGroup   string
 	FilterQuality string
@@ -44,11 +48,12 @@ type Result struct {
 // anime (nil disables); latestEpisodePrefetch is the fast-only background variant
 // that pages the aired-episode prefetch (nil disables aired prefetch; covers are
 // still paged). Returns the selected anime, or Quit=true on cancel.
-func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) float64, latestEpisodePrefetch func(*mal.Item) float64, aired *AiredCache, debug bool) (*Result, error) {
+func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) float64, latestEpisodePrefetch func(*mal.Item) float64, aired *AiredCache, provider string, debug bool) (*Result, error) {
 	if load == nil {
 		return &Result{Quit: true}, nil
 	}
 	m := newAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetch, debug)
+	m.provider = provider // drives the palette's provider switch (● active marker)
 	if aired != nil {
 		m.aired = aired // reuse the session cache across Esc-from-releases
 	}

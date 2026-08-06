@@ -31,6 +31,14 @@ var (
 	errLogout  = errors.New("logout")
 )
 
+// errSourceSwitch signals that the anime picker requested a provider change via
+// the `:` palette. Run applies it (persist + re-select the provider's saved
+// filters) then re-resolves under the new provider. Carries the target source
+// ("torrent"/"anidb").
+type errSourceSwitch struct{ source string }
+
+func (e errSourceSwitch) Error() string { return "switch provider to " + e.source }
+
 // ErrCancelled is returned when the user quits a picker without selecting. main
 // exits silently on it.
 var ErrCancelled = errors.New("cancelled")
@@ -58,6 +66,22 @@ func Run(opt *Options) error {
 				fmt.Fprintf(os.Stderr, "ani: logout failed: %v\n", e)
 			}
 			continue // re-resolve: token gone → AnimeTosho
+		}
+		var srcSwitch errSourceSwitch
+		if errors.As(err, &srcSwitch) {
+			// Provider change from the `:` palette. Persist it and re-select the
+			// new provider's saved group/quality (mirrors main.go's startup
+			// selection) so a mid-session switch picks up the right filters, then
+			// re-resolve under the new provider.
+			opt.Source = srcSwitch.source
+			cfg := config.Load()
+			if srcSwitch.source == "anidb" {
+				opt.Group, opt.Quality = cfg.AnidbGroup, cfg.AnidbQuality
+			} else {
+				opt.Group, opt.Quality = cfg.Group, cfg.Quality
+			}
+			config.SaveSource(srcSwitch.source)
+			continue
 		}
 		if err != nil {
 			return err
@@ -141,7 +165,7 @@ func resolveMal(opt *Options, aired *tui.AiredCache) (int, *mal.Item, error) {
 		// flow is non-interactive (the release picker dry-runs separately).
 		return resolveMalDry(opt, source, query, load)
 	}
-	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetchFn(opt), aired, opt.Debug)
+	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetchFn(opt), aired, opt.Source, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -150,6 +174,9 @@ func resolveMal(opt *Options, aired *tui.AiredCache) (int, *mal.Item, error) {
 	}
 	if res != nil && res.Logout {
 		return 0, nil, errLogout
+	}
+	if res != nil && res.SourceSwitch != "" {
+		return 0, nil, errSourceSwitch{source: res.SourceSwitch}
 	}
 	if res == nil || res.Quit || res.Anime == nil {
 		return 0, nil, ErrCancelled
@@ -337,9 +364,12 @@ func resolveAnimetosho(opt *Options) (int, *mal.Item, error) {
 		}
 		return item.AnidbAID, &item, nil
 	}
-	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, opt.Debug)
+	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, opt.Source, opt.Debug)
 	if err != nil {
 		return 0, nil, err
+	}
+	if res != nil && res.SourceSwitch != "" {
+		return 0, nil, errSourceSwitch{source: res.SourceSwitch}
 	}
 	if res == nil || res.Quit || res.Anime == nil {
 		return 0, nil, ErrCancelled
@@ -375,9 +405,12 @@ func resolveAnidbNoLogin(opt *Options) (int, *mal.Item, error) {
 		fmt.Fprintf(os.Stderr, "DRY-RUN: auto-picked %q\n", item.Title)
 		return 0, &item, nil
 	}
-	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, opt.Debug)
+	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, opt.Source, opt.Debug)
 	if err != nil {
 		return 0, nil, err
+	}
+	if res != nil && res.SourceSwitch != "" {
+		return 0, nil, errSourceSwitch{source: res.SourceSwitch}
 	}
 	if res == nil || res.Quit || res.Anime == nil {
 		return 0, nil, ErrCancelled

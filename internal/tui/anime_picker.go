@@ -359,15 +359,16 @@ func (k animeOverlayKind) String() string {
 // season or "Later"/upcoming, where "Not in My List" works). Search is a
 // separate query-driven mode.
 type animePicker struct {
-	items   []mal.Item // loaded (unfiltered) for the current (source, query, season)
-	view    []mal.Item // filtered + sorted display slice
-	source  AnimeSource
-	query   string // "" = browse, non-empty = search
-	season  string // "All" (My List/search) | "Later" | "Summer 2026"
-	load    AnimeLoad
-	cache   *animeCache
-	loading bool
-	loadErr error // non-nil when the last load failed; rendered in the empty list
+	items    []mal.Item // loaded (unfiltered) for the current (source, query, season)
+	view     []mal.Item // filtered + sorted display slice
+	source   AnimeSource
+	query    string // "" = browse, non-empty = search
+	season   string // "All" (My List/search) | "Later" | "Summer 2026"
+	provider string // backend: "torrent" (default) | "anidb" — drives the palette's provider switch
+	load     AnimeLoad
+	cache    *animeCache
+	loading  bool
+	loadErr  error // non-nil when the last load failed; rendered in the empty list
 
 	// current real-world season (default + window anchor)
 	currentYear   int
@@ -378,6 +379,7 @@ type animePicker struct {
 
 	filter  AnimeFilter
 	overlay animeOverlay
+	palette Palette // `:` command menu (every action, fuzzy-searchable)
 
 	// Status-overlay state: offline session snapshot + best-effort username.
 	authStatus      mal.AuthStatusResult
@@ -637,6 +639,9 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.palette.Active() {
+			return m.handlePaletteKey(msg)
+		}
 		if m.overlay.active() {
 			return m.handleOverlayKey(msg)
 		}
@@ -876,6 +881,36 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.fixScroll()
 			return m, m.focusCmd()
 		}
+	case "ctrl+u":
+		if len(m.view) > 0 {
+			m.cursor -= m.pageSize()
+			if m.cursor < 0 {
+				m.cursor = 0
+			}
+			m.fixScroll()
+			return m, m.focusCmd()
+		}
+	case "ctrl+d":
+		if len(m.view) > 0 {
+			m.cursor += m.pageSize()
+			if m.cursor >= len(m.view) {
+				m.cursor = len(m.view) - 1
+			}
+			m.fixScroll()
+			return m, m.focusCmd()
+		}
+	case "home":
+		if len(m.view) > 0 {
+			m.cursor = 0
+			m.fixScroll()
+			return m, m.focusCmd()
+		}
+	case "end":
+		if len(m.view) > 0 {
+			m.cursor = len(m.view) - 1
+			m.fixScroll()
+			return m, m.focusCmd()
+		}
 	case "t":
 		m.overlay.open(animeOverlayStatus, m.statusOptions(), m.filter.Status)
 		return m, nil
@@ -909,26 +944,17 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filter.Filtering = true
 		m.filter.FuzzyText = ""
 		return m, nil
+	case ":":
+		// Command palette: every anime-picker action, fuzzy-searchable.
+		m.palette.Open(m.animeCommands())
+		return m, nil
 	case "L":
 		// Re-run the MAL browser OAuth flow (handled by app.Run after the TUI exits).
 		m.result.Relogin = true
 		return m, tea.Batch(tea.Quit, m.quitCmd())
 	case "a":
 		// Account/status overlay: offline snapshot now, best-effort name async.
-		st, _ := mal.AuthStatus()
-		m.authStatus = st
-		m.authName = ""
-		m.authNameFailed = false
-		// Only fetch the name when there's a session — otherwise WhoAmI would run
-		// the browser OAuth flow (Client() launches it when no token is saved).
-		m.authNamePending = st.LoggedIn
-		m.overlay.kind = animeOverlayAuth
-		m.overlay.items = nil
-		m.overlay.cursor = 0
-		if st.LoggedIn {
-			return m, m.fetchAuthNameCmd()
-		}
-		return m, nil
+		return m, m.openAccountModal()
 	case "enter":
 		if it := m.currentItemCopy(); it != nil {
 			// Carry the cached aired count so the release picker reuses it
@@ -937,6 +963,221 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.result.Anime = it
 			return m, tea.Batch(tea.Quit, m.quitCmd())
 		}
+	}
+	return m, nil
+}
+
+// openAccountModal opens the read-only account/status overlay: an offline
+// snapshot now plus a best-effort username fetch. Shared by the `a` key and the
+// palette's "Show account" command.
+func (m *animePicker) openAccountModal() tea.Cmd {
+	st, _ := mal.AuthStatus()
+	m.authStatus = st
+	m.authName = ""
+	m.authNameFailed = false
+	// Only fetch the name when there's a session — otherwise WhoAmI would run
+	// the browser OAuth flow (Client() launches it when no token is saved).
+	m.authNamePending = st.LoggedIn
+	m.overlay.kind = animeOverlayAuth
+	m.overlay.items = nil
+	m.overlay.cursor = 0
+	if st.LoggedIn {
+		return m.fetchAuthNameCmd()
+	}
+	return nil
+}
+
+// handlePaletteKey drives the `:` command menu. On a selection it runs the
+// chosen intent via applyCommand; Esc/Ctrl-C just close.
+func (m *animePicker) handlePaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	done, sel := m.palette.HandleKey(msg)
+	if done && sel {
+		return m.applyCommand(m.palette.Selected().Intent)
+	}
+	return m, nil
+}
+
+// animeCommands builds the palette's command list from live state: sort, the
+// status filter, source/provider switching, per-anime actions (on the focused
+// item when a writer is wired), account, and quit. Rebuilt each open so it
+// reflects the current item's status, the current source, and the provider.
+func (m *animePicker) animeCommands() []Command {
+	var cmds []Command
+
+	for _, o := range sortOptions {
+		cmds = append(cmds, Command{Category: "Sort", Title: "Sort by " + o.label, Intent: "sort:" + o.value, Keywords: "order"})
+	}
+
+	cmds = append(cmds, Command{Category: "Filter", Title: "Filter list…", Intent: "filter", Keywords: "search fuzzy"})
+	for _, s := range m.statusOptions() {
+		cmds = append(cmds, Command{Category: "Filter", Title: "Status: " + s, Intent: "statusfilter:" + s, Keywords: "list"})
+	}
+
+	if m.query == "" { // search is query-driven; source/season only apply to browse
+		if m.source == SourceList {
+			cmds = append(cmds, Command{Category: "Source", Title: "Switch to Season", Intent: "source:season", Keywords: "browse current"})
+		} else {
+			cmds = append(cmds, Command{Category: "Source", Title: "Switch to My List", Intent: "source:mylist", Keywords: "browse"})
+		}
+		if m.source == SourceSeason {
+			cmds = append(cmds, Command{Category: "Source", Title: "Change season…", Intent: "season", Keywords: "year cour"})
+		}
+	}
+
+	torrentActive := m.provider != "anidb"
+	cmds = append(cmds,
+		Command{Category: "Provider", Title: providerLabel("torrent", torrentActive), Intent: "provider:torrent", Keywords: "animetosho backend"},
+		Command{Category: "Provider", Title: providerLabel("anidb", !torrentActive), Intent: "provider:anidb", Keywords: "stream backend"},
+	)
+
+	// Per-anime actions target the focused row (same as the Space menu); only
+	// when a MAL writer is wired (nil in the AnimeTosho fallback).
+	if m.applyStatus != nil {
+		if it := m.currentItemCopy(); it != nil && it.MalID != 0 {
+			for _, o := range actionOptions {
+				if o.score || o.action.Remove {
+					continue
+				}
+				if o.action.Status == it.ListStatus { // a no-op: hide
+					continue
+				}
+				cmds = append(cmds, Command{Category: "Actions", Title: "Set status: " + o.display, Intent: "statusset:" + o.action.Status, Keywords: "list"})
+			}
+			if it.ListStatus != "" {
+				for n := 1; n <= 10; n++ {
+					cmds = append(cmds, Command{Category: "Actions", Title: fmt.Sprintf("Rate %d", n), Intent: fmt.Sprintf("score:%d", n), Keywords: "rating"})
+				}
+				cmds = append(cmds,
+					Command{Category: "Actions", Title: "Clear score", Intent: "score:0", Keywords: "rating unrate"},
+					Command{Category: "Actions", Title: "Set episodes watched…", Intent: "setepisode", Keywords: "progress"},
+					Command{Category: "Actions", Title: "Remove from My List…", Intent: "remove", Keywords: "delete"},
+				)
+			}
+			cmds = append(cmds, Command{Category: "Actions", Title: "Open on MAL", Intent: "web", Keywords: "browser url"})
+		}
+	}
+
+	cmds = append(cmds,
+		Command{Category: "Account", Title: "Show account", Intent: "account", Keywords: "login status"},
+		Command{Category: "Account", Title: "Re-login (MAL)", Intent: "relogin", Keywords: "auth oauth"},
+		Command{Category: "Account", Title: "Log out", Intent: "logout", Keywords: "auth sign out"},
+		Command{Category: "View", Title: "Quit", Intent: "quit", Keywords: "exit"},
+	)
+	return cmds
+}
+
+// providerLabel renders a provider menu row, marking the active one.
+func providerLabel(name string, active bool) string {
+	prefix := "Use "
+	if active {
+		prefix = "● " // active marker (● = current)
+	}
+	if name == "anidb" {
+		return prefix + "anidb.app (stream)"
+	}
+	return prefix + "AnimeTosho (torrent)"
+}
+
+// applyCommand runs a palette intent, reusing the same mutators/callbacks and
+// Result flags as the direct keys and the Space menu. statusset:/score: apply
+// directly (the search-and-choose is the confirmation); remove keeps its y/n
+// modal. provider: sets Result.SourceSwitch and quits (app.Run re-resolves).
+func (m *animePicker) applyCommand(intent string) (tea.Model, tea.Cmd) {
+	switch {
+	case intent == "quit":
+		m.result.Quit = true
+		return m, tea.Batch(tea.Quit, m.quitCmd())
+	case intent == "relogin":
+		m.result.Relogin = true
+		return m, tea.Batch(tea.Quit, m.quitCmd())
+	case intent == "logout":
+		m.result.Logout = true
+		return m, tea.Batch(tea.Quit, m.quitCmd())
+	case intent == "account":
+		return m, m.openAccountModal()
+	case intent == "filter":
+		m.filter.Filtering = true
+		m.filter.FuzzyText = ""
+		return m, nil
+	case intent == "season":
+		if m.query == "" && m.source == SourceSeason {
+			m.openSeasonOverlay()
+		}
+		return m, nil
+	case intent == "source:mylist", intent == "source:season":
+		if m.query != "" {
+			return m, nil
+		}
+		if intent == "source:mylist" {
+			m.source = SourceList
+		} else {
+			m.source = SourceSeason
+		}
+		m.season = m.defaultSeason()
+		m.filter.Status = m.defaultStatus()
+		m.loading = true
+		m.cursor = 0
+		m.topItem = 0
+		return m, m.loadCmd(m.source, m.query, m.season)
+	case strings.HasPrefix(intent, "sort:"):
+		m.filter.Sort = strings.TrimPrefix(intent, "sort:")
+		m.applyFilter()
+		return m, nil
+	case strings.HasPrefix(intent, "statusfilter:"):
+		m.filter.Status = strings.TrimPrefix(intent, "statusfilter:")
+		m.applyFilter()
+		return m, nil
+	case strings.HasPrefix(intent, "statusset:"):
+		it := m.currentItemCopy()
+		if it == nil || it.MalID == 0 || m.applyStatus == nil {
+			return m, nil
+		}
+		return m, m.statusApplyCmd(it.MalID, it.WatchedEps, StatusAction{Status: strings.TrimPrefix(intent, "statusset:")})
+	case strings.HasPrefix(intent, "score:"):
+		it := m.currentItemCopy()
+		if it == nil || it.MalID == 0 || m.applyScore == nil {
+			return m, nil
+		}
+		n, err := strconv.Atoi(strings.TrimPrefix(intent, "score:"))
+		if err != nil || n < 0 || n > 10 {
+			return m, nil
+		}
+		return m, m.scoreApplyCmd(it.MalID, n)
+	case intent == "setepisode":
+		it := m.currentItemCopy()
+		if it == nil || it.MalID == 0 || m.applyWatched == nil {
+			return m, nil
+		}
+		m.openEpisodeOverlay(it.WatchedEps)
+		return m, nil
+	case intent == "web":
+		it := m.currentItemCopy()
+		if it == nil || it.MalID == 0 {
+			return m, nil
+		}
+		mal.OpenBrowser("https://myanimelist.net/anime/" + strconv.Itoa(it.MalID))
+		return m, nil
+	case intent == "remove":
+		it := m.currentItemCopy()
+		if it == nil || it.MalID == 0 || m.applyStatus == nil {
+			return m, nil
+		}
+		m.overlay.kind = animeOverlayConfirm
+		m.overlay.items = nil
+		m.overlay.cursor = 0
+		m.overlay.text = fmt.Sprintf("Remove %q from your list?", it.Title)
+		m.overlay.pendingAction = StatusAction{Remove: true}
+		return m, nil
+	case strings.HasPrefix(intent, "provider:"):
+		src := strings.TrimPrefix(intent, "provider:")
+		if src != "torrent" && src != "anidb" {
+			return m, nil
+		}
+		if src == m.provider { // already active: no-op
+			return m, nil
+		}
+		m.result.SourceSwitch = src
+		return m, tea.Batch(tea.Quit, m.quitCmd())
 	}
 	return m, nil
 }
@@ -1609,9 +1850,11 @@ func (m *animePicker) View() string {
 		return m.renderAuthStatusModal()
 	}
 
-	// ---- LEFT pane (list / overlay) ----
+	// ---- LEFT pane (list / overlay / palette) ----
 	var leftContent string
-	if m.overlay.active() {
+	if m.palette.Active() {
+		leftContent = m.palette.View(m.listWidth-2, m.pageSize())
+	} else if m.overlay.active() {
 		if m.overlay.kind == animeOverlayEpisode {
 			// Number-input overlay (text prompt, not a list).
 			title := TitleStyle.Render("Episodes watched (Enter = set, Esc = back)")
@@ -1648,7 +1891,7 @@ func (m *animePicker) View() string {
 
 	header := m.headerText()
 	badges := m.renderBadges()
-	help := HelpStyle.Render("j/k nav  Tab source  t status  e season  s sort  Space set  / filter  Enter select  L login  a account  q quit")
+	help := HelpStyle.Render("j/k move  Tab source  Enter select  / filter  : command  q quit")
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
 	return lipgloss.JoinVertical(lipgloss.Left, header, badges, panes, help)
 }

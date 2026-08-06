@@ -87,6 +87,15 @@ func SaveFilters(group, quality, sort, source string) {
 	save(cfg)
 }
 
+// SaveSource persists the active provider ("torrent"/"anidb") to config.json —
+// the `:` palette's "Use …" commands call this so switching never needs a manual
+// config edit.
+func SaveSource(source string) {
+	cfg := Load()
+	cfg.Source = source
+	save(cfg)
+}
+
 // AnidbOverride returns a user-saved AniDB id for malID, if one was set.
 func AnidbOverride(malID int) (int, bool) {
 	cfg := Load()
