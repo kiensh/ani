@@ -453,33 +453,9 @@ func streamLoop(opt *Options, item *mal.Item, aired *tui.AiredCache) error {
 	if err != nil {
 		return fmt.Errorf("anidb: resolve %q: %w", item.Title, err)
 	}
-	// anidb uses cumulative episode numbering (e.g. Slime S4 = eps 73–88). Compute
-	// a default-episode function that recomputes each play-loop iteration from the
-	// CURRENT item.WatchedEps (updated by MalWriteBack after each play), so the
-	// picker advances to watched+1 after watching. Falls back to the latest
-	// available when watched+1 doesn't exist on anidb yet.
-	defaultEpFn := func(*mal.Item) int { return 0 }
-	if eps, e := anidb.Episodes(show.ID); e == nil && len(eps) > 0 {
-		offset := anidb.EpisodeOffset(eps)
-		available := map[int]bool{}
-		maxAvail := 0
-		for _, ep := range eps {
-			if ep.Number >= 1 && ep.Number == float64(int(ep.Number)) && !ep.Filler {
-				malEp := int(ep.Number - offset)
-				available[malEp] = true
-				if malEp > maxAvail {
-					maxAvail = malEp
-				}
-			}
-		}
-		defaultEpFn = func(item *mal.Item) int {
-			malDefault := tui.DefaultEpisode(item.WatchedEps, item.TotalEps)
-			if malDefault > 0 && available[malDefault] {
-				return malDefault
-			}
-			return maxAvail
-		}
-	}
+	// No default-episode override: the picker advances to watched+1 itself
+	// (anidb's cumulative numbering is handled inside FetchReleases) and shows
+	// an empty list when anidb doesn't have that episode yet.
 	fetch := func(ep int) []*playable.Release {
 		if ep == 0 {
 			ep = 1
@@ -491,7 +467,7 @@ func streamLoop(opt *Options, item *mal.Item, aired *tui.AiredCache) error {
 		}
 		return rels
 	}
-	return playLoop(opt, item, fetch, false, aired, defaultEpFn)
+	return playLoop(opt, item, fetch, false, aired, func(*mal.Item) int { return 0 })
 }
 
 // latestLoop is the no-arg AnimeTosho landing screen: the newest uploads in one

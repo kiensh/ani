@@ -20,10 +20,12 @@ import (
 )
 
 const (
-	baseURL   = "https://anidb.app"
 	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 	timeout   = 20 * time.Second
 )
+
+// baseURL is the site root (a var so tests can point it at httptest).
+var baseURL = "https://anidb.app"
 
 // Pooled client: Go's DefaultTransport reuses only ~2 idle conns/host. A pooled
 // transport lets the aired-count prefetch (one search+episodes per airing anime)
@@ -224,9 +226,10 @@ func FetchReleases(showID string, episode int) ([]*playable.Release, error) {
 	// and anidb cumulative numbers: anidb_ep = MAL_ep + offset.
 	offset := EpisodeOffset(eps)
 	anidbEp := float64(episode) + offset
-	// Find the episode ID matching the anidb episode number. If not found
-	// (user is ahead of what anidb has, or numbering mismatch), fall back to the
-	// latest available episode so the user sees content rather than an empty list.
+	// Find the episode ID matching the anidb episode number. If not listed
+	// (not yet aired / numbering gap): return no releases. The picker shows an
+	// empty list; substituting another episode would mislabel its streams and
+	// corrupt MAL write-back (watched = pick.Episode).
 	var epID int
 	for _, e := range eps {
 		if e.Number == anidbEp {
@@ -235,15 +238,10 @@ func FetchReleases(showID string, episode int) ([]*playable.Release, error) {
 		}
 	}
 	if epID == 0 {
-		last := eps[len(eps)-1]
-		epID = last.ID
-		anidbEp = last.Number
-		dbg("anidb: episode %d (anidb %g) not available; falling back to anidb ep %g\n",
-			episode, float64(episode)+offset, anidbEp)
+		dbg("anidb: episode %d (anidb %g) not available\n", episode, anidbEp)
+		return nil, nil
 	}
-	// Convert back to MAL per-season numbering for the playable.Release, so MAL
-	// write-back writes the correct per-season episode number.
-	malEp := int(anidbEp - offset)
+	malEp := episode
 
 	// Get the embed URLs for this episode's languages.
 	u := baseURL + "/api/frontend/episode/" + strconv.Itoa(epID) + "/languages"
