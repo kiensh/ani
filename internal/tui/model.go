@@ -47,8 +47,10 @@ type Result struct {
 // latestEpisode backs the "watched/aired/total" display for the focused airing
 // anime (nil disables); latestEpisodePrefetch is the fast-only background variant
 // that pages the aired-episode prefetch (nil disables aired prefetch; covers are
-// still paged). Returns the selected anime, or Quit=true on cancel.
-func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) float64, latestEpisodePrefetch func(*mal.Item) float64, aired *AiredCache, provider string, debug bool) (*Result, error) {
+// still paged). state carries the session's picker options/cursor/list cache
+// across re-entries (nil = fresh defaults). Returns the selected anime, or
+// Quit=true on cancel.
+func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) float64, latestEpisodePrefetch func(*mal.Item) float64, aired *AiredCache, provider string, state *AnimeState, debug bool) (*Result, error) {
 	if load == nil {
 		return &Result{Quit: true}, nil
 	}
@@ -57,12 +59,14 @@ func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 	if aired != nil {
 		m.aired = aired // reuse the session cache across Esc-from-releases
 	}
+	m.restoreState(state) // previous options/cursor + list cache (nil-safe)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
 	if err != nil {
 		return nil, err
 	}
 	if ap, ok := final.(*animePicker); ok {
+		ap.saveState(state) // on every exit — keep options/cursor for re-entry
 		return ap.result, nil
 	}
 	return &Result{Quit: true}, nil

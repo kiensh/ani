@@ -52,9 +52,10 @@ const latestUploadsAID = -1
 // anime selection.
 func Run(opt *Options) error {
 	aired := tui.NewAiredCache()       // session-scoped; shared across the anime + release pickers
+	animeState := tui.NewAnimeState() // session-scoped; anime picker's options/cursor/cache survive Esc-back
 	go mal.WarmAidResolvers(opt.Debug) // overlap the one-time Fribb/AniDB map load with the first MAL fetch
 	for {
-		aid, item, err := resolve(opt, aired)
+		aid, item, err := resolve(opt, aired, animeState)
 		if errors.Is(err, errRelogin) {
 			if e := mal.Login(opt.Debug); e != nil {
 				fmt.Fprintf(os.Stderr, "ani: login failed: %v\n", e)
@@ -99,14 +100,14 @@ func Run(opt *Options) error {
 // resolve picks an anime and returns its AniDB id + item. A numeric query is a
 // direct AniDB id (no MAL); otherwise MAL when logged in, else AnimeTosho
 // (series search by name, or latest uploads when no query).
-func resolve(opt *Options, aired *tui.AiredCache) (int, *mal.Item, error) {
+func resolve(opt *Options, aired *tui.AiredCache, animeState *tui.AnimeState) (int, *mal.Item, error) {
 	if n, perr := strconv.Atoi(opt.Query); perr == nil && n > 0 {
 		return resolveAnidb(n)
 	}
 	if mal.LoggedIn() {
-		return resolveMal(opt, aired)
+		return resolveMal(opt, aired, animeState)
 	}
-	return resolveAnimetosho(opt)
+	return resolveAnimetosho(opt, animeState)
 }
 
 // resolveAnidb builds a minimal item from the series metadata (no MAL).
@@ -121,7 +122,7 @@ func resolveAnidb(aid int) (int, *mal.Item, error) {
 // resolveMal runs the anime picker over MAL and resolves the AniDB id from the
 // picked item. Browse opens on Season (current); Tab → My List. A non-empty
 // query means search.
-func resolveMal(opt *Options, aired *tui.AiredCache) (int, *mal.Item, error) {
+func resolveMal(opt *Options, aired *tui.AiredCache, animeState *tui.AnimeState) (int, *mal.Item, error) {
 	query := opt.Query
 	source := tui.SourceSeason // default browse source
 	load := func(src tui.AnimeSource, q, season string) ([]mal.Item, error) {
@@ -165,7 +166,7 @@ func resolveMal(opt *Options, aired *tui.AiredCache) (int, *mal.Item, error) {
 		// flow is non-interactive (the release picker dry-runs separately).
 		return resolveMalDry(opt, source, query, load)
 	}
-	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetchFn(opt), aired, opt.Source, opt.Debug)
+	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetchFn(opt), aired, opt.Source, animeState, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -339,9 +340,9 @@ func resolveAnidbManual(item *mal.Item, opt *Options) int {
 // resolveAnimetosho is the no-MAL path. A text query searches the provider's
 // series and lets the user pick; no query returns the latest-uploads sentinel
 // (animetosho only — anidb has no equivalent).
-func resolveAnimetosho(opt *Options) (int, *mal.Item, error) {
+func resolveAnimetosho(opt *Options, animeState *tui.AnimeState) (int, *mal.Item, error) {
 	if opt.Source == "anidb" {
-		return resolveAnidbNoLogin(opt)
+		return resolveAnidbNoLogin(opt, animeState)
 	}
 	if opt.Query == "" {
 		return latestUploadsAID, &mal.Item{Title: "Latest uploads"}, nil
@@ -364,7 +365,7 @@ func resolveAnimetosho(opt *Options) (int, *mal.Item, error) {
 		}
 		return item.AnidbAID, &item, nil
 	}
-	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, opt.Source, opt.Debug)
+	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, opt.Source, animeState, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -384,7 +385,7 @@ func resolveAnimetosho(opt *Options) (int, *mal.Item, error) {
 // resolveAnidbNoLogin is the no-MAL anidb path: search anidb.app by query, let the
 // user pick, then return the item (aid=0 — anidb resolves by title in streamLoop).
 // Unlike animetosho there's no "latest uploads" landing, so a query is required.
-func resolveAnidbNoLogin(opt *Options) (int, *mal.Item, error) {
+func resolveAnidbNoLogin(opt *Options, animeState *tui.AnimeState) (int, *mal.Item, error) {
 	if opt.Query == "" {
 		return 0, nil, fmt.Errorf("anidb mode requires a search query (run: ani <title>)")
 	}
@@ -405,7 +406,7 @@ func resolveAnidbNoLogin(opt *Options) (int, *mal.Item, error) {
 		fmt.Fprintf(os.Stderr, "DRY-RUN: auto-picked %q\n", item.Title)
 		return 0, &item, nil
 	}
-	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, opt.Source, opt.Debug)
+	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, opt.Source, animeState, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}

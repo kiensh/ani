@@ -1448,3 +1448,143 @@ func TestAuthOverlayKeys(t *testing.T) {
 		t.Fatal("expected result.Relogin on global 'L'")
 	}
 }
+
+// ---- anime session state (AnimeState) ----
+
+// TestAnimeStateRestoreOptions: restoreState seeds source/season/status/sort,
+// and unknown or inapplicable values keep their defaults (bogus sort; a status
+// the restored source's overlay doesn't offer).
+func TestAnimeStateRestoreOptions(t *testing.T) {
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(nil), nil, nil, nil, nil, nil, false)
+	st := &AnimeState{
+		restored: true,
+		Source: SourceList,
+		Season: "Winter 2020",
+		Status: "Watching",
+		Sort:   "score",
+	}
+	m.restoreState(st)
+	if m.source != SourceList {
+		t.Errorf("source = %v, want SourceList", m.source)
+	}
+	if m.filter.Status != "Watching" {
+		t.Errorf("status = %q, want Watching", m.filter.Status)
+	}
+	if m.filter.Sort != "score" {
+		t.Errorf("sort = %q, want score", m.filter.Sort)
+	}
+	// Season applies to SourceSeason only — restoring SourceList forces "All".
+	if m.season != mal.SeasonAll {
+		t.Errorf("season = %q, want %q (season is SourceSeason-only)", m.season, mal.SeasonAll)
+	}
+
+	// Invalid values fall back to defaults.
+	m2 := newAnimePicker(SourceSeason, "", animeLoadAll(nil), nil, nil, nil, nil, nil, false)
+	m2.restoreState(&AnimeState{restored: true, Source: SourceList, Status: "Not in My List", Sort: "bogus"})
+	if m2.filter.Status == "Not in My List" {
+		t.Errorf("status %q must not restore under SourceList (not in statusOptionsMyList)", m2.filter.Status)
+	}
+	if m2.filter.Sort != m2.defaultSort() {
+		t.Errorf("sort = %q, want default %q for unknown value", m2.filter.Sort, m2.defaultSort())
+	}
+
+	// nil state is a no-op.
+	m3 := newAnimePicker(SourceSeason, "", animeLoadAll(nil), nil, nil, nil, nil, nil, false)
+	m3.restoreState(nil)
+	if m3.filter.Sort != m3.defaultSort() || m3.pendingCursor != -1 {
+		t.Fatal("nil state must leave defaults untouched")
+	}
+}
+
+// TestAnimeStateCursorRestoredAfterLoad: the session cursor applies to the
+// first load only; a later load (Tab/season switch) resets it to 0.
+func TestAnimeStateCursorRestoredAfterLoad(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, Title: "A"}, {MalID: 2, Title: "B"}, {MalID: 3, Title: "C"},
+	}
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil, nil, false)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m.restoreState(&AnimeState{restored: true, Cursor: 2})
+
+	model, _ := m.Update(itemsLoadedMsg{items: items, source: m.source, query: m.query, season: m.season})
+	m = model.(*animePicker)
+	if m.cursor != 2 {
+		t.Fatalf("cursor after first load = %d, want 2 (restored)", m.cursor)
+	}
+	if m.pendingCursor != -1 {
+		t.Fatalf("pendingCursor = %d after apply, want -1 (consumed)", m.pendingCursor)
+	}
+
+	// Second load (e.g. season change) resets to top.
+	model, _ = m.Update(itemsLoadedMsg{items: items, source: m.source, query: m.query, season: m.season})
+	m = model.(*animePicker)
+	if m.cursor != 0 {
+		t.Fatalf("cursor after second load = %d, want 0 (reset)", m.cursor)
+	}
+
+	// A cursor past the end clamps to the last row.
+	m2 := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil, nil, false)
+	m2.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m2.restoreState(&AnimeState{restored: true, Cursor: 99})
+	model, _ = m2.Update(itemsLoadedMsg{items: items, source: m2.source, query: m2.query, season: m2.season})
+	if got := model.(*animePicker).cursor; got != 2 {
+		t.Fatalf("cursor past end = %d, want clamp to 2", got)
+	}
+}
+
+// TestAnimeStateRoundTripSharesCache: saveState → restoreState hands the list
+// cache to the next picker, so re-entry is served without a second load.
+func TestAnimeStateRoundTripSharesCache(t *testing.T) {
+	items := []mal.Item{{MalID: 1, Title: "A"}}
+	loads := 0
+	load := AnimeLoad(func(AnimeSource, string, string) ([]mal.Item, error) {
+		loads++
+		return items, nil
+	})
+
+	a := newAnimePicker(SourceSeason, "", load, nil, nil, nil, nil, nil, false)
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	if cmd := a.Init(); cmd != nil { // first picker: real load
+		cmd()
+	}
+	if loads != 1 {
+		t.Fatalf("setup: expected 1 load, got %d", loads)
+	}
+
+	st := NewAnimeState()
+	a.saveState(st)
+	if st.cache == nil || st.cache != a.cache {
+		t.Fatal("saveState must snapshot the picker's cache")
+	}
+
+	b := newAnimePicker(SourceSeason, "", load, nil, nil, nil, nil, nil, false)
+	b.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	b.restoreState(st)
+	if cmd := b.Init(); cmd != nil { // second picker: served from cache
+		cmd()
+	}
+	if loads != 1 {
+		t.Fatalf("re-entry re-fetched the list: %d loads, want 1 (shared cache)", loads)
+	}
+	if b.filter.Sort != a.filter.Sort || b.filter.Status != a.filter.Status {
+		t.Fatal("restore must carry the saved options")
+	}
+}
+
+// TestAnimeStateFreshIsNoOp: a never-saved AnimeState (fresh process, first
+// open) must not restore anything — in particular the zero-value Source must
+// not flip the picker off its default Season browse.
+func TestAnimeStateFreshIsNoOp(t *testing.T) {
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(nil), nil, nil, nil, nil, nil, false)
+	wantSource, wantSeason, wantStatus, wantSort := m.source, m.season, m.filter.Status, m.filter.Sort
+	m.restoreState(NewAnimeState())
+	if m.source != wantSource || m.season != wantSeason {
+		t.Fatalf("fresh state changed source/season: %v/%q, want %v/%q", m.source, m.season, wantSource, wantSeason)
+	}
+	if m.filter.Status != wantStatus || m.filter.Sort != wantSort {
+		t.Fatalf("fresh state changed status/sort: %q/%q, want %q/%q", m.filter.Status, m.filter.Sort, wantStatus, wantSort)
+	}
+	if m.pendingCursor != -1 {
+		t.Fatalf("fresh state set pendingCursor=%d, want -1", m.pendingCursor)
+	}
+}

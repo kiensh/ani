@@ -417,7 +417,10 @@ type animePicker struct {
 
 	cursor  int
 	topItem int
-	debug   bool
+	// pendingCursor is a session-restored cursor waiting for the first
+	// applyLoaded (the list must exist before it can be applied); -1 = none.
+	pendingCursor int
+	debug         bool
 
 	cover        *CoverCache
 	coverText    string
@@ -456,6 +459,88 @@ func (c *animeCache) put(key string, items []mal.Item) {
 	c.m[key] = items
 }
 
+// AnimeState is the anime picker's session-scoped UI state (options, cursor,
+// and the per-(source,query,season) list cache), shared across re-entries so
+// backing out of the release picker returns where the user left off.
+// Deliberately NOT persisted: a new process starts on defaults.
+type AnimeState struct {
+	Source AnimeSource
+	Season string
+	Status string // filter.Status label
+	Sort   string // filter.Sort value
+	Cursor int
+	// restored marks a state that has been populated by saveState. Until the
+	// first save, restoreState must not apply anything (the zero values mean
+	// "never used", not "use these").
+	restored bool
+	cache    *animeCache
+}
+
+// NewAnimeState returns an empty session state (fresh cache). Source starts at
+// the browse default (Season) — AnimeSource's zero value is SourceList, which
+// would otherwise hijack restoreState on a fresh process's first open.
+func NewAnimeState() *AnimeState {
+	return &AnimeState{Source: SourceSeason, cache: &animeCache{m: map[string][]mal.Item{}}}
+}
+
+// restoreState seeds a picker from a previous session's state, overriding the
+// per-source defaults chosen by newAnimePicker. Unknown/inapplicable values
+// (nil state, bogus sort, a status the restored source doesn't offer) keep
+// their defaults; the cursor is applied to the first load only (applyLoaded).
+func (m *animePicker) restoreState(st *AnimeState) {
+	if st == nil || !st.restored {
+		return
+	}
+	if st.cache != nil {
+		m.cache = st.cache // re-entry is instant: same items, same order
+	}
+	if m.query == "" && (st.Source == SourceList || st.Source == SourceSeason) && st.Source != m.source {
+		// Mirrors the Tab handler: a source change recomputes its derived
+		// defaults (season, status) before the saved values are validated on top.
+		m.source = st.Source
+		m.season = m.defaultSeason()
+		m.filter.Status = m.defaultStatus()
+	}
+	if m.source == SourceSeason && m.query == "" && st.Season != "" {
+		m.season = st.Season
+	}
+	for _, s := range m.statusOptions() {
+		if st.Status == s {
+			m.filter.Status = st.Status
+			break
+		}
+	}
+	if sortKnown(st.Sort) {
+		m.filter.Sort = st.Sort
+	}
+	m.pendingCursor = st.Cursor
+}
+
+// saveState snapshots the picker's options, cursor, and list cache for the
+// next restoreState (same session).
+func (m *animePicker) saveState(st *AnimeState) {
+	if st == nil {
+		return
+	}
+	st.Source = m.source
+	st.Season = m.season
+	st.Status = m.filter.Status
+	st.Sort = m.filter.Sort
+	st.Cursor = m.cursor
+	st.cache = m.cache
+	st.restored = true
+}
+
+// sortKnown reports whether value is one of sortOptions' values.
+func sortKnown(value string) bool {
+	for _, o := range sortOptions {
+		if o.value == value {
+			return true
+		}
+	}
+	return false
+}
+
 func animeCacheKey(source AnimeSource, query, season string) string {
 	return fmt.Sprintf("%d|%s|%s", source, query, season)
 }
@@ -476,6 +561,7 @@ func newAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 		coverHeights:          map[int]int{},
 		cache:                 &animeCache{m: map[string][]mal.Item{}},
 		loading:               true,
+		pendingCursor:         -1,
 		currentYear:           y,
 		currentSeason:         s,
 		currentLabel:          label,
@@ -665,6 +751,13 @@ func (m *animePicker) applyLoaded(msg itemsLoadedMsg) (tea.Model, tea.Cmd) {
 	m.topItem = 0
 	m.loadErr = msg.err
 	m.applyFilter()
+	// Session-restored cursor: applied to the first load only (later loads —
+	// Tab/season switches — keep the reset-to-0 above).
+	if m.pendingCursor >= 0 && len(m.view) > 0 {
+		m.cursor = min(m.pendingCursor, len(m.view)-1)
+		m.fixScroll()
+	}
+	m.pendingCursor = -1
 	if msg.err != nil {
 		// Nothing to prefetch; the empty list renders the error line instead.
 		return m, nil
