@@ -459,10 +459,11 @@ func (c *animeCache) put(key string, items []mal.Item) {
 	c.m[key] = items
 }
 
-// AnimeState is the anime picker's session-scoped UI state (options, cursor,
-// and the per-(source,query,season) list cache), shared across re-entries so
-// backing out of the release picker returns where the user left off.
-// Deliberately NOT persisted: a new process starts on defaults.
+// AnimeState is the anime picker's session-scoped UI state (options, cursor),
+// shared across re-entries so backing out of the release picker returns where
+// the user left off. The item list itself is deliberately NOT kept: it must
+// re-fetch on re-entry so MAL updates (watched counts, statuses) show fresh.
+// Also deliberately NOT persisted: a new process starts on defaults.
 type AnimeState struct {
 	Source AnimeSource
 	Season string
@@ -473,14 +474,13 @@ type AnimeState struct {
 	// first save, restoreState must not apply anything (the zero values mean
 	// "never used", not "use these").
 	restored bool
-	cache    *animeCache
 }
 
-// NewAnimeState returns an empty session state (fresh cache). Source starts at
-// the browse default (Season) — AnimeSource's zero value is SourceList, which
-// would otherwise hijack restoreState on a fresh process's first open.
+// NewAnimeState returns an empty session state. Source starts at the browse
+// default (Season) — AnimeSource's zero value is SourceList, which would
+// otherwise hijack restoreState on a fresh process's first open.
 func NewAnimeState() *AnimeState {
-	return &AnimeState{Source: SourceSeason, cache: &animeCache{m: map[string][]mal.Item{}}}
+	return &AnimeState{Source: SourceSeason}
 }
 
 // restoreState seeds a picker from a previous session's state, overriding the
@@ -490,9 +490,6 @@ func NewAnimeState() *AnimeState {
 func (m *animePicker) restoreState(st *AnimeState) {
 	if st == nil || !st.restored {
 		return
-	}
-	if st.cache != nil {
-		m.cache = st.cache // re-entry is instant: same items, same order
 	}
 	if m.query == "" && (st.Source == SourceList || st.Source == SourceSeason) && st.Source != m.source {
 		// Mirrors the Tab handler: a source change recomputes its derived
@@ -527,7 +524,6 @@ func (m *animePicker) saveState(st *AnimeState) {
 	st.Status = m.filter.Status
 	st.Sort = m.filter.Sort
 	st.Cursor = m.cursor
-	st.cache = m.cache
 	st.restored = true
 }
 

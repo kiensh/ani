@@ -1532,14 +1532,15 @@ func TestAnimeStateCursorRestoredAfterLoad(t *testing.T) {
 	}
 }
 
-// TestAnimeStateRoundTripSharesCache: saveState → restoreState hands the list
-// cache to the next picker, so re-entry is served without a second load.
-func TestAnimeStateRoundTripSharesCache(t *testing.T) {
-	items := []mal.Item{{MalID: 1, Title: "A"}}
+// TestAnimeStateRoundTripRefetches: saveState → restoreState carries the
+// options, but NOT the list cache — re-entry must re-fetch so MAL updates made
+// while watching (watched counts, statuses) are reflected, not frozen.
+func TestAnimeStateRoundTripRefetches(t *testing.T) {
+	watched := 3
 	loads := 0
 	load := AnimeLoad(func(AnimeSource, string, string) ([]mal.Item, error) {
 		loads++
-		return items, nil
+		return []mal.Item{{MalID: 1, Title: "A", WatchedEps: watched}}, nil
 	})
 
 	a := newAnimePicker(SourceSeason, "", load, nil, nil, nil, nil, nil, false)
@@ -1553,18 +1554,17 @@ func TestAnimeStateRoundTripSharesCache(t *testing.T) {
 
 	st := NewAnimeState()
 	a.saveState(st)
-	if st.cache == nil || st.cache != a.cache {
-		t.Fatal("saveState must snapshot the picker's cache")
-	}
 
+	// "Watch" an episode: MAL write-back bumps the count; re-entry must see it.
+	watched = 4
 	b := newAnimePicker(SourceSeason, "", load, nil, nil, nil, nil, nil, false)
 	b.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	b.restoreState(st)
-	if cmd := b.Init(); cmd != nil { // second picker: served from cache
+	if cmd := b.Init(); cmd != nil { // second picker: fresh load, NOT the old cache
 		cmd()
 	}
-	if loads != 1 {
-		t.Fatalf("re-entry re-fetched the list: %d loads, want 1 (shared cache)", loads)
+	if loads != 2 {
+		t.Fatalf("re-entry served a stale cache: %d loads, want 2 (fresh fetch)", loads)
 	}
 	if b.filter.Sort != a.filter.Sort || b.filter.Status != a.filter.Status {
 		t.Fatal("restore must carry the saved options")
