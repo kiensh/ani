@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"ani/internal/playable"
@@ -208,11 +209,26 @@ type languageEntry struct {
 	EmbedURL string `json:"embed_url"`
 }
 
-// FetchReleases resolves the playable variants for a specific episode of a show.
-// It returns one playable.Release per (audio × resolution) combination: Group is
-// "sub" (jpn) or "dub" (eng); Resolution is the height (e.g. "1080"); StreamURL is
-// the HLS variant URL (playable by mpv). The release picker's group filter selects
-// sub/dub; the quality filter selects resolution.
+// allEpisodesCap bounds the "all episodes" (episode == 0) fetch: each listed
+// episode costs ~3 GETs (languages + embed page + master m3u8), and long
+// series list 1000+ (One Piece). The newest episodes are kept — what a
+// viewer of an airing or long show needs. Single-episode fetches are already
+// small and stay uncapped.
+const allEpisodesCap = 100
+
+// allFetchConcurrency bounds the per-episode fan-out of the all-episodes
+// fetch. 16 mirrors the tui prefetch cap; the pooled client (50 idle
+// conns/host) absorbs it.
+const allFetchConcurrency = 16
+
+// FetchReleases resolves the playable variants for a show. With episode > 0 it
+// returns just that episode's variants; with episode == 0 (the picker's "all"
+// filter) it returns every listed episode's variants, newest-episode first
+// (capped at allEpisodesCap). Each playable.Release is one (audio ×
+// resolution) combination: Group is "sub" (jpn) or "dub" (eng); Resolution is
+// the height (e.g. "1080p"); StreamURL is the HLS variant URL (playable by
+// mpv). The release picker's group filter selects sub/dub; the quality filter
+// selects resolution.
 func FetchReleases(showID string, episode int) ([]*playable.Release, error) {
 	eps, err := Episodes(showID)
 	if err != nil {
@@ -225,6 +241,11 @@ func FetchReleases(showID string, episode int) ([]*playable.Release, error) {
 	// lists episodes 73–88). The offset converts between MAL per-season numbers
 	// and anidb cumulative numbers: anidb_ep = MAL_ep + offset.
 	offset := EpisodeOffset(eps)
+
+	if episode == 0 {
+		return allReleases(showID, eps, offset)
+	}
+
 	anidbEp := float64(episode) + offset
 	// Find the episode ID matching the anidb episode number. If not listed
 	// (not yet aired / numbering gap): return no releases. The picker shows an
@@ -241,9 +262,66 @@ func FetchReleases(showID string, episode int) ([]*playable.Release, error) {
 		dbg("anidb: episode %d (anidb %g) not available\n", episode, anidbEp)
 		return nil, nil
 	}
-	malEp := episode
+	return episodeReleases(showID, epID, episode)
+}
 
-	// Get the embed URLs for this episode's languages.
+// allReleases fetches every listed whole episode's variants (episode == 0).
+// Rows carry their MAL episode number, so the picker's episode filter still
+// narrows client-side over the merged list. Assembled newest-episode first,
+// mirroring the torrent path's all-view order.
+func allReleases(showID string, eps []Episode, offset float64) ([]*playable.Release, error) {
+	type epEntry struct{ id, mal int }
+	var entries []epEntry
+	for _, e := range eps {
+		// Whole-numbered episodes only — fractional specials (5.5) can't be
+		// reached through the picker's integer episode input anyway.
+		if e.Number >= 1 && e.Number == float64(int(e.Number)) {
+			entries = append(entries, epEntry{id: e.ID, mal: int(e.Number - offset)})
+		}
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].mal < entries[j].mal })
+	if len(entries) > allEpisodesCap {
+		dbg("anidb: all-episodes fetch capped to newest %d of %d episodes\n",
+			allEpisodesCap, len(entries))
+		entries = entries[len(entries)-allEpisodesCap:]
+	}
+
+	// Bounded fan-out; goroutine i writes only its own slot (no mutex), then
+	// the slots are assembled newest-first. A failed episode is skipped (dbg)
+	// — same tolerance as a failed embed resolve.
+	results := make([][]*playable.Release, len(entries))
+	sem := make(chan struct{}, allFetchConcurrency)
+	var wg sync.WaitGroup
+	for i, ent := range entries {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			rels, err := episodeReleases(showID, ent.id, ent.mal)
+			if err != nil {
+				dbg("anidb: all-episodes fetch ep %d failed: %v\n", ent.mal, err)
+				return
+			}
+			results[i] = rels
+		}()
+	}
+	wg.Wait()
+
+	var out []*playable.Release
+	for i := len(results) - 1; i >= 0; i-- {
+		out = append(out, results[i]...)
+	}
+	return out, nil
+}
+
+// episodeReleases fetches one episode's languages and resolves their stream
+// variants into playable.Release rows (Group = sub/dub, Resolution = height).
+// Rows are sorted sub before dub, then highest resolution first.
+func episodeReleases(showID string, epID, malEp int) ([]*playable.Release, error) {
 	u := baseURL + "/api/frontend/episode/" + strconv.Itoa(epID) + "/languages"
 	dbg("anidb: GET %s\n", u)
 	body, status, err := get(u)
@@ -289,14 +367,23 @@ func FetchReleases(showID string, episode int) ([]*playable.Release, error) {
 			})
 		}
 	}
-	// Sort: sub before dub, then highest resolution first.
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Group != out[j].Group {
 			return out[i].Group == "sub"
 		}
-		return out[i].Resolution > out[j].Resolution
+		return resolutionValue(out[i].Resolution) > resolutionValue(out[j].Resolution)
 	})
 	return out, nil
+}
+
+// resolutionValue ranks a resolution label numerically for sorting; unknown
+// labels ("auto") sort last. ("720p" would outrank "1080p" lexicographically.)
+func resolutionValue(res string) int {
+	n, err := strconv.Atoi(strings.TrimSuffix(res, "p"))
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 type variant struct {

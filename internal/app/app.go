@@ -456,15 +456,24 @@ func streamLoop(opt *Options, item *mal.Item, aired *tui.AiredCache) error {
 	}
 	// No default-episode override: the picker advances to watched+1 itself
 	// (anidb's cumulative numbering is handled inside FetchReleases) and shows
-	// an empty list when anidb doesn't have that episode yet.
+	// an empty list when anidb doesn't have that episode yet. ep 0 (the
+	// picker's "all" filter, also how a finished series opens) lists every
+	// episode's variants; the memo keeps re-toggling to "all" instant — that
+	// fetch costs one languages+embed+master round per episode (bounded inside
+	// anidb). Same lifetime as the torrent path's episodeCache: one anime, one
+	// playLoop; stream lists carry no watch state, so it can't go stale.
+	var allCached []*playable.Release
 	fetch := func(ep int) []*playable.Release {
-		if ep == 0 {
-			ep = 1
+		if ep == 0 && allCached != nil {
+			return allCached
 		}
 		rels, e := anidb.FetchReleases(show.ID, ep)
 		if e != nil {
 			mal.LogDebug("anidb fetch ep %d: %v\n", ep, e)
 			return nil
+		}
+		if ep == 0 && len(rels) > 0 {
+			allCached = rels
 		}
 		return rels
 	}
