@@ -1167,6 +1167,23 @@ func providerLabel(name string, active bool) string {
 	return prefix + "AnimeTosho (torrent)"
 }
 
+// providerShortName maps a provider key to the compact name shown in headers.
+func providerShortName(name string) string {
+	if name == "anidb" {
+		return "anidb.app"
+	}
+	return "AnimeTosho"
+}
+
+// providerHeader renders the active-provider marker for the title headers:
+// "● anidb.app" in cyan. Empty provider renders nothing.
+func providerHeader(provider string) string {
+	if provider == "" {
+		return ""
+	}
+	return ProviderStyle.Render("● " + providerShortName(provider))
+}
+
 // applyCommand runs a palette intent, reusing the same mutators/callbacks and
 // Result flags as the direct keys and the Space menu. statusset:/score: apply
 // directly (the search-and-choose is the confirmation); remove keeps its y/n
@@ -1979,6 +1996,9 @@ func (m *animePicker) View() string {
 		Render(rightContent)
 
 	header := m.headerText()
+	if p := providerHeader(m.provider); p != "" {
+		header += "   " + p
+	}
 	badges := m.renderBadges()
 	help := HelpStyle.Render("j/k move  Tab source  Enter select  / filter  : command  q quit")
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
