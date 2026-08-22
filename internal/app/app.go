@@ -82,6 +82,10 @@ func Run(opt *Options) error {
 				opt.Group, opt.Quality = cfg.Group, cfg.Quality
 			}
 			config.SaveSource(srcSwitch.source)
+			// Aired counts are provider-specific (torrent's release proxy vs
+			// anidb's episode list — each fails on different anime), so the old
+			// cache's values and zeros don't apply: start fresh and recompute.
+			aired = tui.NewAiredCache()
 			continue
 		}
 		if err != nil {
