@@ -2062,17 +2062,18 @@ func (m *animePicker) renderAuthStatusModal() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
 }
 
-// renderBadges renders the source/status/season/sort badge line. The season
+// renderBadges renders the source/status/season/sort badge line, each label
+// (except source, which Tab cycles) underlining its shortcut key. The season
 // badge only shows for the Season source (it's forced "All" and hidden elsewhere).
 func (m *animePicker) renderBadges() string {
 	parts := []string{
 		conditionalBadge("source:"+m.sourceLabel(), true),
-		conditionalBadge("status:"+m.filter.Status, m.filter.Status != "All"),
+		filterBadge("status", "t", m.filter.Status, m.filter.Status != "All"),
 	}
 	if m.query == "" && m.source == SourceSeason {
-		parts = append(parts, conditionalBadge("season:"+m.season, true))
+		parts = append(parts, filterBadge("season", "e", m.season, true))
 	}
-	parts = append(parts, conditionalBadge("sort:"+sortLabel(m.filter.Sort), false))
+	parts = append(parts, filterBadge("sort", "s", sortLabel(m.filter.Sort), false))
 	return strings.Join(parts, " ")
 }
 

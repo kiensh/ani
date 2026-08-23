@@ -662,20 +662,21 @@ func (m *releasePicker) loadingText() string {
 }
 
 // renderBadges renders the active-filter badges line: group / quality / episode
-// / sort. Active filters are yellow; the rest are dim.
+// / sort, each label underlining its shortcut key. Active filters are yellow;
+// the rest are dim.
 func (m *releasePicker) renderBadges() string {
 	group := ui.GroupLabel(m.filter.Group)
 	parts := []string{
-		conditionalBadge("group:"+group, m.filter.Group != ""),
+		filterBadge("group", "g", group, m.filter.Group != ""),
 	}
 	qLabel := qualityLabel(m.filter.Quality)
-	parts = append(parts, conditionalBadge("resolution:"+qLabel, m.filter.Quality != ""))
+	parts = append(parts, filterBadge("resolution", "r", qLabel, m.filter.Quality != ""))
 	if m.filter.Episode > 0 {
-		parts = append(parts, conditionalBadge(fmt.Sprintf("ep:%d", m.filter.Episode), true))
+		parts = append(parts, filterBadge("ep", "e", fmt.Sprintf("%d", m.filter.Episode), true))
 	} else {
-		parts = append(parts, conditionalBadge("ep:all", false))
+		parts = append(parts, filterBadge("ep", "e", "all", false))
 	}
-	parts = append(parts, conditionalBadge("sort:"+ui.NormalizeSort(m.filter.Sort), false))
+	parts = append(parts, filterBadge("sort", "s", ui.NormalizeSort(m.filter.Sort), false))
 	return strings.Join(parts, " ")
 }
 
@@ -816,6 +817,24 @@ func conditionalBadge(text string, on bool) string {
 		return BadgeStyle.Render(" " + text + " ")
 	}
 	return InactiveBadgeStyle.Render(" " + text + " ")
+}
+
+// filterBadge renders a filter badge whose label underlines its shortcut key
+// ([g]roup, [r]esolution, s[t]atus — the letter that opens the filter's
+// overlay). key is underlined at its first occurrence in label; the rest
+// matches conditionalBadge (active yellow, inactive dim).
+func filterBadge(label, key, value string, on bool) string {
+	style := InactiveBadgeStyle
+	if on {
+		style = BadgeStyle
+	}
+	i := strings.Index(label, key)
+	if i < 0 {
+		return style.Render(" " + label + ":" + value + " ")
+	}
+	return style.Render(" "+label[:i]) +
+		style.Underline(true).Render(label[i:i+len(key)]) +
+		style.Render(label[i+len(key):]+":"+value+" ")
 }
 
 func qualityLabel(q string) string {
