@@ -775,6 +775,9 @@ func TestAnimePickerSetScore(t *testing.T) {
 	if m.items[0].Score != 7 {
 		t.Errorf("item.Score = %v, want 7", m.items[0].Score)
 	}
+	if m.view[0].Score != 7 {
+		t.Errorf("view row Score = %v, want 7 (view not rebuilt after apply)", m.view[0].Score)
+	}
 
 	// Remove Score → 0.
 	m.Update(spaceMsg())
@@ -788,6 +791,9 @@ func TestAnimePickerSetScore(t *testing.T) {
 	}
 	if m.items[0].Score != 0 {
 		t.Errorf("item.Score = %v, want 0", m.items[0].Score)
+	}
+	if m.view[0].Score != 0 {
+		t.Errorf("view row Score = %v, want 0 (view not rebuilt after apply)", m.view[0].Score)
 	}
 
 	// Off-list item: Set Score (and Remove) hidden.

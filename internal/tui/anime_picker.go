@@ -668,6 +668,10 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
+			// Rebuild the view so the new score shows immediately — the view
+			// rows are copies, so updating m.items alone isn't visible. No sort
+			// key uses the personal score, so the row can't move.
+			m.applyFilter()
 		}
 		return m, nil
 
