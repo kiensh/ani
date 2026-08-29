@@ -983,6 +983,24 @@ func TestReleasePickerDefaultEpisodeFinished(t *testing.T) {
 	}
 }
 
+// TestReleasePickerEpisodeRestore seeds the provider-switch re-entry: a
+// positive defaultEpisode re-opens on it, and DefaultEpisodeAll keeps "all"
+// instead of recomputing the next-unwatched default.
+func TestReleasePickerEpisodeRestore(t *testing.T) {
+	all := []*playable.Release{mkRel("a", "1080p", 5, false)}
+	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 3}
+
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 7, false)
+	if m.filter.Episode != 7 {
+		t.Errorf("restored episode = %v, want 7", m.filter.Episode)
+	}
+
+	mAll := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, DefaultEpisodeAll, false)
+	if mAll.filter.Episode != 0 {
+		t.Errorf("restored episode (all) = %v, want 0", mAll.filter.Episode)
+	}
+}
+
 // TestReleasePickerEpisodeDisabled verifies that with disableEpisode the default
 // episode filter is 0 and 'e' is a no-op (latest-uploads mode).
 func TestReleasePickerEpisodeDisabled(t *testing.T) {
@@ -997,6 +1015,63 @@ func TestReleasePickerEpisodeDisabled(t *testing.T) {
 	m.Update(keyMsg('e'))
 	if m.overlay.active() {
 		t.Errorf("'e' opened an overlay in episodeDisabled mode")
+	}
+}
+
+// TestReleasePickerProviderSwitch verifies the `:` palette's Provider commands:
+// offered when a provider is wired and the view is per-anime (not the
+// latest-uploads landing), the active one marked and a re-pick a no-op, the
+// other one setting Result.SourceSwitch and quitting.
+func TestReleasePickerProviderSwitch(t *testing.T) {
+	all := []*playable.Release{mkRel("a", "1080p", 1, false)}
+	m := newReleasePicker(&mal.Item{Title: "X", TotalEps: 12}, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
+	m.provider = "torrent"
+	loadReleases(m, all)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	cmds := m.releaseCommands()
+	var torrentTitle, anidbTitle string
+	found := 0
+	for _, c := range cmds {
+		switch c.Intent {
+		case "provider:torrent":
+			torrentTitle, found = c.Title, found+1
+		case "provider:anidb":
+			anidbTitle = c.Title
+			found++
+		}
+	}
+	if found != 2 {
+		t.Fatalf("provider commands missing from palette (%d found)", found)
+	}
+	if !strings.HasPrefix(torrentTitle, "● ") || strings.HasPrefix(anidbTitle, "● ") {
+		t.Errorf("active marker wrong: torrent=%q anidb=%q", torrentTitle, anidbTitle)
+	}
+
+	// Re-picking the active provider is a no-op.
+	model, _ := m.applyCommand("provider:torrent")
+	if rp := model.(*releasePicker); rp.result.SourceSwitch != "" {
+		t.Errorf("active-provider pick set SourceSwitch=%q, want none", rp.result.SourceSwitch)
+	}
+
+	// Picking the other provider requests the switch and quits.
+	model, cmd := m.applyCommand("provider:anidb")
+	rp := model.(*releasePicker)
+	if rp.result.SourceSwitch != "anidb" {
+		t.Errorf("SourceSwitch = %q, want anidb", rp.result.SourceSwitch)
+	}
+	if cmd == nil {
+		t.Error("provider switch returned no quit cmd")
+	}
+
+	// The latest-uploads view (episodeDisabled) offers no switch: anidb
+	// resolves per show, and that list spans many series.
+	lat := newReleasePicker(&mal.Item{Title: "Latest uploads"}, "", "", "newest", fetchAll(all), true, nil, nil, nil, 0, false)
+	lat.provider = "torrent"
+	for _, c := range lat.releaseCommands() {
+		if strings.HasPrefix(c.Intent, "provider:") {
+			t.Errorf("latest-uploads view should hide provider commands, got %q", c.Intent)
+		}
 	}
 }
 

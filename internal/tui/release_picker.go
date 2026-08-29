@@ -28,6 +28,7 @@ type releasePicker struct {
 	qualities []string // distinct qualities present, for the quality overlay
 	item      *mal.Item
 	debug     bool
+	provider  string // active backend ("torrent"/"anidb") for the `:` palette switch
 
 	// fetch returns the releases for a given episode (cached + scoped by the
 	// caller). Invoked on demand: initially for the default episode, and again
@@ -66,6 +67,12 @@ type releasePicker struct {
 	result *Result
 }
 
+// DefaultEpisodeAll seeds the release picker's episode filter with "all"
+// (episode 0). Only the provider-switch re-entry produces it: it must
+// distinguish "the user had all selected" from "no override" (0), which would
+// recompute the next-unwatched default.
+const DefaultEpisodeAll = -1
+
 func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*playable.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(*mal.Item) float64, aired *AiredCache, defaultEpisode int, debug bool) *releasePicker {
 	rp := &releasePicker{
 		item:            item,
@@ -87,12 +94,14 @@ func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch fun
 	rp.filter.Quality = quality
 	rp.filter.Sort = ui.NormalizeSort(sortName)
 	// Default filter: caller may pass a specific episode (e.g. anidb's latest
-	// available); otherwise compute next-unwatched from the MAL item.
-	// Skipped when the episode filter is disabled (latest-uploads view).
+	// available, or the episode restored across a provider switch);
+	// DefaultEpisodeAll keeps "all"; otherwise compute next-unwatched from the
+	// MAL item. Skipped when the episode filter is disabled (latest-uploads
+	// view).
 	if !disableEpisode && rp.filter.Episode == 0 && item != nil {
 		if defaultEpisode > 0 {
 			rp.filter.Episode = defaultEpisode
-		} else {
+		} else if defaultEpisode != DefaultEpisodeAll {
 			rp.filter.Episode = DefaultEpisode(item.WatchedEps, item.TotalEps)
 		}
 	}
@@ -405,7 +414,8 @@ func (m *releasePicker) handlePaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // releaseCommands builds the palette's command list from live state: the groups
 // and qualities present in the current episode's releases, the sort options, the
-// per-release actions (when a release is focused), and the view actions.
+// per-release actions (when a release is focused), the view actions, and the
+// provider switch (when scoped to one anime).
 func (m *releasePicker) releaseCommands() []Command {
 	var cmds []Command
 	cmds = append(cmds, Command{Category: "Filter", Title: "All groups", Intent: "group:", Keywords: "group audio"})
@@ -436,6 +446,15 @@ func (m *releasePicker) releaseCommands() []Command {
 		Command{Category: "View", Title: "Back to anime", Intent: "back", Keywords: "esc return"},
 		Command{Category: "View", Title: "Quit", Intent: "quit", Keywords: "exit"},
 	)
+	// Provider switch: only when scoped to one anime (the latest-uploads view
+	// has no show for anidb to resolve) and the provider was wired in.
+	if m.provider != "" && !m.episodeDisabled {
+		torrentActive := m.provider != "anidb"
+		cmds = append(cmds,
+			Command{Category: "Provider", Title: providerLabel("torrent", torrentActive), Intent: "provider:torrent", Keywords: "animetosho backend"},
+			Command{Category: "Provider", Title: providerLabel("anidb", !torrentActive), Intent: "provider:anidb", Keywords: "stream backend"},
+		)
+	}
 	return cmds
 }
 
@@ -475,6 +494,15 @@ func (m *releasePicker) applyCommand(intent string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case intent == "quit":
 		m.result.Quit = true
+		return m, tea.Quit
+	case strings.HasPrefix(intent, "provider:"):
+		// Switch backend for THIS anime (app.Run applies it and re-opens the
+		// release picker under the new provider).
+		src := strings.TrimPrefix(intent, "provider:")
+		if (src != "torrent" && src != "anidb") || src == m.provider {
+			return m, nil // unknown or already active: no-op
+		}
+		m.result.SourceSwitch = src
 		return m, tea.Quit
 	case strings.HasPrefix(intent, "group:"):
 		m.filter.Group = strings.TrimPrefix(intent, "group:")

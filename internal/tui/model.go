@@ -30,14 +30,21 @@ type Result struct {
 	Relogin bool // re-run the browser OAuth flow
 	Logout  bool // forget the saved MAL token
 
-	// SourceSwitch requests a provider change ("torrent"/"anidb") from the anime
-	// picker; app.Run applies it (persist + re-resolve under the new provider).
+	// SourceSwitch requests a provider change ("torrent"/"anidb") from either
+	// picker's `:` palette; app.Run applies it (persist + re-select the
+	// provider's filters, then re-resolve — the release picker re-opens on the
+	// same anime).
 	SourceSwitch string
 
 	// Filter preferences from the release picker (persisted across sessions).
 	FilterGroup   string
 	FilterQuality string
 	FilterSort    string
+
+	// FilterEpisode is the release picker's episode filter at exit (0 = "all").
+	// Consumed only on a provider switch: the re-opened picker restores it
+	// instead of falling back to the next-unwatched default.
+	FilterEpisode int
 }
 
 // RunAnimePicker launches the TUI for anime selection. source is the initial
@@ -77,14 +84,16 @@ func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 // filter. fetch returns the releases for a given episode (cached + scoped by
 // the caller) and is invoked on demand: initially for the default episode, and
 // again whenever the user changes the episode filter. disableEpisode suppresses
-// the episode filter (latest-uploads view). copyMagnet backs the Space menu's
-// "Copy Magnet URL"; latestEpisode backs the "watched/aired/total" header (nil
-// disables each).
-func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*playable.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(*mal.Item) float64, aired *AiredCache, defaultEpisode int, debug bool) (*Result, error) {
+// the episode filter (latest-uploads view). provider is the active backend
+// ("torrent"/"anidb"; empty hides the palette's provider switch). copyMagnet
+// backs the Space menu's "Copy Magnet URL"; latestEpisode backs the
+// "watched/aired/total" header (nil disables each).
+func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*playable.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(*mal.Item) float64, aired *AiredCache, defaultEpisode int, provider string, debug bool) (*Result, error) {
 	if item == nil || fetch == nil {
 		return &Result{Quit: true}, nil
 	}
 	m := newReleasePicker(item, group, quality, sortName, fetch, disableEpisode, copyMagnet, latestEpisode, aired, defaultEpisode, debug)
+	m.provider = provider // drives the palette's provider switch (● active marker)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
 	if err != nil {
@@ -94,6 +103,7 @@ func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch fun
 		rp.result.FilterGroup = rp.filter.Group
 		rp.result.FilterQuality = rp.filter.Quality
 		rp.result.FilterSort = rp.filter.Sort
+		rp.result.FilterEpisode = rp.filter.Episode
 		return rp.result, nil
 	}
 	return &Result{Quit: true}, nil

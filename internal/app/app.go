@@ -31,11 +31,16 @@ var (
 	errLogout  = errors.New("logout")
 )
 
-// errSourceSwitch signals that the anime picker requested a provider change via
-// the `:` palette. Run applies it (persist + re-select the provider's saved
-// filters) then re-resolves under the new provider. Carries the target source
-// ("torrent"/"anidb").
-type errSourceSwitch struct{ source string }
+// errSourceSwitch signals that a picker requested a provider change via the
+// `:` palette. From the anime picker, Run applies it and re-resolves; from the
+// release picker, releaseLoop applies it and re-opens the same anime. Carries
+// the target source ("torrent"/"anidb") and, from the release picker, the
+// selected episode to restore (0 = none → default; tui.DefaultEpisodeAll =
+// "all").
+type errSourceSwitch struct {
+	source  string
+	episode int
+}
 
 func (e errSourceSwitch) Error() string { return "switch provider to " + e.source }
 
@@ -70,22 +75,10 @@ func Run(opt *Options) error {
 		}
 		var srcSwitch errSourceSwitch
 		if errors.As(err, &srcSwitch) {
-			// Provider change from the `:` palette. Persist it and re-select the
-			// new provider's saved group/quality (mirrors main.go's startup
-			// selection) so a mid-session switch picks up the right filters, then
-			// re-resolve under the new provider.
-			opt.Source = srcSwitch.source
-			cfg := config.Load()
-			if srcSwitch.source == "anidb" {
-				opt.Group, opt.Quality = cfg.AnidbGroup, cfg.AnidbQuality
-			} else {
-				opt.Group, opt.Quality = cfg.Group, cfg.Quality
-			}
-			config.SaveSource(srcSwitch.source)
-			// Aired counts are provider-specific (torrent's release proxy vs
-			// anidb's episode list — each fails on different anime), so the old
-			// cache's values and zeros don't apply: start fresh and recompute.
-			aired = tui.NewAiredCache()
+			// Provider change from the anime picker's `:` palette: apply it and
+			// re-resolve (the release picker handles its own switches in place).
+			applySourceSwitch(opt, srcSwitch.source)
+			aired.Reset()
 			continue
 		}
 		if err != nil {
@@ -433,19 +426,72 @@ func seriesToItems(ss []animetosho.SeriesSummary) []mal.Item {
 	return items
 }
 
+// applySourceSwitch persists the new provider and re-selects its saved
+// group/quality (mirrors main.go's startup selection) so a mid-session switch
+// picks up the right filters. The caller resets the aired cache — counts are
+// provider-specific (torrent's release proxy vs anidb's episode list — each
+// fails on different anime), so the old values and zeros don't apply.
+func applySourceSwitch(opt *Options, source string) {
+	opt.Source = source
+	cfg := config.Load()
+	if source == "anidb" {
+		opt.Group, opt.Quality = cfg.AnidbGroup, cfg.AnidbQuality
+	} else {
+		opt.Group, opt.Quality = cfg.Group, cfg.Quality
+	}
+	config.SaveSource(source)
+}
+
 // releaseLoop runs the pick → play/download → write-back loop for one anime.
-// The latest-uploads sentinel (aid == latestUploadsAID) fetches the newest
-// releases site-wide with the episode filter disabled. Returns errBackToAnime
-// when the user backs out.
+// A provider switch from the release picker's `:` palette (errSourceSwitch) is
+// applied in place and the loop re-runs for the SAME anime under the new
+// provider. The latest-uploads sentinel (aid == latestUploadsAID) fetches the
+// newest releases site-wide with the episode filter disabled; that view offers
+// no switch (anidb resolves per show). Returns errBackToAnime when the user
+// backs out.
 func releaseLoop(opt *Options, aid int, item *mal.Item, aired *tui.AiredCache) error {
+	// Episode to restore after a provider switch: keeps the user's selection
+	// when the same anime re-opens on the other backend (0 = none yet).
+	reentryEpisode := 0
+	for {
+		err := runReleaseLoop(opt, aid, item, aired, reentryEpisode)
+		var srcSwitch errSourceSwitch
+		if !errors.As(err, &srcSwitch) {
+			return err
+		}
+		applySourceSwitch(opt, srcSwitch.source)
+		aired.Reset()
+		reentryEpisode = srcSwitch.episode
+		if aid == 0 {
+			// Came from the anidb path (it resolves by title): the torrent path
+			// needs an AniDB id for this anime.
+			aid = item.AnidbAID
+			if aid == 0 {
+				aid = resolveAnidbFromMAL(item, opt)
+			}
+			if aid == 0 {
+				aid = resolveAnidbManual(item, opt)
+			}
+			if aid == 0 {
+				return fmt.Errorf("could not resolve an AniDB id for %q", item.Title)
+			}
+			item.AnidbAID = aid
+		}
+	}
+}
+
+// runReleaseLoop dispatches to the active provider's pick → play loop.
+// firstEpisode seeds the picker's episode filter for its first run only (the
+// provider-switch re-entry restores the user's selection).
+func runReleaseLoop(opt *Options, aid int, item *mal.Item, aired *tui.AiredCache, firstEpisode int) error {
 	if opt.Source == "anidb" {
-		return streamLoop(opt, item, aired)
+		return streamLoop(opt, item, aired, firstEpisode)
 	}
 	if aid == latestUploadsAID {
-		return latestLoop(opt, item, aired)
+		return latestLoop(opt, item, aired, firstEpisode)
 	}
 	cache := &episodeCache{data: map[int][]*playable.Release{}}
-	return playLoop(opt, item, cachedFetch(aid, cache), false, aired, func(*mal.Item) int { return 0 })
+	return playLoop(opt, item, cachedFetch(aid, cache), false, aired, firstEpisode)
 }
 
 // streamLoop resolves the anime on anidb.app (by title) and runs the same
@@ -453,7 +499,7 @@ func releaseLoop(opt *Options, aid int, item *mal.Item, aired *tui.AiredCache) e
 // returns audio×resolution stream variants as playable.Release items. The release
 // picker's group filter = sub/dub, quality filter = resolution — same UI, different
 // backend.
-func streamLoop(opt *Options, item *mal.Item, aired *tui.AiredCache) error {
+func streamLoop(opt *Options, item *mal.Item, aired *tui.AiredCache, firstEpisode int) error {
 	show, err := anidb.ResolveShow(item.Title)
 	if err != nil {
 		return fmt.Errorf("anidb: resolve %q: %w", item.Title, err)
@@ -481,13 +527,13 @@ func streamLoop(opt *Options, item *mal.Item, aired *tui.AiredCache) error {
 		}
 		return rels
 	}
-	return playLoop(opt, item, fetch, false, aired, func(*mal.Item) int { return 0 })
+	return playLoop(opt, item, fetch, false, aired, firstEpisode)
 }
 
 // latestLoop is the no-arg AnimeTosho landing screen: the newest uploads in one
 // flat list (episode filter disabled), no MAL write-back (the synthetic item
 // has no MAL id).
-func latestLoop(opt *Options, item *mal.Item, aired *tui.AiredCache) error {
+func latestLoop(opt *Options, item *mal.Item, aired *tui.AiredCache, firstEpisode int) error {
 	var cached []*playable.Release
 	fetch := func(int) []*playable.Release {
 		if cached == nil {
@@ -496,14 +542,25 @@ func latestLoop(opt *Options, item *mal.Item, aired *tui.AiredCache) error {
 		}
 		return cached
 	}
-	return playLoop(opt, item, fetch, true, aired, func(*mal.Item) int { return 0 })
+	return playLoop(opt, item, fetch, true, aired, firstEpisode)
 }
 
 // playLoop drives the release picker and the play/download + MAL write-back,
-// looping for the next episode until cancelled or backed out of.
-func playLoop(opt *Options, item *mal.Item, fetch func(int) []*playable.Release, disableEpisode bool, aired *tui.AiredCache, defaultEpisodeFn func(*mal.Item) int) error {
+// looping for the next episode until cancelled or backed out of. firstEpisode
+// seeds the FIRST picker run's episode filter (the provider-switch re-entry
+// restores the user's selection; 0 = compute next-unwatched,
+// tui.DefaultEpisodeAll = "all"). Later runs always pass 0: after a play the
+// write-back has advanced item.WatchedEps, so the picker computes the next
+// episode itself.
+func playLoop(opt *Options, item *mal.Item, fetch func(int) []*playable.Release, disableEpisode bool, aired *tui.AiredCache, firstEpisode int) error {
+	first := true
 	for {
-		pick, action, err := pickReleaseTUI(item, opt, fetch, disableEpisode, aired, defaultEpisodeFn(item))
+		ep := 0
+		if first {
+			ep = firstEpisode
+			first = false
+		}
+		pick, action, err := pickReleaseTUI(item, opt, fetch, disableEpisode, aired, ep)
 		if err != nil {
 			return err // errBackToAnime propagates to Run
 		}
@@ -575,7 +632,7 @@ func cachedFetch(aid int, cache *episodeCache) func(int) []*playable.Release {
 // episode filter (latest-uploads view).
 func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*playable.Release, disableEpisode bool, aired *tui.AiredCache, defaultEpisode int) (*playable.Release, string, error) {
 	if opt.DryRun {
-		ep := defaultEpisode
+		ep := max(defaultEpisode, 0) // DefaultEpisodeAll → plain "all" fetch
 		if ep == 0 && !disableEpisode {
 			ep = tui.DefaultEpisode(item.WatchedEps, item.TotalEps)
 		}
@@ -588,17 +645,29 @@ func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*playable.Re
 		return view[0], "play", nil
 	}
 	res, err := tui.RunReleasePicker(item, opt.Group, opt.Quality, opt.Sort, fetch, disableEpisode, player.CopyToClipboard,
-		latestEpisodeFn(opt), aired, defaultEpisode, opt.Debug)
+		latestEpisodeFn(opt), aired, defaultEpisode, opt.Source, opt.Debug)
 	if err != nil {
 		return nil, "", err
 	}
 	// Persist the user's filter choices on EVERY exit (including quit/back) so
 	// they survive the post-play loop, back-navigation, and the next session.
+	// The filters belong to the current provider — checked before the switch
+	// signal, which is applied (with the new provider's saved filters) upstream.
 	if res != nil {
 		opt.Group = res.FilterGroup
 		opt.Quality = res.FilterQuality
 		opt.Sort = res.FilterSort
 		config.SaveFilters(res.FilterGroup, res.FilterQuality, res.FilterSort, opt.Source)
+	}
+	if res != nil && res.SourceSwitch != "" {
+		// Carry the selected episode so the re-opened picker restores it.
+		// FilterEpisode 0 means "all" here — map it to DefaultEpisodeAll so it
+		// isn't confused with "no override".
+		ep := res.FilterEpisode
+		if ep == 0 {
+			ep = tui.DefaultEpisodeAll
+		}
+		return nil, "", errSourceSwitch{source: res.SourceSwitch, episode: ep}
 	}
 	if res != nil && res.Back {
 		return nil, "", errBackToAnime

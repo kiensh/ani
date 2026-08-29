@@ -14,8 +14,8 @@ const inflightTTL = 10 * time.Second
 //
 // It is owned by app.Run and shared across the anime picker and the release
 // picker (and across Esc-from-releases, which recreate the picker), so a count
-// computed anywhere is never re-fetched. app.Run replaces the whole cache on a
-// provider switch (counts are provider-specific).
+// computed anywhere is never re-fetched. app.Run resets the cache on a provider
+// switch (counts are provider-specific).
 //
 // CONCURRENCY: every method runs on the single bubbletea Update goroutine.
 // selectPrefetchPage/maybeAppendAired/latestEpisodeCmd build their cmds
@@ -31,6 +31,15 @@ type AiredCache struct {
 // NewAiredCache returns an empty session-scoped aired-episode cache.
 func NewAiredCache() *AiredCache {
 	return &AiredCache{values: map[int]float64{}, inflight: map[int]time.Time{}}
+}
+
+// Reset clears all cached counts and in-flight markers. app.Run calls it on a
+// provider switch: counts are provider-specific, so the old values and zeros
+// don't apply. Resetting in place (vs replacing the cache) keeps every holder
+// of the pointer — the release picker mid-switch — on the fresh cache.
+func (c *AiredCache) Reset() {
+	c.values = map[int]float64{}
+	c.inflight = map[int]time.Time{}
 }
 
 // get returns the cached count and whether one is stored for malID.
