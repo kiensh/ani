@@ -42,6 +42,16 @@ func (c *AiredCache) Reset() {
 	c.inflight = map[int]time.Time{}
 }
 
+// clearInflight drops every in-flight marker without touching stored counts.
+// applyLoaded calls it when a fresh list lands: markers left behind by a
+// torn-down picker (Esc into the release picker and back, provider switch)
+// would otherwise block this picker's prefetch for the inflightTTL even though
+// nothing is flying. A duplicate dispatch against a still-running orphaned
+// fetch is harmless — both write the same count.
+func (c *AiredCache) clearInflight() {
+	c.inflight = map[int]time.Time{}
+}
+
 // get returns the cached count and whether one is stored for malID.
 func (c *AiredCache) get(malID int) (float64, bool) { n, ok := c.values[malID]; return n, ok }
 

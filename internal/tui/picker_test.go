@@ -885,6 +885,98 @@ func TestAiredCacheSharedAcrossPickers(t *testing.T) {
 	}
 }
 
+// TestAnimePickerAiringProgress verifies the bottom-right aired-prefetch
+// progress bar: it counts airing anime only (no-id and non-airing items are
+// excluded), shows cached/total while incomplete, and hides when complete or
+// when the prefetch is disabled.
+func TestAnimePickerAiringProgress(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, Title: "A1", AirStatus: "currently_airing", ListStatus: "watching"},
+		{MalID: 2, Title: "A2", AirStatus: "currently_airing"},
+		{MalID: 3, Title: "A3", AirStatus: "currently_airing"},
+		{MalID: 4, Title: "A4", AirStatus: "currently_airing"},
+		{MalID: 5, Title: "F", AirStatus: "finished_airing"},  // not airing: excluded
+		{MalID: 0, Title: "X", AirStatus: "currently_airing"}, // no id: excluded
+	}
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil,
+		func(*mal.Item) float64 { return 0 }, false)
+	loadAnime(m, items)
+	m.width, m.height = 100, 40
+	m.recomputeLayout()
+
+	m.aired.put(1, 8)
+	m.aired.put(2, 0) // a failed 0 counts as done (once per session)
+	out := m.View()
+	lines := strings.Split(out, "\n")
+	if !strings.Contains(lines[0], "aired eps") || !strings.Contains(lines[0], "░") || !strings.Contains(lines[0], "2/4") {
+		t.Errorf("partial prefetch: header line should show 'aired eps [bar] 2/4', got:\n%q", lines[0])
+	}
+	if strings.Contains(lines[len(lines)-1], "aired eps") {
+		t.Errorf("partial prefetch: help line should not carry the indicator")
+	}
+
+	// Complete → the bar hides.
+	m.aired.put(3, 5)
+	m.aired.put(4, 6)
+	if out = m.View(); strings.Contains(out, "aired eps") || strings.Contains(out, "░") {
+		t.Errorf("complete prefetch: bar should hide, got:\n%s", out)
+	}
+
+	// Prefetch disabled → no bar even with counts missing.
+	m2 := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil, nil, false)
+	loadAnime(m2, items)
+	m2.width, m2.height = 100, 40
+	m2.recomputeLayout()
+	m2.aired.put(1, 8)
+	if out = m2.View(); strings.Contains(out, "aired eps") || strings.Contains(out, "░") {
+		t.Errorf("prefetch disabled: bar should hide, got:\n%s", out)
+	}
+
+	// A long header shrinks the budget; the form degrades instead of hiding:
+	// bar shrinks, then drops, then the "aired eps" label drops.
+	// (Back to the 2-of-4 state — the complete check above cached all four.)
+	m.aired = NewAiredCache()
+	m.aired.put(1, 8)
+	m.aired.put(2, 0)
+	for _, tc := range []struct {
+		avail   int
+		want    string // substring the form must contain ("" = hidden)
+		notWant string // substring the form must NOT contain
+	}{
+		{avail: 40, want: "░"},                     // label + bar + count
+		{avail: 14, want: "aired eps 2/4"},         // bar dropped, label kept
+		{avail: 12, want: "2/4", notWant: "aired"}, // label dropped too
+		{avail: 2, want: ""},                       // no room at all
+	} {
+		got := m.airingProgress(tc.avail)
+		switch {
+		case tc.want == "" && got != "":
+			t.Errorf("airingProgress(%d) = %q; want hidden", tc.avail, got)
+		case tc.want != "" && !strings.Contains(got, tc.want):
+			t.Errorf("airingProgress(%d) = %q; want it to contain %q", tc.avail, got, tc.want)
+		case tc.notWant != "" && strings.Contains(got, tc.notWant):
+			t.Errorf("airingProgress(%d) = %q; want it without %q", tc.avail, got, tc.notWant)
+		}
+	}
+}
+
+// TestApplyLoadedClearsStaleInflight verifies a fresh load drops in-flight
+// markers orphaned by a torn-down picker (Esc-back, provider switch), so this
+// picker's prefetch isn't blocked for the inflightTTL — otherwise the progress
+// bar would stall below its total until a much later reload re-fetches them.
+func TestApplyLoadedClearsStaleInflight(t *testing.T) {
+	items := []mal.Item{{MalID: 1, Title: "A", AirStatus: "currently_airing", ListStatus: "watching"}}
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil,
+		func(*mal.Item) float64 { return 3 },
+		func(*mal.Item) float64 { return 3 },
+		false)
+	m.aired.markDispatched(77) // marker whose picker died mid-fetch
+	m.applyLoaded(itemsLoadedMsg{items: items, source: m.source, season: m.season})
+	if !m.aired.shouldFetch(77) {
+		t.Errorf("stale in-flight marker survived applyLoaded; want retryable")
+	}
+}
+
 // ---- release picker ----
 
 func TestReleasePickerRender(t *testing.T) {
@@ -1539,10 +1631,10 @@ func TestAnimeStateRestoreOptions(t *testing.T) {
 	m := newAnimePicker(SourceSeason, "", animeLoadAll(nil), nil, nil, nil, nil, nil, false)
 	st := &AnimeState{
 		restored: true,
-		Source: SourceList,
-		Season: "Winter 2020",
-		Status: "Watching",
-		Sort:   "score",
+		Source:   SourceList,
+		Season:   "Winter 2020",
+		Status:   "Watching",
+		Sort:     "score",
 	}
 	m.restoreState(st)
 	if m.source != SourceList {

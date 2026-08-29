@@ -762,6 +762,10 @@ func (m *animePicker) applyLoaded(msg itemsLoadedMsg) (tea.Model, tea.Cmd) {
 		// Nothing to prefetch; the empty list renders the error line instead.
 		return m, nil
 	}
+	// Drop in-flight markers orphaned by a torn-down picker (Esc-back, provider
+	// switch): their fetches died with that picker, and the markers would block
+	// this load's prefetch — and stall the progress bar — for the inflightTTL.
+	m.aired.clearInflight()
 	// Fresh cover cache; prefetchPageCmd drives its downloads page-by-page
 	// (first visible page first, then the rest) alongside the aired episodes.
 	m.cover = NewCoverCache()
@@ -931,6 +935,53 @@ func (m *animePicker) maybeAppendAired(items []mal.Item, it mal.Item) []mal.Item
 	}
 	m.aired.markDispatched(it.MalID)
 	return append(items, it)
+}
+
+// progressBarWidth is the preferred cell width of the aired-prefetch progress
+// bar; it shrinks to fit narrower terminals (see airingProgress).
+const progressBarWidth = 14
+
+// airingProgress renders the top-right progress indicator for the background
+// aired-episode prefetch — "aired eps ██████░░░░░░░░ 60/150" — where the total
+// counts only airing anime (the only ones fetched; same eligibility as
+// maybeAppendAired) and done counts those with a cached count (any value,
+// incl. a failed 0). avail is the cell budget right of the header text; the
+// form degrades as it shrinks — bar shrinks, then drops, then the "aired eps"
+// label drops — so a long header still leaves room for progress. Empty when
+// there is nothing to show: prefetch disabled, list still loading, no airing
+// anime, every count already cached (hidden once complete), or no room at all.
+func (m *animePicker) airingProgress(avail int) string {
+	if m.latestEpisodePrefetch == nil || m.loading || len(m.items) == 0 {
+		return ""
+	}
+	total, done := 0, 0
+	for _, it := range m.items {
+		if it.MalID == 0 || it.AirStatus != "currently_airing" {
+			continue
+		}
+		total++
+		if _, ok := m.aired.get(it.MalID); ok {
+			done++
+		}
+	}
+	if total == 0 || done >= total || avail < 1 {
+		return ""
+	}
+	count := fmt.Sprintf("%d/%d", done, total)
+	label := "aired eps"
+	barW := min(progressBarWidth, avail-len(label)-len(count)-2)
+	switch {
+	case barW >= 4:
+		filled := barW * done / total
+		bar := ProgressStyle.Render(strings.Repeat("█", filled)) +
+			FaintStyle.Render(strings.Repeat("░", barW-filled))
+		return FaintStyle.Render(label+" ") + bar + FaintStyle.Render(" "+count)
+	case avail >= len(label)+1+len(count):
+		return FaintStyle.Render(label + " " + count)
+	case avail >= len(count):
+		return FaintStyle.Render(count)
+	}
+	return ""
 }
 
 func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -2002,6 +2053,12 @@ func (m *animePicker) View() string {
 	header := m.headerText()
 	if p := providerHeader(m.provider); p != "" {
 		header += "   " + p
+	}
+	// The header's right side is the roomiest spot for the prefetch progress —
+	// avail reserves one gap cell; airingProgress already fits within it, so the
+	// right-aligning gap below is always ≥ 1.
+	if p := m.airingProgress(m.width - lipgloss.Width(header) - 1); p != "" {
+		header = header + strings.Repeat(" ", m.width-lipgloss.Width(header)-lipgloss.Width(p)) + p
 	}
 	badges := m.renderBadges()
 	help := HelpStyle.Render("j/k move  Tab source  Enter select  / filter  : command  q quit")
