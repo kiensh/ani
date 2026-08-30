@@ -1687,6 +1687,9 @@ func (m *animePicker) applyStatusApplied(msg statusAppliedMsg) (tea.Model, tea.C
 	if !msg.applied {
 		return m, nil
 	}
+	// The action targets the selection, so the cursor is the acted-on item's
+	// index in the view; remember it across the re-filter below.
+	saved := m.cursor
 	for i := range m.items {
 		if m.items[i].MalID != msg.malID {
 			continue
@@ -1697,18 +1700,26 @@ func (m *animePicker) applyStatusApplied(msg statusAppliedMsg) (tea.Model, tea.C
 				m.items = append(m.items[:i], m.items[i+1:]...)
 			} else {
 				m.items[i].ListStatus = ""
+				m.items[i].UpdatedAt = time.Time{}
 			}
 			break
 		}
+		// MAL stamps the change, so a reload would list this item first under
+		// the (default) "updated" sort — bump the local timestamp to match
+		// instead of leaving it stale mid-list.
 		m.items[i].ListStatus = msg.act.Status
+		m.items[i].UpdatedAt = time.Now()
 		if msg.act.Status == "completed" && m.items[i].TotalEps > 0 {
 			m.items[i].WatchedEps = m.items[i].TotalEps
 		}
 		break
 	}
-	m.cursor = 0
-	m.topItem = 0
 	m.applyFilter()
+	// Hold the cursor at its index — on the row that shifted into the acted-on
+	// item's slot (it re-sorted away, left the filter, or was removed), clamped
+	// to the end when that slot no longer exists.
+	m.cursor = clamp(saved, 0, max(0, len(m.view)-1))
+	m.fixScroll()
 	return m, m.focusCmd()
 }
 

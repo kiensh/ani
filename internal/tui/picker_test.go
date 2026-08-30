@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -670,6 +671,103 @@ func TestAnimePickerRemoveFromList(t *testing.T) {
 	if sm.items[0].ListStatus != "" {
 		t.Errorf("Season: ListStatus = %q after remove, want empty", sm.items[0].ListStatus)
 	}
+}
+
+// TestAnimePickerStatusActionKeepsCursor verifies a status action (set/remove)
+// holds the cursor at its index instead of snapping to the top: the acted-on
+// item re-sorts away (set status bumps UpdatedAt to now, mirroring MAL, so it
+// jumps to the top under the default "updated" sort; remove drops it or sinks
+// it to the bottom) and the cursor lands on the row that shifted into its
+// slot, clamped to the end when that slot no longer exists.
+func TestAnimePickerStatusActionKeepsCursor(t *testing.T) {
+	at := func(day int) time.Time { return time.Date(2026, 7, day, 0, 0, 0, 0, time.UTC) }
+	list := func() []mal.Item {
+		return []mal.Item{
+			{MalID: 1, Title: "Alpha", ListStatus: "watching", UpdatedAt: at(1)},
+			{MalID: 2, Title: "Beta", ListStatus: "watching", UpdatedAt: at(2)},
+			{MalID: 3, Title: "Gamma", ListStatus: "watching", UpdatedAt: at(3)},
+		}
+	}
+	// picker loads list() with the "updated" sort: view order is Gamma, Beta, Alpha.
+	picker := func(source AnimeSource, status string) *animePicker {
+		items := list()
+		m := newAnimePicker(source, "", animeLoadAll(items), nil, nil, nil, nil, nil, false)
+		m.filter.Status = status
+		loadAnime(m, items)
+		m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+		return m
+	}
+
+	// My List, remove the item under the cursor (Beta at index 1): cursor
+	// stays at 1, now on Alpha.
+	m := picker(SourceList, "All")
+	m.cursor = 1
+	m.applyStatusApplied(statusAppliedMsg{malID: 2, act: StatusAction{Remove: true}, applied: true})
+	if len(m.view) != 2 || m.view[m.cursor].MalID != 1 {
+		t.Errorf("remove mid-list: cursor=%d view=%v, want cursor on Alpha (1)", m.cursor, ids(m.view))
+	}
+
+	// My List, remove the last visible row (Alpha at index 2): the slot is
+	// gone, cursor clamps to the new last row.
+	m = picker(SourceList, "All")
+	m.cursor = 2
+	m.applyStatusApplied(statusAppliedMsg{malID: 1, act: StatusAction{Remove: true}, applied: true})
+	if len(m.view) != 2 || m.cursor != len(m.view)-1 || m.view[m.cursor].MalID != 2 {
+		t.Errorf("remove last: cursor=%d view=%v, want cursor on Beta (2)", m.cursor, ids(m.view))
+	}
+
+	// My List, remove the only item: empty view, cursor 0.
+	single := list()[:1]
+	m = newAnimePicker(SourceList, "", animeLoadAll(single), nil, nil, nil, nil, nil, false)
+	loadAnime(m, single)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m.applyStatusApplied(statusAppliedMsg{malID: 1, act: StatusAction{Remove: true}, applied: true})
+	if len(m.view) != 0 || m.cursor != 0 {
+		t.Errorf("remove only: view len=%d cursor=%d, want 0/0", len(m.view), m.cursor)
+	}
+
+	// Season, remove: the item stays but is now off-list — UpdatedAt zeroes
+	// (as on a reload) so it sinks to the bottom under the "updated" sort;
+	// cursor holds index 1, now on Alpha.
+	m = picker(SourceSeason, "All")
+	m.cursor = 1
+	m.applyStatusApplied(statusAppliedMsg{malID: 2, act: StatusAction{Remove: true}, applied: true})
+	if got := ids(m.view); len(got) != 3 || got[2] != 2 || m.view[m.cursor].MalID != 1 {
+		t.Errorf("remove in season: cursor=%d view=%v, want Beta sunk to bottom and cursor on Alpha (1)", m.cursor, got)
+	}
+
+	// Set status under a Watching filter: the item leaves the view, cursor
+	// holds its slot on the row behind it.
+	m = picker(SourceSeason, "Watching")
+	m.cursor = 1
+	m.applyStatusApplied(statusAppliedMsg{malID: 2, act: StatusAction{Status: "completed"}, applied: true})
+	if len(m.view) != 2 || m.view[m.cursor].MalID != 1 {
+		t.Errorf("set status under filter: cursor=%d view=%v, want cursor on Alpha (1)", m.cursor, ids(m.view))
+	}
+
+	// Set status, no filter: UpdatedAt bumps to now so the item jumps to the
+	// top (as a reload would show); the cursor holds index 1, now on Gamma —
+	// it does NOT follow the item.
+	m = picker(SourceSeason, "All")
+	m.cursor = 1
+	m.applyStatusApplied(statusAppliedMsg{malID: 2, act: StatusAction{Status: "on_hold"}, applied: true})
+	if got := ids(m.view); got[0] != 2 || m.view[m.cursor].MalID != 3 {
+		t.Errorf("set status no filter: cursor=%d view=%v, want Beta jumped to top and cursor on Gamma (3)", m.cursor, got)
+	}
+	for _, it := range m.items {
+		if it.MalID == 2 && !it.UpdatedAt.After(at(3)) {
+			t.Errorf("set status: Beta UpdatedAt = %v, want bumped past the newest fixed stamp", it.UpdatedAt)
+		}
+	}
+}
+
+// ids returns the MAL ids of items in order (test failure output helper).
+func ids(items []mal.Item) []int {
+	out := make([]int, len(items))
+	for i, it := range items {
+		out[i] = it.MalID
+	}
+	return out
 }
 
 // TestAnimePickerActionsNoMalID verifies Space is a no-op without a MAL id
