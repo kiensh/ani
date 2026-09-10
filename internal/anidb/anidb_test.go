@@ -199,3 +199,65 @@ func TestFetchReleasesResolutionSortNumeric(t *testing.T) {
 		}
 	}
 }
+
+// TestAiredCount: a fetch failure (HTTP != 200 on either request) must surface as
+// an error — callers cache answers, and an outage returned as 0 pinned every
+// aired count to "?" for the rest of the session. "No show on anidb" and "no
+// episodes" are real (0, nil) answers, safe to cache.
+func TestAiredCount(t *testing.T) {
+	const card = `<a href="/anime/slime-1663" title="Slime">`
+	browseStatus, browseBody := http.StatusOK, card
+	epsStatus, epsBody := http.StatusOK, `{"episodes":[{"id":1,"number":73},{"id":2,"number":88}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/browse":
+			w.WriteHeader(browseStatus)
+			if browseStatus == http.StatusOK {
+				w.Write([]byte(browseBody))
+			}
+		case strings.HasSuffix(r.URL.Path, "/episodes"):
+			w.WriteHeader(epsStatus)
+			if epsStatus == http.StatusOK {
+				w.Write([]byte(epsBody))
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	old := baseURL
+	baseURL = srv.URL
+	defer func() { baseURL = old }()
+
+	// Success with a cumulative offset: eps 73–88 → 88 − 72 = 16.
+	if n, err := AiredCount("Slime"); err != nil || n != 16 {
+		t.Fatalf("AiredCount = %v, %v; want 16, <nil>", n, err)
+	}
+
+	// Site down (search answers 503): an error, not a 0-as-answer.
+	browseStatus = http.StatusServiceUnavailable
+	if n, err := AiredCount("Slime"); err == nil || n != 0 {
+		t.Fatalf("AiredCount on 503 = %v, %v; want 0, <error>", n, err)
+	}
+	browseStatus = http.StatusOK
+
+	// Search 200s but the show isn't on anidb: a real (0, nil) answer.
+	browseBody = ""
+	if n, err := AiredCount("Slime"); err != nil || n != 0 {
+		t.Fatalf("AiredCount no-show = %v, %v; want 0, <nil>", n, err)
+	}
+	browseBody = card
+
+	// Episodes endpoint errors: an error.
+	epsStatus = http.StatusNotFound
+	if n, err := AiredCount("Slime"); err == nil || n != 0 {
+		t.Fatalf("AiredCount on episodes 404 = %v, %v; want 0, <error>", n, err)
+	}
+	epsStatus = http.StatusOK
+
+	// Show exists but lists no episodes: a real (0, nil) answer.
+	epsBody = `{"episodes":[]}`
+	if n, err := AiredCount("Slime"); err != nil || n != 0 {
+		t.Fatalf("AiredCount empty episodes = %v, %v; want 0, <nil>", n, err)
+	}
+}

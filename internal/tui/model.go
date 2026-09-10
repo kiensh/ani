@@ -63,6 +63,9 @@ func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 	}
 	m := newAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetch, debug)
 	m.provider = provider // drives the palette's provider switch (● active marker)
+	// Size the aired-prefetch semaphore for the provider now that it's known
+	// (newAnimePicker defaults to the torrent cap; anidb gets the gentler one).
+	m.prefetchSem = make(chan struct{}, m.prefetchCap())
 	if aired != nil {
 		m.aired = aired // reuse the session cache across Esc-from-releases
 	}

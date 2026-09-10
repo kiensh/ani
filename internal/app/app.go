@@ -235,13 +235,20 @@ func resolveMalDry(opt *Options, source tui.AnimeSource, query string, load tui.
 // latest episode from its releases (a same-day proxy for "aired"). Jikan's
 // episode feed is the fallback — authoritative but rate-limited — when the aid
 // can't be resolved or AnimeTosho has no releases. nil item → 0.
+//
+// anidb returns tui.AiredFailed when the fetch itself errors (site down/blocked)
+// so the pickers don't cache the failure as a final 0 — it's retried later.
 func latestEpisodeFn(opt *Options) func(*mal.Item) float64 {
 	return func(item *mal.Item) float64 {
 		if item == nil {
 			return 0
 		}
 		if opt.Source == "anidb" {
-			return anidb.AiredCount(item.Title)
+			n, err := anidb.AiredCount(item.Title)
+			if err != nil {
+				return tui.AiredFailed
+			}
+			return n
 		}
 		if aid := resolveAidFast(item, opt); aid > 0 {
 			if n := animetosho.LatestEpisode(aid, item.TotalEps); n > 0 {
@@ -266,7 +273,11 @@ func latestEpisodePrefetchFn(opt *Options) func(*mal.Item) float64 {
 			return 0
 		}
 		if opt.Source == "anidb" {
-			return anidb.AiredCount(item.Title)
+			n, err := anidb.AiredCount(item.Title)
+			if err != nil {
+				return tui.AiredFailed // fetch failed — the pickers won't cache it
+			}
+			return n
 		}
 		aid := resolveAidFast(item, opt)
 		if aid <= 0 {

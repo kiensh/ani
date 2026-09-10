@@ -123,7 +123,15 @@ func (m *releasePicker) fetchCmd(ep int) tea.Cmd {
 	}
 }
 
-// latestEpMsg carries the latest aired episode for the header anime.
+// AiredFailed is the aired-count sentinel for "the fetch itself failed" (provider
+// down/blocked) — distinct from a real 0, which IS an answer. The pickers' anidb
+// lookup returns it on error; the latestEpMsg handlers route it to
+// AiredCache.fail so the id is retried later instead of being cached as a final 0
+// (which pinned the display to "?" for the rest of the session during outages).
+const AiredFailed = -1
+
+// latestEpMsg carries the latest aired episode for the header anime. aired may be
+// AiredFailed — see there.
 type latestEpMsg struct {
 	malID int
 	aired float64
@@ -144,7 +152,8 @@ func (m *releasePicker) airedFetchCmd() tea.Cmd {
 	// already computed this anime's count — even a 0 — don't re-fetch it. Reuse the
 	// cached value into m.aired too: item.AiredEps can be stale/0 when the anime
 	// was picked before its count was cached, and without this a re-entry after
-	// play would leave the header at "?".
+	// play would leave the header at "?". A FAILED earlier fetch left no value, so
+	// this path re-fetches it — each release-picker entry is one retry.
 	if m.airedCache != nil && !m.airedCache.shouldFetch(m.item.MalID) {
 		m.aired = m.airedCache.value(m.item.MalID)
 		return nil
@@ -173,6 +182,14 @@ func (m *releasePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case latestEpMsg:
 		if m.item != nil && msg.malID == m.item.MalID {
+			if msg.aired == AiredFailed {
+				// The fetch failed (anidb down/blocked): keep "?" in the header
+				// and record nothing, so a later entry retries it.
+				if m.airedCache != nil {
+					m.airedCache.fail(msg.malID)
+				}
+				return m, nil
+			}
 			m.aired = msg.aired
 			if m.airedCache != nil {
 				m.airedCache.put(msg.malID, msg.aired) // record for the session

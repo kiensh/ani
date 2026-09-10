@@ -10,7 +10,10 @@ const inflightTTL = 10 * time.Second
 
 // AiredCache memoizes the latest-aired-episode count per MAL id for ONE app
 // session. Each anime's count is computed AT MOST ONCE per session (until the app
-// exits): a 0/failed result is stored too — it is not retried this session.
+// exits): a computed 0 is stored too — it is not retried this session. A FAILED
+// fetch (the provider itself errored — anidb down/blocked) stores nothing (see
+// fail) and stays retryable on focus or the next picker entry, so a transient
+// outage can't pin the display to "?" for the rest of the session.
 //
 // It is owned by app.Run and shared across the anime picker and the release
 // picker (and across Esc-from-releases, which recreate the picker), so a count
@@ -82,3 +85,9 @@ func (c *AiredCache) put(malID int, count float64) {
 	c.values[malID] = count
 	delete(c.inflight, malID)
 }
+
+// fail records that the fetch for malID itself failed (provider down/blocked): it
+// clears the in-flight marker WITHOUT storing a value, so the id stays retryable —
+// the next focus or picker entry fetches it again. A failed fetch is not an answer,
+// unlike a computed 0.
+func (c *AiredCache) fail(malID int) { delete(c.inflight, malID) }

@@ -95,12 +95,15 @@ func Search(query string) ([]Show, error) {
 	dbg("anidb: GET %s\n", u)
 	body, status, err := get(u)
 	if err != nil {
+		dbg("anidb: search %q: %v\n", query, err)
 		return nil, err
 	}
 	if status != 200 {
+		dbg("anidb: search %q: HTTP %d\n", query, status)
 		return nil, fmt.Errorf("anidb search: HTTP %d", status)
 	}
 	matches := cardRe.FindAllSubmatch(body, -1)
+	dbg("anidb: search %q: %d matches\n", query, len(matches))
 	out := make([]Show, 0, len(matches))
 	for _, m := range matches {
 		out = append(out, Show{
@@ -167,20 +170,32 @@ func Episodes(showID string) ([]Episode, error) {
 // float64 so fractional specials (e.g. 3.5) are preserved in the display.
 // For Slime S4 (anidb eps 73–88, offset 72): 88−72 = 16.0.
 // For a show with a 3.5 special: 3.5.
-func AiredCount(title string) float64 {
-	show, err := ResolveShow(title)
+//
+// A non-nil error means the FETCH itself failed (site down, HTTP error) — the
+// caller must not cache that as an answer. A (0, nil) return is a real answer:
+// the show isn't on anidb or lists no episodes, safe to cache.
+func AiredCount(title string) (float64, error) {
+	shows, err := Search(cleanQuery(title))
 	if err != nil {
-		return 0
+		dbg("anidb: aired %q: %v\n", title, err)
+		return 0, err
 	}
-	eps, err := Episodes(show.ID)
+	if len(shows) == 0 {
+		dbg("anidb: aired %q: no show\n", title)
+		return 0, nil
+	}
+	eps, err := Episodes(shows[0].ID)
 	if err != nil {
-		return 0
+		dbg("anidb: aired %q show=%s: %v\n", title, shows[0].ID, err)
+		return 0, err
 	}
 	if len(eps) == 0 {
-		return 0
+		dbg("anidb: aired %q show=%s: no episodes\n", title, shows[0].ID)
+		return 0, nil
 	}
-	offset := EpisodeOffset(eps)
-	return eps[len(eps)-1].Number - offset
+	n := eps[len(eps)-1].Number - EpisodeOffset(eps)
+	dbg("anidb: aired %q show=%s -> %g\n", title, shows[0].ID, n)
+	return n, nil
 }
 
 // EpisodeOffset returns the cumulative numbering offset for a show's episode list.

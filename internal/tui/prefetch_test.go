@@ -423,7 +423,8 @@ func TestPrefetchFocusCacheHitAndFallback(t *testing.T) {
 }
 
 // TestPrefetchSemaphoreCap: a picker's semaphore bounds concurrent in-flight
-// aired fetches to prefetchCap (animetosho times out under heavier load).
+// aired fetches to the torrent prefetch cap (animetosho times out under heavier
+// load).
 func TestPrefetchSemaphoreCap(t *testing.T) {
 	m := newAnimePicker(SourceSeason, "", animeLoadAll(nil), nil, nil, nil, nil, nil, false)
 	sem := m.prefetchSem
@@ -448,8 +449,71 @@ func TestPrefetchSemaphoreCap(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if maxInFlight > int32(prefetchCap) {
-		t.Errorf("max concurrent prefetch = %v, want <= %v", maxInFlight, prefetchCap)
+	if maxInFlight > int32(torrentPrefetchCap) {
+		t.Errorf("max concurrent prefetch = %v, want <= %v", maxInFlight, torrentPrefetchCap)
+	}
+}
+
+// TestAiredFailedFetchRetried: AiredFailed (the fetch itself errored — anidb
+// down/blocked) must NOT be cached as a final answer: the id stays retryable, so
+// re-focusing fetches it again and a later success caches normally. A genuine 0,
+// by contrast, remains a once-per-session answer. (The old behavior cached the
+// failure as 0, pinning every aired count to "?" for the rest of the session.)
+func TestAiredFailedFetchRetried(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, AirStatus: "currently_airing"},
+		{MalID: 2, AirStatus: "currently_airing"},
+	}
+	calls := 0
+	failing := true // focus fn mirrors app.go's anidb closure: AiredFailed on error
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil,
+		func(*mal.Item) float64 {
+			calls++
+			if failing {
+				return AiredFailed
+			}
+			return 7
+		},
+		nil, false)
+	m.filter.Status = "All"
+	m.filter.Sort = "relevance"
+	loadAnime(m, items)
+	m.height = 50
+	m.paneHeight = 13 // pageSize 10
+
+	// Focus item 1 while the provider is down: the fetch fails.
+	m.cursor = 0
+	cmd := m.latestEpisodeCmd()
+	if cmd == nil {
+		t.Fatal("latestEpisodeCmd = nil, want a fetch cmd")
+	}
+	m.Update(cmd())
+	if _, ok := m.aired.get(1); ok {
+		t.Fatal("failed fetch stored a value; want the cache entry absent")
+	}
+	if !m.aired.shouldFetch(1) {
+		t.Fatal("failed fetch left malID 1 un-retryable; want shouldFetch = true")
+	}
+
+	// The outage passes; re-focusing the same item retries and now caches.
+	failing = false
+	cmd = m.latestEpisodeCmd()
+	if cmd == nil {
+		t.Fatal("re-focus after failure: latestEpisodeCmd = nil, want a retry cmd")
+	}
+	m.Update(cmd())
+	if n, ok := m.aired.get(1); !ok || n != 7 {
+		t.Fatalf("aired[1] = %v, %v; want 7, true", n, ok)
+	}
+
+	// A genuine 0 is a final answer — focusing that item never re-fetches.
+	m.Update(latestEpMsg{malID: 2, aired: 0})
+	m.cursor = 1
+	if cmd := m.latestEpisodeCmd(); cmd != nil {
+		t.Error("focus on genuine-0 item: latestEpisodeCmd non-nil, want nil (cached)")
+	}
+	if calls != 2 {
+		t.Errorf("focus fn calls = %d, want 2 (failed try + one retry)", calls)
 	}
 }
 

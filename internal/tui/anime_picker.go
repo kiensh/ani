@@ -553,7 +553,7 @@ func newAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 		latestEpisode:         latestEpisode,
 		latestEpisodePrefetch: latestEpisodePrefetch,
 		aired:                 NewAiredCache(),
-		prefetchSem:           make(chan struct{}, prefetchCap),
+		prefetchSem:           make(chan struct{}, torrentPrefetchCap),
 		coverHeights:          map[int]int{},
 		cache:                 &animeCache{m: map[string][]mal.Item{}},
 		loading:               true,
@@ -688,10 +688,16 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case latestEpMsg:
-		// Record the result for this anime. Per the once-per-session rule any count
-		// (incl. 0/failed) is kept — it won't be re-fetched again this session.
+		// Record the result for this anime. Per the once-per-session rule a computed
+		// count (incl. a genuine 0) is kept — it won't be re-fetched this session.
+		// AiredFailed means the fetch itself errored (anidb down/blocked): record
+		// nothing so focus or the next picker entry retries it.
 		if m.latestEpisode != nil {
-			m.aired.put(msg.malID, msg.aired)
+			if msg.aired == AiredFailed {
+				m.aired.fail(msg.malID)
+			} else {
+				m.aired.put(msg.malID, msg.aired)
+			}
 		}
 		return m, nil
 
@@ -777,10 +783,27 @@ func (m *animePicker) applyLoaded(msg itemsLoadedMsg) (tea.Model, tea.Cmd) {
 // so the model schedules the next page.
 type prefetchPageDoneMsg struct{ firstPage bool }
 
-// prefetchCap bounds concurrent animetosho aired-episode fetches. Uncapped, a full
-// season's ~90 airing anime overwhelm animetosho (~1/3 time out at the 30s
-// deadline). 16 stays under where timeouts begin (verified: 0 errors at 16).
-const prefetchCap = 16
+// The aired-prefetch semaphore is sized per provider (see prefetchCap). torrent's
+// cap is verified against animetosho: uncapped, a full season's ~90 airing anime
+// overwhelm it (~1/3 time out at the 30s deadline); 16 stays under where timeouts
+// begin (verified: 0 errors at 16). anidb.app is a small Cloudflare-fronted site
+// with no such headroom — 4 keeps the background prefetch out of burst-block
+// territory at a slower fill. (That cap is conservative and unverified — it
+// couldn't be measured while the site was down; revisit once it's stable.)
+const (
+	torrentPrefetchCap = 16
+	anidbPrefetchCap   = 4
+)
+
+// prefetchCap returns the max concurrent aired-episode fetches for the active
+// provider. RunAnimePicker sizes m.prefetchSem with it once provider is known;
+// newAnimePicker defaults to the torrent cap (tests construct without a provider).
+func (m *animePicker) prefetchCap() int {
+	if m.provider == "anidb" {
+		return anidbPrefetchCap
+	}
+	return torrentPrefetchCap
+}
 
 // prefetchPageCmd prefetches one page of covers + aired episodes (see
 // selectPrefetchPage for what each page covers). The cover download is batched
@@ -944,12 +967,14 @@ const progressBarWidth = 14
 // airingProgress renders the top-right progress indicator for the background
 // aired-episode prefetch — "aired eps ██████░░░░░░░░ 60/150" — where the total
 // counts only airing anime (the only ones fetched; same eligibility as
-// maybeAppendAired) and done counts those with a cached count (any value,
-// incl. a failed 0). avail is the cell budget right of the header text; the
-// form degrades as it shrinks — bar shrinks, then drops, then the "aired eps"
-// label drops — so a long header still leaves room for progress. Empty when
-// there is nothing to show: prefetch disabled, list still loading, no airing
-// anime, every count already cached (hidden once complete), or no room at all.
+// maybeAppendAired) and done counts those with a cached count (any value, incl.
+// a genuine 0 — a FAILED fetch caches nothing, so it stays pending and honestly
+// keeps the bar short of full instead of faking completion). avail is the cell
+// budget right of the header text; the form degrades as it shrinks — bar
+// shrinks, then drops, then the "aired eps" label drops — so a long header
+// still leaves room for progress. Empty when there is nothing to show:
+// prefetch disabled, list still loading, no airing anime, every count already
+// cached (hidden once complete), or no room at all.
 func (m *animePicker) airingProgress(avail int) string {
 	if m.latestEpisodePrefetch == nil || m.loading || len(m.items) == 0 {
 		return ""
