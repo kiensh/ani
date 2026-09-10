@@ -5,6 +5,7 @@
 package anidb
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -67,6 +68,36 @@ type Episode struct {
 }
 
 // ---- HTTP helper ----
+
+// pingTimeout bounds a reachability probe: short, since the probe runs between
+// pickers on a provider switch and shouldn't hang it.
+const pingTimeout = 5 * time.Second
+
+// Ping checks the site is reachable with one request to the homepage: any HTTP
+// response below 500 counts as up (maintenance/outage answers 503).
+// app.applySourceSwitch uses it to warn immediately when switching to a dead
+// provider.
+func Ping() error {
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/", nil)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), pingTimeout)
+	defer cancel()
+	req = req.WithContext(ctx)
+	req.Header.Set("User-Agent", userAgent)
+	dbg("anidb: GET %s\n", baseURL+"/")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body) // drain so the connection is reused
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
 
 func get(u string) ([]byte, int, error) {
 	req, err := http.NewRequest(http.MethodGet, u, nil)

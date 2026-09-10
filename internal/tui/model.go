@@ -54,15 +54,17 @@ type Result struct {
 // latestEpisode backs the "watched/aired/total" display for the focused airing
 // anime (nil disables); latestEpisodePrefetch is the fast-only background variant
 // that pages the aired-episode prefetch (nil disables aired prefetch; covers are
-// still paged). state carries the session's picker options/cursor/list cache
-// across re-entries (nil = fresh defaults). Returns the selected anime, or
-// Quit=true on cancel.
-func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) float64, latestEpisodePrefetch func(*mal.Item) float64, aired *AiredCache, provider string, state *AnimeState, debug bool) (*Result, error) {
+// still paged). aired/health are the session-scoped caches (aired counts;
+// backend reachability for the down warning — nil disables the warning). state
+// carries the session's picker options/cursor/list cache across re-entries
+// (nil = fresh defaults). Returns the selected anime, or Quit=true on cancel.
+func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) float64, latestEpisodePrefetch func(*mal.Item) float64, aired *AiredCache, health *ProviderHealth, provider string, state *AnimeState, debug bool) (*Result, error) {
 	if load == nil {
 		return &Result{Quit: true}, nil
 	}
 	m := newAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetch, debug)
 	m.provider = provider // drives the palette's provider switch (● active marker)
+	m.health = health     // drives the backend-down warning line (nil-safe)
 	// Size the aired-prefetch semaphore for the provider now that it's known
 	// (newAnimePicker defaults to the torrent cap; anidb gets the gentler one).
 	m.prefetchSem = make(chan struct{}, m.prefetchCap())
@@ -90,13 +92,15 @@ func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 // the episode filter (latest-uploads view). provider is the active backend
 // ("torrent"/"anidb"; empty hides the palette's provider switch). copyMagnet
 // backs the Space menu's "Copy Magnet URL"; latestEpisode backs the
-// "watched/aired/total" header (nil disables each).
-func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*playable.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(*mal.Item) float64, aired *AiredCache, defaultEpisode int, provider string, debug bool) (*Result, error) {
+// "watched/aired/total" header; aired/health are the session-scoped caches
+// (aired counts; backend reachability for the down warning) (nil disables each).
+func RunReleasePicker(item *mal.Item, group, quality, sortName string, fetch func(int) []*playable.Release, disableEpisode bool, copyMagnet func(string) error, latestEpisode func(*mal.Item) float64, aired *AiredCache, health *ProviderHealth, defaultEpisode int, provider string, debug bool) (*Result, error) {
 	if item == nil || fetch == nil {
 		return &Result{Quit: true}, nil
 	}
 	m := newReleasePicker(item, group, quality, sortName, fetch, disableEpisode, copyMagnet, latestEpisode, aired, defaultEpisode, debug)
 	m.provider = provider // drives the palette's provider switch (● active marker)
+	m.health = health     // drives the backend-down warning line (nil-safe)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
 	if err != nil {

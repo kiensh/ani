@@ -365,10 +365,14 @@ type animePicker struct {
 	query    string // "" = browse, non-empty = search
 	season   string // "All" (My List/search) | "Later" | "Summer 2026"
 	provider string // backend: "torrent" (default) | "anidb" — drives the palette's provider switch
-	load     AnimeLoad
-	cache    *animeCache
-	loading  bool
-	loadErr  error // non-nil when the last load failed; rendered in the empty list
+
+	// health tracks backend reachability for the session; the warning line shows
+	// when the active provider (or MAL, the list source) is down. nil disables.
+	health  *ProviderHealth
+	load    AnimeLoad
+	cache   *animeCache
+	loading bool
+	loadErr error // non-nil when the last load failed; rendered in the empty list
 
 	// current real-world season (default + window anchor)
 	currentYear   int
@@ -2098,8 +2102,23 @@ func (m *animePicker) View() string {
 	}
 	badges := m.renderBadges()
 	help := HelpStyle.Render("j/k move  Tab source  Enter select  / filter  : command  q quit")
+	if w := m.healthWarning(); w != "" {
+		// A down backend replaces the help line (same slot the release picker's
+		// toast uses) — always visible, no layout shift.
+		help = ErrorStyle.Render(w)
+	}
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
 	return lipgloss.JoinVertical(lipgloss.Left, header, badges, panes, help)
+}
+
+// healthWarning is the backend-down warning for the help line: the active
+// provider first, then the list source (MAL). A backend the user isn't using
+// never shows. Empty when both are reachable (or tracking is off).
+func (m *animePicker) healthWarning() string {
+	if m.health == nil {
+		return ""
+	}
+	return m.health.Warning(m.provider, "mal")
 }
 
 // renderConfirmModal draws the centered y/n modal for a per-anime action

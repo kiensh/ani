@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"sync"
 
@@ -57,10 +58,11 @@ const latestUploadsAID = -1
 // anime selection.
 func Run(opt *Options) error {
 	aired := tui.NewAiredCache()       // session-scoped; shared across the anime + release pickers
-	animeState := tui.NewAnimeState() // session-scoped; anime picker's options/cursor/cache survive Esc-back
+	health := tui.NewProviderHealth()  // session-scoped; backend reachability for the down warning
+	animeState := tui.NewAnimeState()  // session-scoped; anime picker's options/cursor/cache survive Esc-back
 	go mal.WarmAidResolvers(opt.Debug) // overlap the one-time Fribb/AniDB map load with the first MAL fetch
 	for {
-		aid, item, err := resolve(opt, aired, animeState)
+		aid, item, err := resolve(opt, aired, health, animeState)
 		if errors.Is(err, errRelogin) {
 			if e := mal.Login(opt.Debug); e != nil {
 				fmt.Fprintf(os.Stderr, "ani: login failed: %v\n", e)
@@ -77,16 +79,16 @@ func Run(opt *Options) error {
 		if errors.As(err, &srcSwitch) {
 			// Provider change from the anime picker's `:` palette: apply it and
 			// re-resolve (the release picker handles its own switches in place).
-			applySourceSwitch(opt, srcSwitch.source)
+			applySourceSwitch(opt, srcSwitch.source, health)
 			aired.Reset()
 			continue
 		}
 		if err != nil {
 			return err
 		}
-		if err := releaseLoop(opt, aid, item, aired); err != nil {
+		if err := releaseLoop(opt, aid, item, aired, health); err != nil {
 			if errors.Is(err, errBackToAnime) {
-				continue // Esc in release picker → re-resolve
+				continue // Esc in release picker (or a dead switched-to provider) → re-resolve
 			}
 			return err
 		}
@@ -97,14 +99,14 @@ func Run(opt *Options) error {
 // resolve picks an anime and returns its AniDB id + item. A numeric query is a
 // direct AniDB id (no MAL); otherwise MAL when logged in, else AnimeTosho
 // (series search by name, or latest uploads when no query).
-func resolve(opt *Options, aired *tui.AiredCache, animeState *tui.AnimeState) (int, *mal.Item, error) {
+func resolve(opt *Options, aired *tui.AiredCache, health *tui.ProviderHealth, animeState *tui.AnimeState) (int, *mal.Item, error) {
 	if n, perr := strconv.Atoi(opt.Query); perr == nil && n > 0 {
 		return resolveAnidb(n)
 	}
 	if mal.LoggedIn() {
-		return resolveMal(opt, aired, animeState)
+		return resolveMal(opt, aired, health, animeState)
 	}
-	return resolveAnimetosho(opt, animeState)
+	return resolveAnimetosho(opt, health, animeState)
 }
 
 // resolveAnidb builds a minimal item from the series metadata (no MAL).
@@ -119,26 +121,19 @@ func resolveAnidb(aid int) (int, *mal.Item, error) {
 // resolveMal runs the anime picker over MAL and resolves the AniDB id from the
 // picked item. Browse opens on Season (current); Tab → My List. A non-empty
 // query means search.
-func resolveMal(opt *Options, aired *tui.AiredCache, animeState *tui.AnimeState) (int, *mal.Item, error) {
+func resolveMal(opt *Options, aired *tui.AiredCache, health *tui.ProviderHealth, animeState *tui.AnimeState) (int, *mal.Item, error) {
 	query := opt.Query
 	source := tui.SourceSeason // default browse source
 	load := func(src tui.AnimeSource, q, season string) ([]mal.Item, error) {
-		if q != "" {
-			return mal.Search(q, opt.Debug)
+		items, err := malLoad(src, q, season, opt.Debug)
+		// Track MAL reachability for the down warning (errors here are
+		// auth/network — an empty result is NOT an error, so no false mark).
+		if err != nil {
+			health.MarkDown("mal", downReason(err))
+		} else {
+			health.MarkUp("mal")
 		}
-		switch src {
-		case tui.SourceList:
-			return mal.MyList("", opt.Debug)
-		default: // SourceSeason
-			if season == mal.SeasonLater {
-				return mal.Upcoming(opt.Debug)
-			}
-			year, s, ok := mal.ParseSeasonLabel(season)
-			if !ok {
-				return nil, fmt.Errorf("invalid season %q", season)
-			}
-			return mal.Seasonal(year, s, opt.Debug)
-		}
+		return items, err
 	}
 	applyStatus := func(malID, watched int, act tui.StatusAction) bool {
 		var err error
@@ -149,7 +144,7 @@ func resolveMal(opt *Options, aired *tui.AiredCache, animeState *tui.AnimeState)
 		}
 		return err == nil && !opt.DryRun
 	}
-	latestEpisode := latestEpisodeFn(opt)
+	latestEpisode := latestEpisodeFn(opt, health)
 	applyScore := func(malID, score int) bool {
 		err := mal.SetScore(malID, score, opt.DryRun, opt.Debug)
 		return err == nil && !opt.DryRun
@@ -163,7 +158,7 @@ func resolveMal(opt *Options, aired *tui.AiredCache, animeState *tui.AnimeState)
 		// flow is non-interactive (the release picker dry-runs separately).
 		return resolveMalDry(opt, source, query, load)
 	}
-	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetchFn(opt), aired, opt.Source, animeState, opt.Debug)
+	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetchFn(opt, health), aired, health, opt.Source, animeState, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -230,6 +225,44 @@ func resolveMalDry(opt *Options, source tui.AnimeSource, query string, load tui.
 	return aid, &item, nil
 }
 
+// malLoad fetches the anime list for one picker load — search for a query, else
+// My List or a season browse — factored out of resolveMal's load closure so the
+// closure can wrap it with health marking. An empty result is not an error.
+func malLoad(src tui.AnimeSource, q, season string, debug bool) ([]mal.Item, error) {
+	if q != "" {
+		return mal.Search(q, debug)
+	}
+	switch src {
+	case tui.SourceList:
+		return mal.MyList("", debug)
+	default: // SourceSeason
+		if season == mal.SeasonLater {
+			return mal.Upcoming(debug)
+		}
+		year, s, ok := mal.ParseSeasonLabel(season)
+		if !ok {
+			return nil, fmt.Errorf("invalid season %q", season)
+		}
+		return mal.Seasonal(year, s, debug)
+	}
+}
+
+// httpCodeRe pulls a status code out of a backend error for the warning line.
+var httpCodeRe = regexp.MustCompile(`\b(?:HTTP|returned|status)\s+(\d{3})\b`)
+
+// downReason condenses a backend error for the one-line down warning: the HTTP
+// status when the error carries one, else the error clipped short.
+func downReason(err error) string {
+	if m := httpCodeRe.FindStringSubmatch(err.Error()); m != nil {
+		return "HTTP " + m[1]
+	}
+	s := err.Error()
+	if len(s) > 48 {
+		s = s[:48] + "…"
+	}
+	return s
+}
+
 // latestEpisodeFn returns the aired-episode lookup both pickers use. AnimeTosho
 // is primary (it has no rate limit, unlike Jikan): resolve the aid and read the
 // latest episode from its releases (a same-day proxy for "aired"). Jikan's
@@ -237,8 +270,10 @@ func resolveMalDry(opt *Options, source tui.AnimeSource, query string, load tui.
 // can't be resolved or AnimeTosho has no releases. nil item → 0.
 //
 // anidb returns tui.AiredFailed when the fetch itself errors (site down/blocked)
-// so the pickers don't cache the failure as a final 0 — it's retried later.
-func latestEpisodeFn(opt *Options) func(*mal.Item) float64 {
+// so the pickers don't cache the failure as a final 0 — it's retried later. Such
+// an error also marks anidb down on health (cleared by any success), which is
+// what drives the pickers' warning line.
+func latestEpisodeFn(opt *Options, health *tui.ProviderHealth) func(*mal.Item) float64 {
 	return func(item *mal.Item) float64 {
 		if item == nil {
 			return 0
@@ -246,8 +281,10 @@ func latestEpisodeFn(opt *Options) func(*mal.Item) float64 {
 		if opt.Source == "anidb" {
 			n, err := anidb.AiredCount(item.Title)
 			if err != nil {
+				health.MarkDown("anidb", downReason(err))
 				return tui.AiredFailed
 			}
+			health.MarkUp("anidb")
 			return n
 		}
 		if aid := resolveAidFast(item, opt); aid > 0 {
@@ -267,7 +304,7 @@ func latestEpisodeFn(opt *Options) func(*mal.Item) float64 {
 // and the background prefetch never calls Jikan (rate-limited, errors for some).
 // Returns 0 when skipped/unknown; the focus path (latestEpisodeFn) still tries
 // the full chain (incl. Jikan) on demand for items the prefetch didn't fill.
-func latestEpisodePrefetchFn(opt *Options) func(*mal.Item) float64 {
+func latestEpisodePrefetchFn(opt *Options, health *tui.ProviderHealth) func(*mal.Item) float64 {
 	return func(item *mal.Item) float64 {
 		if item == nil {
 			return 0
@@ -275,8 +312,10 @@ func latestEpisodePrefetchFn(opt *Options) func(*mal.Item) float64 {
 		if opt.Source == "anidb" {
 			n, err := anidb.AiredCount(item.Title)
 			if err != nil {
-				return tui.AiredFailed // fetch failed — the pickers won't cache it
+				health.MarkDown("anidb", downReason(err)) // drives the warning line
+				return tui.AiredFailed                    // fetch failed — the pickers won't cache it
 			}
+			health.MarkUp("anidb")
 			return n
 		}
 		aid := resolveAidFast(item, opt)
@@ -348,17 +387,19 @@ func resolveAnidbManual(item *mal.Item, opt *Options) int {
 // resolveAnimetosho is the no-MAL path. A text query searches the provider's
 // series and lets the user pick; no query returns the latest-uploads sentinel
 // (animetosho only — anidb has no equivalent).
-func resolveAnimetosho(opt *Options, animeState *tui.AnimeState) (int, *mal.Item, error) {
+func resolveAnimetosho(opt *Options, health *tui.ProviderHealth, animeState *tui.AnimeState) (int, *mal.Item, error) {
 	if opt.Source == "anidb" {
-		return resolveAnidbNoLogin(opt, animeState)
+		return resolveAnidbNoLogin(opt, health, animeState)
 	}
 	if opt.Query == "" {
 		return latestUploadsAID, &mal.Item{Title: "Latest uploads"}, nil
 	}
 	series, err := animetosho.SearchSeries(opt.Query)
 	if err != nil {
+		health.MarkDown("torrent", downReason(err))
 		return 0, nil, err
 	}
+	health.MarkUp("torrent")
 	items := seriesToItems(series)
 	if len(items) == 0 {
 		return 0, nil, fmt.Errorf("no anime found")
@@ -373,7 +414,7 @@ func resolveAnimetosho(opt *Options, animeState *tui.AnimeState) (int, *mal.Item
 		}
 		return item.AnidbAID, &item, nil
 	}
-	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, opt.Source, animeState, opt.Debug)
+	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, health, opt.Source, animeState, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -393,14 +434,16 @@ func resolveAnimetosho(opt *Options, animeState *tui.AnimeState) (int, *mal.Item
 // resolveAnidbNoLogin is the no-MAL anidb path: search anidb.app by query, let the
 // user pick, then return the item (aid=0 — anidb resolves by title in streamLoop).
 // Unlike animetosho there's no "latest uploads" landing, so a query is required.
-func resolveAnidbNoLogin(opt *Options, animeState *tui.AnimeState) (int, *mal.Item, error) {
+func resolveAnidbNoLogin(opt *Options, health *tui.ProviderHealth, animeState *tui.AnimeState) (int, *mal.Item, error) {
 	if opt.Query == "" {
 		return 0, nil, fmt.Errorf("anidb mode requires a search query (run: ani <title>)")
 	}
 	shows, err := anidb.Search(opt.Query)
 	if err != nil {
+		health.MarkDown("anidb", downReason(err))
 		return 0, nil, err
 	}
+	health.MarkUp("anidb")
 	items := make([]mal.Item, 0, len(shows))
 	for _, s := range shows {
 		items = append(items, mal.Item{Title: s.Name})
@@ -414,7 +457,7 @@ func resolveAnidbNoLogin(opt *Options, animeState *tui.AnimeState) (int, *mal.It
 		fmt.Fprintf(os.Stderr, "DRY-RUN: auto-picked %q\n", item.Title)
 		return 0, &item, nil
 	}
-	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, opt.Source, animeState, opt.Debug)
+	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, health, opt.Source, animeState, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -442,7 +485,13 @@ func seriesToItems(ss []animetosho.SeriesSummary) []mal.Item {
 // picks up the right filters. The caller resets the aired cache — counts are
 // provider-specific (torrent's release proxy vs anidb's episode list — each
 // fails on different anime), so the old values and zeros don't apply.
-func applySourceSwitch(opt *Options, source string) {
+//
+// It also probes the switched-to provider and pre-marks its health, so a dead
+// one warns IMMEDIATELY in the picker that opens next (the anime picker on
+// re-resolve, or the release picker re-opening on the same anime) instead of
+// only after its first fetches fail. The non-active provider is never probed —
+// its state stays whatever real traffic last reported.
+func applySourceSwitch(opt *Options, source string, health *tui.ProviderHealth) {
 	opt.Source = source
 	cfg := config.Load()
 	if source == "anidb" {
@@ -451,6 +500,20 @@ func applySourceSwitch(opt *Options, source string) {
 		opt.Group, opt.Quality = cfg.Group, cfg.Quality
 	}
 	config.SaveSource(source)
+	switch source {
+	case "anidb":
+		if err := anidb.Ping(); err != nil {
+			health.MarkDown("anidb", downReason(err))
+		} else {
+			health.MarkUp("anidb")
+		}
+	default: // "torrent"
+		if err := animetosho.Ping(); err != nil {
+			health.MarkDown("torrent", downReason(err))
+		} else {
+			health.MarkUp("torrent")
+		}
+	}
 }
 
 // releaseLoop runs the pick → play/download → write-back loop for one anime.
@@ -460,19 +523,25 @@ func applySourceSwitch(opt *Options, source string) {
 // newest releases site-wide with the episode filter disabled; that view offers
 // no switch (anidb resolves per show). Returns errBackToAnime when the user
 // backs out.
-func releaseLoop(opt *Options, aid int, item *mal.Item, aired *tui.AiredCache) error {
+func releaseLoop(opt *Options, aid int, item *mal.Item, aired *tui.AiredCache, health *tui.ProviderHealth) error {
 	// Episode to restore after a provider switch: keeps the user's selection
 	// when the same anime re-opens on the other backend (0 = none yet).
 	reentryEpisode := 0
 	for {
-		err := runReleaseLoop(opt, aid, item, aired, reentryEpisode)
+		err := runReleaseLoop(opt, aid, item, aired, health, reentryEpisode)
 		var srcSwitch errSourceSwitch
 		if !errors.As(err, &srcSwitch) {
 			return err
 		}
-		applySourceSwitch(opt, srcSwitch.source)
+		applySourceSwitch(opt, srcSwitch.source, health)
 		aired.Reset()
 		reentryEpisode = srcSwitch.episode
+		if health.IsDown(opt.Source) {
+			// The switch probe already knows the target provider is dead — don't
+			// spend another round-trip failing to resolve the show. Bounce
+			// straight back to the anime picker, whose warning line says why.
+			return errBackToAnime
+		}
 		if aid == 0 {
 			// Came from the anidb path (it resolves by title): the torrent path
 			// needs an AniDB id for this anime.
@@ -494,15 +563,15 @@ func releaseLoop(opt *Options, aid int, item *mal.Item, aired *tui.AiredCache) e
 // runReleaseLoop dispatches to the active provider's pick → play loop.
 // firstEpisode seeds the picker's episode filter for its first run only (the
 // provider-switch re-entry restores the user's selection).
-func runReleaseLoop(opt *Options, aid int, item *mal.Item, aired *tui.AiredCache, firstEpisode int) error {
+func runReleaseLoop(opt *Options, aid int, item *mal.Item, aired *tui.AiredCache, health *tui.ProviderHealth, firstEpisode int) error {
 	if opt.Source == "anidb" {
-		return streamLoop(opt, item, aired, firstEpisode)
+		return streamLoop(opt, item, aired, health, firstEpisode)
 	}
 	if aid == latestUploadsAID {
-		return latestLoop(opt, item, aired, firstEpisode)
+		return latestLoop(opt, item, aired, health, firstEpisode)
 	}
 	cache := &episodeCache{data: map[int][]*playable.Release{}}
-	return playLoop(opt, item, cachedFetch(aid, cache), false, aired, firstEpisode)
+	return playLoop(opt, item, cachedFetch(aid, cache, health), false, aired, health, firstEpisode)
 }
 
 // streamLoop resolves the anime on anidb.app (by title) and runs the same
@@ -510,9 +579,17 @@ func runReleaseLoop(opt *Options, aid int, item *mal.Item, aired *tui.AiredCache
 // returns audio×resolution stream variants as playable.Release items. The release
 // picker's group filter = sub/dub, quality filter = resolution — same UI, different
 // backend.
-func streamLoop(opt *Options, item *mal.Item, aired *tui.AiredCache, firstEpisode int) error {
+func streamLoop(opt *Options, item *mal.Item, aired *tui.AiredCache, health *tui.ProviderHealth, firstEpisode int) error {
 	show, err := anidb.ResolveShow(item.Title)
 	if err != nil {
+		// Provider down (marked by the switch probe or earlier fetch failures):
+		// bounce back to the anime picker — its warning line says why, and the
+		// user can switch back or wait — instead of the app dying at a dead
+		// backend. A resolve failure with the site UP is a real error (title
+		// mismatch) and keeps the old behavior.
+		if health.IsDown("anidb") {
+			return errBackToAnime
+		}
 		return fmt.Errorf("anidb: resolve %q: %w", item.Title, err)
 	}
 	// No default-episode override: the picker advances to watched+1 itself
@@ -530,30 +607,39 @@ func streamLoop(opt *Options, item *mal.Item, aired *tui.AiredCache, firstEpisod
 		}
 		rels, e := anidb.FetchReleases(show.ID, ep)
 		if e != nil {
+			// Mark reachability for the warning line (a missing episode is an
+			// empty list, not an error — only transport/HTTP failures land here).
+			health.MarkDown("anidb", downReason(e))
 			mal.LogDebug("anidb fetch ep %d: %v\n", ep, e)
 			return nil
 		}
+		health.MarkUp("anidb")
 		if ep == 0 && len(rels) > 0 {
 			allCached = rels
 		}
 		return rels
 	}
-	return playLoop(opt, item, fetch, false, aired, firstEpisode)
+	return playLoop(opt, item, fetch, false, aired, health, firstEpisode)
 }
 
 // latestLoop is the no-arg AnimeTosho landing screen: the newest uploads in one
 // flat list (episode filter disabled), no MAL write-back (the synthetic item
 // has no MAL id).
-func latestLoop(opt *Options, item *mal.Item, aired *tui.AiredCache, firstEpisode int) error {
+func latestLoop(opt *Options, item *mal.Item, aired *tui.AiredCache, health *tui.ProviderHealth, firstEpisode int) error {
 	var cached []*playable.Release
 	fetch := func(int) []*playable.Release {
 		if cached == nil {
-			r, _ := animetosho.LatestReleases(200)
+			r, err := animetosho.LatestReleases(200)
+			if err != nil {
+				health.MarkDown("torrent", downReason(err))
+			} else {
+				health.MarkUp("torrent")
+			}
 			cached = animetosho.ToPlayables(r)
 		}
 		return cached
 	}
-	return playLoop(opt, item, fetch, true, aired, firstEpisode)
+	return playLoop(opt, item, fetch, true, aired, health, firstEpisode)
 }
 
 // playLoop drives the release picker and the play/download + MAL write-back,
@@ -563,7 +649,7 @@ func latestLoop(opt *Options, item *mal.Item, aired *tui.AiredCache, firstEpisod
 // tui.DefaultEpisodeAll = "all"). Later runs always pass 0: after a play the
 // write-back has advanced item.WatchedEps, so the picker computes the next
 // episode itself.
-func playLoop(opt *Options, item *mal.Item, fetch func(int) []*playable.Release, disableEpisode bool, aired *tui.AiredCache, firstEpisode int) error {
+func playLoop(opt *Options, item *mal.Item, fetch func(int) []*playable.Release, disableEpisode bool, aired *tui.AiredCache, health *tui.ProviderHealth, firstEpisode int) error {
 	first := true
 	for {
 		ep := 0
@@ -571,7 +657,7 @@ func playLoop(opt *Options, item *mal.Item, fetch func(int) []*playable.Release,
 			ep = firstEpisode
 			first = false
 		}
-		pick, action, err := pickReleaseTUI(item, opt, fetch, disableEpisode, aired, ep)
+		pick, action, err := pickReleaseTUI(item, opt, fetch, disableEpisode, aired, health, ep)
 		if err != nil {
 			return err // errBackToAnime propagates to Run
 		}
@@ -624,13 +710,20 @@ func (c *episodeCache) put(ep int, r []*playable.Release) {
 }
 
 // cachedFetch returns an episode fetch func that serves from the cache, falling
-// back to animetosho.FetchReleases(aid, ep) and caching the result.
-func cachedFetch(aid int, cache *episodeCache) func(int) []*playable.Release {
+// back to animetosho.FetchReleases(aid, ep) and caching the result. Fetch errors
+// mark the torrent backend down on health (cleared by any success) for the
+// pickers' warning line.
+func cachedFetch(aid int, cache *episodeCache, health *tui.ProviderHealth) func(int) []*playable.Release {
 	return func(ep int) []*playable.Release {
 		if r := cache.get(ep); r != nil {
 			return r
 		}
-		r, _ := animetosho.FetchReleases(aid, ep)
+		r, err := animetosho.FetchReleases(aid, ep)
+		if err != nil {
+			health.MarkDown("torrent", downReason(err))
+		} else {
+			health.MarkUp("torrent")
+		}
 		p := animetosho.ToPlayables(r)
 		cache.put(ep, p)
 		return p
@@ -641,7 +734,7 @@ func cachedFetch(aid int, cache *episodeCache) func(int) []*playable.Release {
 // first release so exec commands can be printed without a TUI. Returns the
 // chosen release and action ("play"/"download"); disableEpisode suppresses the
 // episode filter (latest-uploads view).
-func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*playable.Release, disableEpisode bool, aired *tui.AiredCache, defaultEpisode int) (*playable.Release, string, error) {
+func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*playable.Release, disableEpisode bool, aired *tui.AiredCache, health *tui.ProviderHealth, defaultEpisode int) (*playable.Release, string, error) {
 	if opt.DryRun {
 		ep := max(defaultEpisode, 0) // DefaultEpisodeAll → plain "all" fetch
 		if ep == 0 && !disableEpisode {
@@ -656,7 +749,7 @@ func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*playable.Re
 		return view[0], "play", nil
 	}
 	res, err := tui.RunReleasePicker(item, opt.Group, opt.Quality, opt.Sort, fetch, disableEpisode, player.CopyToClipboard,
-		latestEpisodeFn(opt), aired, defaultEpisode, opt.Source, opt.Debug)
+		latestEpisodeFn(opt, health), aired, health, defaultEpisode, opt.Source, opt.Debug)
 	if err != nil {
 		return nil, "", err
 	}

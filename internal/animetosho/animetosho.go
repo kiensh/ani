@@ -223,6 +223,35 @@ func toshoGet(path string, params url.Values, out any) error {
 	return nil
 }
 
+// pingTimeout bounds a reachability probe: short, since the probe runs between
+// pickers on a provider switch and shouldn't hang it.
+const pingTimeout = 5 * time.Second
+
+// Ping checks the feed API is reachable with one tiny request: any HTTP
+// response below 500 counts as up (a 4xx means the server answers — the probe
+// request is wrong, not the site). app.applySourceSwitch uses it to warn
+// immediately when switching to a dead provider.
+func Ping() error {
+	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, toshoBase+toshoAnidbPath+"1", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "ani/0.1 (+https://animetosho.xyz)")
+	req.Header.Set("Accept", "application/json")
+	resp, err := toshoHTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body) // drain so the connection is reused
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // SearchSeries returns anime matching the query. The API returns one row per
 // title-key (heavy anidb_aid duplication), so we paginate and let the caller
 // dedup. Stops when a page is short, adds no new anidb_aid, or the row cap hits.

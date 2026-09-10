@@ -58,6 +58,10 @@ type releasePicker struct {
 	aired         float64
 	airedCache    *AiredCache
 
+	// health tracks backend reachability for the session; the warning line shows
+	// when the ACTIVE provider is down. nil disables.
+	health *ProviderHealth
+
 	view    []*playable.Release // filter.Apply(all)
 	cursor  int
 	topItem int
@@ -692,9 +696,23 @@ func (m *releasePicker) View() string {
 	if m.toast != "" {
 		// Transient confirmation (e.g. "✓ Magnet copied") in place of the help line.
 		help = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true).Render(m.toast)
+	} else if w := m.healthWarning(); w != "" {
+		// A down active provider replaces the help line — always visible, no
+		// layout shift. (The toast wins for its 1.2s life; the warning returns.)
+		help = ErrorStyle.Render(w)
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, h1, h2, listArea, preview, help)
+}
+
+// healthWarning is the backend-down warning for the help line: the ACTIVE
+// provider only — a down backend the user isn't using never shows here. Empty
+// when it's reachable (or tracking is off).
+func (m *releasePicker) healthWarning() string {
+	if m.health == nil {
+		return ""
+	}
+	return m.health.Warning(m.provider)
 }
 
 // loadingText is the message shown in the list area while an episode fetch is
