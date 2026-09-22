@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"time"
 
+	"ani/internal/hostgate"
 	"ani/internal/playable"
 )
 
@@ -194,6 +195,12 @@ type seriesDetailResponse struct {
 	} `json:"data"`
 }
 
+// feedGate paces requests to the feed host: animetosho started answering the
+// aired prefetch's bursts with HTTP 429 (previously 16-wide concurrency was
+// fine), while sequential traffic at this pace is accepted (verified).
+// Pace/Cooldown are fields so tests can shorten them.
+var feedGate = &hostgate.Gates{Pace: 200 * time.Millisecond, Cooldown: 20 * time.Second}
+
 func toshoGet(path string, params url.Values, out any) error {
 	ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
 	defer cancel()
@@ -201,6 +208,9 @@ func toshoGet(path string, params url.Values, out any) error {
 	u := toshoBase + path
 	if encoded := params.Encode(); encoded != "" {
 		u += "?" + encoded
+	}
+	if err := feedGate.Wait(u); err != nil {
+		return fmt.Errorf("animetosho: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -215,6 +225,10 @@ func toshoGet(path string, params url.Values, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusTooManyRequests {
+			feedGate.Trip(u, hostgate.ParseRetryAfter(resp.Header.Get("Retry-After")))
+			return fmt.Errorf("animetosho: %w", hostgate.ErrLimited)
+		}
 		return fmt.Errorf("animetosho returned %s", resp.Status)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
@@ -234,7 +248,11 @@ const pingTimeout = 5 * time.Second
 func Ping() error {
 	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, toshoBase+toshoAnidbPath+"1", nil)
+	u := toshoBase + toshoAnidbPath + "1"
+	if err := feedGate.Wait(u); err != nil {
+		return fmt.Errorf("animetosho: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return err
 	}
@@ -246,6 +264,10 @@ func Ping() error {
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body) // drain so the connection is reused
+	if resp.StatusCode == http.StatusTooManyRequests {
+		feedGate.Trip(u, hostgate.ParseRetryAfter(resp.Header.Get("Retry-After")))
+		return fmt.Errorf("animetosho: %w", hostgate.ErrLimited)
+	}
 	if resp.StatusCode >= 500 {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
@@ -405,11 +427,19 @@ const seasonGap = 8
 //
 // Returns 0 — which the caller treats as "unknown, fall back to Jikan" — if no
 // episode reaches minGroups, or on error.
-func LatestEpisode(aid, total int) int {
+// LatestEpisode returns the latest aired episode number for an AniDB id, using
+// the newest releases' episode numbers (≥ minGroups distinct groups each, so
+// previews/pre-releases don't win). total is the series' known episode count
+// (0 = unknown); see the body for the tie-breaking rules.
+//
+// A non-nil error means the FETCH itself failed (rate-limited, network) — the
+// caller must not cache it as an answer. A (0, nil) return is a real answer:
+// the feed has no qualifying episodes yet, safe to cache.
+func LatestEpisode(aid, total int) (int, error) {
 	entries, err := seriesReleases(aid, 0, 0, airedLimit) // newest airedLimit releases (latest episodes + their groups)
 	if err != nil {
-		dbg("LatestEpisode aid=%d total=%d fetch-err=%v -> 0\n", aid, total, err)
-		return 0
+		dbg("LatestEpisode aid=%d total=%d fetch-err=%v\n", aid, total, err)
+		return 0, err
 	}
 	groups := map[int]map[string]struct{}{} // ep -> set of release groups
 	for _, e := range entries {
@@ -432,7 +462,7 @@ func LatestEpisode(aid, total int) int {
 	}
 	if len(supported) == 0 {
 		dbg("LatestEpisode aid=%d total=%d supported=[] -> 0\n", aid, total)
-		return 0
+		return 0, nil
 	}
 	slices.Sort(supported)
 
@@ -449,7 +479,7 @@ func LatestEpisode(aid, total int) int {
 		}
 		if latest > 0 {
 			dbg("LatestEpisode aid=%d total=%d supported=%v -> %d (capped)\n", aid, total, supported, latest)
-			return latest
+			return latest, nil
 		}
 		// Every supported episode exceeded the total (only cumulative numbering
 		// reached minGroups) — fall through to the gap-walk fallback below.
@@ -466,5 +496,5 @@ func LatestEpisode(aid, total int) int {
 		latest = supported[i]
 	}
 	dbg("LatestEpisode aid=%d total=%d supported=%v -> %d (gap-walk)\n", aid, total, supported, latest)
-	return latest
+	return latest, nil
 }

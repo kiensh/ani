@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 
 	"ani/internal/animetosho"
-	"ani/internal/anidb"
 	"ani/internal/app"
 	"ani/internal/config"
+	"ani/internal/hianime"
 	"ani/internal/mal"
 	"ani/internal/ui"
 )
@@ -53,7 +53,7 @@ func run(args []string) error {
 			logFile = f
 			mal.SetDebugLog(f)
 			animetosho.SetDebugLog(f)
-			anidb.SetDebugLog(f)
+			hianime.SetDebugLog(f)
 			if debug {
 				animetosho.SetDebugEcho(true)
 				fmt.Fprintf(os.Stderr, "ani debug log → %s\n", logPath)
@@ -65,8 +65,8 @@ func run(args []string) error {
 	// Select the per-provider group/quality so switching providers doesn't
 	// clobber each other's filter preferences.
 	group, quality := cfg.Group, cfg.Quality
-	if cfg.Source == "anidb" {
-		group, quality = cfg.AnidbGroup, cfg.AnidbQuality
+	if cfg.Source == "hianime" {
+		group, quality = cfg.HianimeGroup, cfg.HianimeQuality
 	}
 	o := &app.Options{
 		Debug:   debug,

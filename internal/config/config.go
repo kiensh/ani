@@ -17,11 +17,11 @@ type Config struct {
 	Sort    string `json:"sort"`    // default sort: newest|oldest|smallest|largest
 	Player  string `json:"player"`  // streaming player, default mpv
 	Dir     string `json:"dir"`     // default download dir, "" = cwd
-	Source  string `json:"source"`  // provider: "torrent" (default) | "anidb"
+	Source  string `json:"source"`  // provider: "torrent" (default) | "hianime"
 
 	// Per-provider filter preferences (so switching providers doesn't clobber).
-	AnidbGroup   string `json:"anidb_group"`   // anidb audio filter: "" | "sub" | "dub"
-	AnidbQuality string `json:"anidb_quality"` // anidb resolution filter: "" | "1080p" | ...
+	HianimeGroup   string `json:"hianime_group"`   // hianime audio filter: "" | "sub" | "dub"
+	HianimeQuality string `json:"hianime_quality"` // hianime resolution filter: "" | "1080p" | ...
 
 	// AnidbOverrides maps a MAL anime id to a user-chosen AniDB id (set by the
 	// manual animetosho-series fallback), so an anime resolved once by hand
@@ -49,7 +49,12 @@ func configPath() (string, error) {
 	return filepath.Join(dir, "ani", "config.json"), nil
 }
 
-// Load reads the config file, applying defaults for missing fields.
+// Load reads the config file, applying defaults for missing fields. It also
+// migrates values written before the stream provider moved from anidb.app to
+// hianime: source "anidb" becomes "hianime", and the old anidb_group /
+// anidb_quality filter keys are read into their hianime_* successors (so a
+// saved sub/1080p preference survives). The legacy keys are not re-emitted on
+// the next save.
 func Load() Config {
 	cfg := Default()
 	p, err := configPath()
@@ -61,6 +66,20 @@ func Load() Config {
 		return cfg
 	}
 	_ = json.Unmarshal(data, &cfg)
+	if cfg.Source == "anidb" {
+		cfg.Source = "hianime"
+	}
+	var legacy struct {
+		AnidbGroup   string `json:"anidb_group"`
+		AnidbQuality string `json:"anidb_quality"`
+	}
+	_ = json.Unmarshal(data, &legacy)
+	if cfg.HianimeGroup == "" {
+		cfg.HianimeGroup = legacy.AnidbGroup
+	}
+	if cfg.HianimeQuality == "" {
+		cfg.HianimeQuality = legacy.AnidbQuality
+	}
 	if cfg.Player == "" {
 		cfg.Player = "mpv"
 	}
@@ -72,14 +91,14 @@ func Load() Config {
 
 // SaveFilters persists the user's release filter preferences to config.json.
 // SaveFilters persists the release picker's filter choices, scoped to the
-// provider so switching between torrent and anidb doesn't clobber each other's
-// group/quality. Sort is shared (it's just display ordering).
+// provider so switching between torrent and hianime doesn't clobber each
+// other's group/quality. Sort is shared (it's just display ordering).
 func SaveFilters(group, quality, sort, source string) {
 	cfg := Load()
 	cfg.Sort = sort
-	if source == "anidb" {
-		cfg.AnidbGroup = group
-		cfg.AnidbQuality = quality
+	if source == "hianime" {
+		cfg.HianimeGroup = group
+		cfg.HianimeQuality = quality
 	} else {
 		cfg.Group = group
 		cfg.Quality = quality
@@ -87,10 +106,14 @@ func SaveFilters(group, quality, sort, source string) {
 	save(cfg)
 }
 
-// SaveSource persists the active provider ("torrent"/"anidb") to config.json —
-// the `:` palette's "Use …" commands call this so switching never needs a manual
-// config edit.
+// SaveSource persists the active provider ("torrent"/"hianime") to config.json
+// — the `:` palette's "Use …" commands call this so switching never needs a
+// manual config edit. The legacy "anidb" spelling is normalized so an old
+// config never resurrects the dead provider.
 func SaveSource(source string) {
+	if source == "anidb" {
+		source = "hianime"
+	}
 	cfg := Load()
 	cfg.Source = source
 	save(cfg)

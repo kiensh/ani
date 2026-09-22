@@ -34,18 +34,25 @@ func RunPlay(magnet, title, player string, dryRun bool) error {
 	return RunWithSignals(exec.Command("webtorrent", args...), dryRun)
 }
 
-// RunPlayURL plays a direct stream URL (HLS m3u8) in mpv — used by the anidb
+// RunPlayURL plays a direct stream URL (HLS m3u8) in mpv — used by the hianime
 // streaming provider. Unlike RunPlay (webtorrent+magnet), this launches mpv
-// directly with the URL; mpv handles HLS natively (no referrer needed, per the
-// Phase 0.5 probe).
-func RunPlayURL(streamURL, title, player string, dryRun bool) error {
+// directly with the URL. referer is required by the stream host (it answers
+// 403 without it); subURL optionally attaches a remote subtitle track.
+func RunPlayURL(streamURL, title, referer, subURL, player string, dryRun bool) error {
 	if player == "" {
 		player = "mpv"
 	}
 	if streamURL == "" {
 		return fmt.Errorf("release has no stream URL")
 	}
-	args := []string{streamURL, "--force-media-title=" + title}
+	args := []string{"--force-media-title=" + title}
+	if referer != "" {
+		args = append(args, "--referrer="+referer)
+	}
+	if subURL != "" {
+		args = append(args, "--sub-file="+subURL)
+	}
+	args = append(args, streamURL)
 	return RunWithSignals(exec.Command(player, args...), dryRun)
 }
 

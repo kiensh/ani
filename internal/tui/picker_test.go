@@ -942,8 +942,9 @@ func TestAnimePickerLatestEpisodeOncePerSession(t *testing.T) {
 	loadAnime(m, items)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
 
-	// A failed fetch (0) is stored too — once-per-session, no retry.
-	m.Update(latestEpMsg{malID: 1, aired: 0})
+	// A computed 0 is stored too — once-per-session, no retry. (Recording now
+	// happens at the fetch site, so simulate that instead of injecting a msg.)
+	m.aired.Record(1, 0)
 	if v, ok := m.aired.get(1); !ok || v != 0 {
 		t.Errorf("after a 0 result, aired cache = (%v,%v); want (0,true) so it isn't refetched", v, ok)
 	}
@@ -984,21 +985,25 @@ func TestAiredCacheSharedAcrossPickers(t *testing.T) {
 }
 
 // TestAnimePickerAiringProgress verifies the bottom-right aired-prefetch
-// progress bar: it counts airing anime only (no-id and non-airing items are
-// excluded), shows cached/total while incomplete, and hides when complete or
-// when the prefetch is disabled.
+// progress bar: its total counts only the anime the prefetch intends to fetch —
+// airing (no-id and non-airing excluded), not completed, and kept by the current
+// status filter — shows cached/total while incomplete, and hides when complete
+// or when the prefetch is disabled.
 func TestAnimePickerAiringProgress(t *testing.T) {
 	items := []mal.Item{
 		{MalID: 1, Title: "A1", AirStatus: "currently_airing", ListStatus: "watching"},
 		{MalID: 2, Title: "A2", AirStatus: "currently_airing"},
 		{MalID: 3, Title: "A3", AirStatus: "currently_airing"},
 		{MalID: 4, Title: "A4", AirStatus: "currently_airing"},
-		{MalID: 5, Title: "F", AirStatus: "finished_airing"},  // not airing: excluded
-		{MalID: 0, Title: "X", AirStatus: "currently_airing"}, // no id: excluded
+		{MalID: 5, Title: "F", AirStatus: "finished_airing"},                           // not airing: excluded
+		{MalID: 0, Title: "X", AirStatus: "currently_airing"},                          // no id: excluded
+		{MalID: 7, Title: "C", AirStatus: "currently_airing", ListStatus: "completed"}, // done: excluded
 	}
 	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil,
 		func(*mal.Item) float64 { return 0 }, false)
 	loadAnime(m, items)
+	m.filter.Status = "All" // every non-excluded airing anime counts (4)
+	m.applyFilter()
 	m.width, m.height = 100, 40
 	m.recomputeLayout()
 
@@ -1020,9 +1025,31 @@ func TestAnimePickerAiringProgress(t *testing.T) {
 		t.Errorf("complete prefetch: bar should hide, got:\n%s", out)
 	}
 
+	// Scoped to the default "My List" filter: only item 1 counts — the bar
+	// tracks 0/1 (the off-list bulk isn't in the total until a filter change
+	// dispatches it) and hides with just that count cached.
+	m.filter.Status = "My List"
+	m.applyFilter()
+	m.aired = NewAiredCache()
+	m.aired.put(2, 5) // off-list: not in the My List total
+	if p := m.airingProgress(80); !strings.Contains(p, "0/1") {
+		t.Errorf("My List scope: airingProgress = %q, want it to contain 0/1 (total scoped to item 1)", p)
+	}
+	m.aired.put(1, 8)
+	if p := m.airingProgress(80); p != "" {
+		t.Errorf("My List scope: airingProgress = %q, want empty (1/1 done)", p)
+	}
+	m.filter.Status = "All"
+	m.applyFilter()
+	if p := m.airingProgress(80); !strings.Contains(p, "2/4") {
+		t.Errorf("back on All: airingProgress = %q, want it to contain 2/4", p)
+	}
+
 	// Prefetch disabled → no bar even with counts missing.
 	m2 := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil, nil, false)
 	loadAnime(m2, items)
+	m2.filter.Status = "All"
+	m2.applyFilter()
 	m2.width, m2.height = 100, 40
 	m2.recomputeLayout()
 	m2.aired.put(1, 8)
@@ -1220,22 +1247,22 @@ func TestReleasePickerProviderSwitch(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
 	cmds := m.releaseCommands()
-	var torrentTitle, anidbTitle string
+	var torrentTitle, hianimeTitle string
 	found := 0
 	for _, c := range cmds {
 		switch c.Intent {
 		case "provider:torrent":
 			torrentTitle, found = c.Title, found+1
-		case "provider:anidb":
-			anidbTitle = c.Title
+		case "provider:hianime":
+			hianimeTitle = c.Title
 			found++
 		}
 	}
 	if found != 2 {
 		t.Fatalf("provider commands missing from palette (%d found)", found)
 	}
-	if !strings.HasPrefix(torrentTitle, "● ") || strings.HasPrefix(anidbTitle, "● ") {
-		t.Errorf("active marker wrong: torrent=%q anidb=%q", torrentTitle, anidbTitle)
+	if !strings.HasPrefix(torrentTitle, "● ") || strings.HasPrefix(hianimeTitle, "● ") {
+		t.Errorf("active marker wrong: torrent=%q hianime=%q", torrentTitle, hianimeTitle)
 	}
 
 	// Re-picking the active provider is a no-op.
@@ -1245,16 +1272,16 @@ func TestReleasePickerProviderSwitch(t *testing.T) {
 	}
 
 	// Picking the other provider requests the switch and quits.
-	model, cmd := m.applyCommand("provider:anidb")
+	model, cmd := m.applyCommand("provider:hianime")
 	rp := model.(*releasePicker)
-	if rp.result.SourceSwitch != "anidb" {
-		t.Errorf("SourceSwitch = %q, want anidb", rp.result.SourceSwitch)
+	if rp.result.SourceSwitch != "hianime" {
+		t.Errorf("SourceSwitch = %q, want hianime", rp.result.SourceSwitch)
 	}
 	if cmd == nil {
 		t.Error("provider switch returned no quit cmd")
 	}
 
-	// The latest-uploads view (episodeDisabled) offers no switch: anidb
+	// The latest-uploads view (episodeDisabled) offers no switch: hianime
 	// resolves per show, and that list spans many series.
 	lat := newReleasePicker(&mal.Item{Title: "Latest uploads"}, "", "", "newest", fetchAll(all), true, nil, nil, nil, 0, false)
 	lat.provider = "torrent"

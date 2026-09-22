@@ -88,7 +88,7 @@ var HelpStyle = lipgloss.NewStyle().Faint(true).PaddingLeft(1)
 const CursorGlyph = "▶ "
 
 // ProviderStyle styles the active-provider marker on the title headers
-// (● anidb.app). Regular weight so it reads as metadata next to the bold title.
+// (● hianime.at). Regular weight so it reads as metadata next to the bold title.
 var ProviderStyle = lipgloss.NewStyle().Foreground(colorTitle)
 
 // CoverBlankStyle renders plain spaces for the cover area.

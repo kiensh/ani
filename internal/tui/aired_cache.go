@@ -1,6 +1,9 @@
 package tui
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // inflightTTL is how long an in-flight marker blocks a re-dispatch. A fetch
 // whose picker quits before the result lands (provider switch, Esc-back, plain
@@ -11,22 +14,22 @@ const inflightTTL = 10 * time.Second
 // AiredCache memoizes the latest-aired-episode count per MAL id for ONE app
 // session. Each anime's count is computed AT MOST ONCE per session (until the app
 // exits): a computed 0 is stored too — it is not retried this session. A FAILED
-// fetch (the provider itself errored — anidb down/blocked) stores nothing (see
-// fail) and stays retryable on focus or the next picker entry, so a transient
-// outage can't pin the display to "?" for the rest of the session.
+// fetch (the provider itself errored — hianime down/blocked/rate-limited) stores
+// nothing (see fail) and stays retryable on focus or the next picker entry, so a
+// transient outage can't pin the display to "?" for the rest of the session.
 //
 // It is owned by app.Run and shared across the anime picker and the release
 // picker (and across Esc-from-releases, which recreate the picker), so a count
 // computed anywhere is never re-fetched. app.Run resets the cache on a provider
 // switch (counts are provider-specific).
 //
-// CONCURRENCY: every method runs on the single bubbletea Update goroutine.
-// selectPrefetchPage/maybeAppendAired/latestEpisodeCmd build their cmds
-// synchronously on Update; the worker goroutines they spawn only call the
-// injected latestEpisode* fn and return a latestEpMsg — they never touch this
-// cache. Picker programs run serially, so the shared cache has a single writer
-// at a time. No mutex is needed.
+// CONCURRENCY: results are recorded by the fetch goroutines themselves (Record,
+// from the latestEp cmd closures), so a value lands even when the picker that
+// dispatched the fetch is torn down before it completes — the result is not
+// routed through the model's Update loop. Dispatch/inspect calls (shouldFetch,
+// markDispatched, …) run on the Update goroutine. Every method takes the mutex.
 type AiredCache struct {
+	mu       sync.Mutex
 	values   map[int]float64   // malID → computed count (incl. 0); presence = "done this session"
 	inflight map[int]time.Time // malID → dispatch time of the in-flight fetch (dedup)
 }
@@ -41,6 +44,8 @@ func NewAiredCache() *AiredCache {
 // don't apply. Resetting in place (vs replacing the cache) keeps every holder
 // of the pointer — the release picker mid-switch — on the fresh cache.
 func (c *AiredCache) Reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.values = map[int]float64{}
 	c.inflight = map[int]time.Time{}
 }
@@ -52,22 +57,34 @@ func (c *AiredCache) Reset() {
 // nothing is flying. A duplicate dispatch against a still-running orphaned
 // fetch is harmless — both write the same count.
 func (c *AiredCache) clearInflight() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.inflight = map[int]time.Time{}
 }
 
 // get returns the cached count and whether one is stored for malID.
-func (c *AiredCache) get(malID int) (float64, bool) { n, ok := c.values[malID]; return n, ok }
+func (c *AiredCache) get(malID int) (float64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n, ok := c.values[malID]
+	return n, ok
+}
 
 // value returns the cached count, or 0 if none (map-like zero semantics, for
 // render / carrying into the release picker).
-func (c *AiredCache) value(malID int) float64 { return c.values[malID] }
+func (c *AiredCache) value(malID int) float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.values[malID]
+}
 
 // shouldFetch is false once a count has been computed for malID OR a fetch went
 // out for it less than inflightTTL ago; true otherwise. An older in-flight
 // marker means the fetch died with its picker — the id is retryable.
 func (c *AiredCache) shouldFetch(malID int) bool {
-	_, done := c.values[malID]
-	if done {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, done := c.values[malID]; done {
 		return false
 	}
 	t, flying := c.inflight[malID]
@@ -77,11 +94,30 @@ func (c *AiredCache) shouldFetch(malID int) bool {
 // markDispatched records that a fetch for malID is in flight. Call it
 // synchronously on the Update goroutine when dispatching, before returning the
 // async cmd, so a second focus/prefetch in the same tick is deduped.
-func (c *AiredCache) markDispatched(malID int) { c.inflight[malID] = time.Now() }
+func (c *AiredCache) markDispatched(malID int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.inflight[malID] = time.Now()
+}
+
+// Record stores a fetch's outcome from the goroutine the fetch ran on:
+// AiredFailed records nothing (the id stays retryable), any real answer
+// (including a genuine 0) is kept for the session. Recording here — not in the
+// Update-loop msg handler — is what makes a count survive its picker being
+// torn down mid-flight (Enter into releases, Esc-back, provider switch).
+func (c *AiredCache) Record(malID int, aired float64) {
+	if aired == AiredFailed {
+		c.fail(malID)
+		return
+	}
+	c.put(malID, aired)
+}
 
 // put stores the computed count (any value, including 0) and clears the in-flight
 // marker. A 0 is kept for the session (no retry) per the once-per-session rule.
 func (c *AiredCache) put(malID int, count float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.values[malID] = count
 	delete(c.inflight, malID)
 }
@@ -90,4 +126,8 @@ func (c *AiredCache) put(malID int, count float64) {
 // clears the in-flight marker WITHOUT storing a value, so the id stays retryable —
 // the next focus or picker entry fetches it again. A failed fetch is not an answer,
 // unlike a computed 0.
-func (c *AiredCache) fail(malID int) { delete(c.inflight, malID) }
+func (c *AiredCache) fail(malID int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.inflight, malID)
+}

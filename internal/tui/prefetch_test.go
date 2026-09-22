@@ -34,8 +34,9 @@ func malIDs(items []mal.Item) []int {
 	return out
 }
 
-// TestPrefetchPagingSplit: covers page by visibility (first pageSize); aired pages
-// by list-membership (on-list in page 1, off-list in page 2).
+// TestPrefetchPagingSplit: covers page by visibility (first pageSize); aired is
+// scoped to the status filter and dispatched on page 1 only — page 2 is
+// covers-only.
 func TestPrefetchPagingSplit(t *testing.T) {
 	items := []mal.Item{
 		{MalID: 1, AirStatus: "currently_airing", CoverURL: "u1", ListStatus: "watching"},
@@ -43,22 +44,85 @@ func TestPrefetchPagingSplit(t *testing.T) {
 		{MalID: 3, AirStatus: "currently_airing", CoverURL: "u3"},
 		{MalID: 4, AirStatus: "currently_airing", CoverURL: "u4"},
 	}
-	m := newPrefetchPicker(items, func(*mal.Item) float64 { return 5 }, 2)
+	m := newPrefetchPicker(items, func(*mal.Item) float64 { return 5 }, 2) // filter "All"
 
 	covers1, aired1 := m.selectPrefetchPage(true)
-	if len(aired1) != 2 || aired1[0].MalID != 1 || aired1[1].MalID != 2 {
-		t.Errorf("page1 aired (on-list) = %v, want [1 2]", malIDs(aired1))
+	if got := malIDs(aired1); len(got) != 4 {
+		t.Errorf("page1 aired (filter All) = %v, want [1 2 3 4]", got)
 	}
 	if len(covers1) != 2 || covers1[0] != "u1" || covers1[1] != "u2" {
 		t.Errorf("page1 covers = %v, want [u1 u2]", covers1)
 	}
 
 	covers2, aired2 := m.selectPrefetchPage(false)
-	if len(aired2) != 2 || aired2[0].MalID != 3 || aired2[1].MalID != 4 {
-		t.Errorf("page2 aired (off-list) = %v, want [3 4]", malIDs(aired2))
+	if aired2 != nil {
+		t.Errorf("page2 aired = %v, want nil (page 2 is covers-only)", malIDs(aired2))
 	}
 	if len(covers2) != 2 || covers2[0] != "u3" || covers2[1] != "u4" {
 		t.Errorf("page2 covers = %v, want [u3 u4]", covers2)
+	}
+}
+
+// TestPrefetchScopedToStatusFilter: the default Season view's "My List" filter
+// fetches only the user's own airing anime; switching the filter to one that
+// includes off-list anime ("All") dispatches the rest on demand.
+func TestPrefetchScopedToStatusFilter(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, AirStatus: "currently_airing", CoverURL: "u1", ListStatus: "watching"},
+		{MalID: 2, AirStatus: "currently_airing", CoverURL: "u2"},
+		{MalID: 3, AirStatus: "currently_airing", CoverURL: "u3", ListStatus: "plan_to_watch"},
+		{MalID: 4, AirStatus: "currently_airing", CoverURL: "u4"},
+	}
+	m := newPrefetchPicker(items, func(*mal.Item) float64 { return 5 }, 10)
+	m.filter.Status = "My List" // the Season source's default
+	m.applyFilter()
+
+	// Load-time prefetch: only the on-list items.
+	_, aired := m.selectPrefetchPage(true)
+	if got := malIDs(aired); len(got) != 2 || got[0] != 1 || got[1] != 3 {
+		t.Errorf("page1 aired (My List) = %v, want [1 3]", got)
+	}
+
+	// Switching to "All" dispatches the off-list bulk (2, 4) — and only that.
+	m.filter.Status = "All"
+	m.applyFilter()
+	if cmd := m.statusAiredPrefetchCmd(); cmd == nil {
+		t.Fatal("filter switch to All: statusAiredPrefetchCmd = nil, want a dispatch cmd")
+	}
+	// Dispatched via the cmd builder's marking: re-running selects nothing new.
+	if items := m.filterKeptAired(); len(items) != 0 {
+		t.Errorf("after dispatch, filterKeptAired = %v, want empty", malIDs(items))
+	}
+
+	// Re-selecting the same filter is a no-op.
+	m.filter.Status = "All"
+	if cmd := m.statusAiredPrefetchCmd(); cmd != nil {
+		t.Error("re-apply same filter: statusAiredPrefetchCmd non-nil, want nil (nothing new)")
+	}
+}
+
+// TestPrefetchSkipsCompleted: a completed anime (watched==total — the count
+// adds nothing) is never dispatched, at load or on a filter change, and is
+// excluded from the progress total.
+func TestPrefetchSkipsCompleted(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, AirStatus: "currently_airing", ListStatus: "watching"},
+		{MalID: 2, AirStatus: "currently_airing", ListStatus: "completed"}, // done: skip
+		{MalID: 3, AirStatus: "finished_airing", ListStatus: "watching"},   // not airing: skip
+	}
+	m := newPrefetchPicker(items, func(*mal.Item) float64 { return 5 }, 10)
+
+	_, aired := m.selectPrefetchPage(true)
+	if got := malIDs(aired); len(got) != 1 || got[0] != 1 {
+		t.Errorf("page1 aired = %v, want [1] (completed and finished skipped)", got)
+	}
+	m.filter.Status = "All"
+	if cmd := m.statusAiredPrefetchCmd(); cmd != nil {
+		t.Error("completed item dispatched on filter change, want no-op")
+	}
+	m.aired.put(1, 5)
+	if p := m.airingProgress(80); p != "" {
+		t.Errorf("airingProgress = %q, want empty (1/1 done; completed excluded from total)", p)
 	}
 }
 
@@ -188,26 +252,25 @@ func TestPrefetchCoversAllItemsAcrossFilter(t *testing.T) {
 	}
 }
 
-// TestPrefetchAiredAcrossFilter: page 1 + page 2 together prefetch EVERY airing
-// item's count, including ones filtered out of the current view — so changing
-// the status filter shows aired counts instantly (no focus delay). Symmetric to
-// the covers fix.
+// TestPrefetchAiredAcrossFilter (status-filter scoping edition): filter-kept
+// airing items are dispatched even when hidden from m.view by e.g. the fuzzy
+// filter — filterKeptAired scans m.items too, so the batch (and the progress
+// bar) still reaches everything the status filter keeps.
 func TestPrefetchAiredAcrossFilter(t *testing.T) {
 	all := []mal.Item{
 		{MalID: 1, AirStatus: "currently_airing"}, // in view
-		{MalID: 2, AirStatus: "currently_airing"}, // filtered out
+		{MalID: 2, AirStatus: "currently_airing"}, // fuzzy-hidden
 		{MalID: 3, AirStatus: "currently_airing"}, // in view
-		{MalID: 4, AirStatus: "currently_airing"}, // filtered out
+		{MalID: 4, AirStatus: "currently_airing"}, // fuzzy-hidden
 	}
-	m := newPrefetchPicker(all, func(*mal.Item) float64 { return 5 }, 10)
-	m.view = []mal.Item{all[0], all[2]} // status filter hides 2 and 4
+	m := newPrefetchPicker(all, func(*mal.Item) float64 { return 5 }, 10) // filter "All"
+	m.view = []mal.Item{all[0], all[2]}                                   // fuzzy hides 2 and 4
 
-	_, aired1 := m.selectPrefetchPage(true)
-	_, aired2 := m.selectPrefetchPage(false)
-	got := append(malIDs(aired1), malIDs(aired2)...)
+	_, aired := m.selectPrefetchPage(true)
+	got := malIDs(aired)
 	for _, id := range []int{1, 2, 3, 4} {
 		if !containsInt(got, id) {
-			t.Errorf("airing item %d not prefetched across pages; got %v", id, got)
+			t.Errorf("filter-kept airing item %d not prefetched; got %v", id, got)
 		}
 	}
 }
@@ -221,17 +284,18 @@ func containsInt(xs []int, x int) bool {
 	return false
 }
 
-// TestPrefetchEmptyViewChainsToPage2: when the initial filter hides everything
-// (empty view), page 1 selects nothing but must still chain to page 2 — which is
-// where the filtered-out items get covered. Guards the "default My List filter on
-// a fresh season prefetches nothing" regression.
+// TestPrefetchEmptyViewChainsToPage2: on a fresh season the default "My List"
+// filter keeps nothing (no on-list anime yet) — page 1 selects nothing but must
+// still chain to page 2 so every cover loads. The off-list items' aired counts
+// wait for a filter change (statusAiredPrefetchCmd), not page 2.
 func TestPrefetchEmptyViewChainsToPage2(t *testing.T) {
 	all := []mal.Item{
 		{MalID: 1, AirStatus: "currently_airing", CoverURL: "u1"},
 		{MalID: 2, AirStatus: "currently_airing", CoverURL: "u2"},
 	}
 	m := newPrefetchPicker(all, func(*mal.Item) float64 { return 5 }, 10)
-	m.view = nil // status filter hides everything
+	m.filter.Status = "My List" // Season default on a fresh season
+	m.view = nil                // filter keeps nothing
 
 	// Page 1 selects nothing…
 	covers1, aired1 := m.selectPrefetchPage(true)
@@ -246,15 +310,21 @@ func TestPrefetchEmptyViewChainsToPage2(t *testing.T) {
 	if _, ok := cmd().(prefetchPageDoneMsg); !ok {
 		t.Fatalf("empty page1 cmd did not return prefetchPageDoneMsg")
 	}
-	// Page 2 covers everything (all items are filtered-out).
+	// Page 2 covers everything (all items are filtered-out)…
 	covers2, aired2 := m.selectPrefetchPage(false)
 	for _, u := range []string{"u1", "u2"} {
 		if !sliceContains(covers2, u) {
 			t.Errorf("page2 (empty view) missing cover %q; got %v", u, covers2)
 		}
 	}
-	if len(aired2) != 2 {
-		t.Errorf("page2 (empty view) aired = %v, want both items", malIDs(aired2))
+	// …but dispatches no aired work (that's the filter change's job now).
+	if aired2 != nil {
+		t.Errorf("page2 aired = %v, want nil (covers-only page)", malIDs(aired2))
+	}
+	// Switching the filter to "All" is what fetches the fresh season's counts.
+	m.filter.Status = "All"
+	if cmd := m.statusAiredPrefetchCmd(); cmd == nil {
+		t.Error("filter switch to All: no dispatch cmd, want one for the off-list items")
 	}
 }
 
@@ -317,6 +387,69 @@ func TestPrefetchAiredIdempotentAfterBothPages(t *testing.T) {
 	}
 }
 
+// TestAiredResultSurvivesTeardown: the fetch goroutine records its outcome
+// into the session cache itself, so a count completes after its picker was
+// torn down (Enter into the release picker mid-prefetch, Esc-back, provider
+// switch) still lands — the next picker adopts it instead of re-fetching the
+// (rate-limited) request.
+func TestAiredResultSurvivesTeardown(t *testing.T) {
+	cache := NewAiredCache()
+	items := []mal.Item{{MalID: 1, Title: "X", AirStatus: "currently_airing"}}
+	m := newPrefetchPicker(items, func(*mal.Item) float64 { return 7 }, 10)
+	m.aired = cache // the session-shared cache
+
+	cmds := m.airedCmds(m.filterKeptAired())
+	if len(cmds) != 1 {
+		t.Fatalf("airedCmds = %d cmds, want 1", len(cmds))
+	}
+	msg := cmds[0]() // fetch completes; its latestEpMsg is never delivered (picker gone)
+	if lm, ok := msg.(latestEpMsg); !ok || lm.aired != 7 {
+		t.Fatalf("cmd msg = %v, want latestEpMsg{aired:7}", msg)
+	}
+	if n, ok := cache.get(1); !ok || n != 7 {
+		t.Fatalf("cache after undelivered msg = (%v, %v), want (7, true)", n, ok)
+	}
+
+	// The release picker built afterwards (same session cache) adopts the
+	// value — its fetch fn must never run.
+	rp := newReleasePicker(&mal.Item{MalID: 1, Title: "X", TotalEps: 12}, "", "", "newest",
+		fetchAll(nil), false, nil,
+		func(*mal.Item) float64 { t.Error("release picker re-fetched a recorded count"); return 0 },
+		cache, 0, false)
+	if cmd := rp.airedFetchCmd(); cmd != nil {
+		t.Error("release picker issued a re-fetch for an already-recorded count")
+	}
+	if rp.aired != 7 {
+		t.Errorf("release picker aired = %v, want 7 (adopted from the session cache)", rp.aired)
+	}
+}
+
+// TestAiredCacheConcurrentRecord: Record runs on fetch goroutines while the
+// Update goroutine inspects — the mutex keeps it consistent (run with -race).
+func TestAiredCacheConcurrentRecord(t *testing.T) {
+	c := NewAiredCache()
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			c.Record(id, float64(id))
+			c.shouldFetch(id)
+			c.value(id)
+		}(i)
+	}
+	for i := 0; i < 64; i++ { // Update-goroutine side
+		c.markDispatched(i + 1000)
+		c.get(i)
+	}
+	wg.Wait()
+	for i := 0; i < 64; i++ {
+		if n, ok := c.get(i); !ok || n != float64(i) {
+			t.Fatalf("cache[%d] = (%v, %v), want (%d, true)", i, n, ok, i)
+		}
+	}
+}
+
 // TestPrefetchDisabledNoAired: with latestEpisodePrefetch == nil, no aired items
 // are selected but covers are still returned.
 func TestPrefetchDisabledNoAired(t *testing.T) {
@@ -359,14 +492,15 @@ func TestPrefetchPageCmdEmptyHandling(t *testing.T) {
 	}
 }
 
-// TestPrefetchPageDoneHandler: firstPage done schedules page 2; the tail page's
-// done is a no-op.
+// TestPrefetchPageDoneHandler: firstPage done schedules page 2 (covers-only
+// now — the items carry cover URLs so page 2 has work); the tail page's done
+// is a no-op.
 func TestPrefetchPageDoneHandler(t *testing.T) {
 	items := []mal.Item{
-		{MalID: 1, AirStatus: "currently_airing"},
-		{MalID: 2, AirStatus: "currently_airing"},
-		{MalID: 3, AirStatus: "currently_airing"},
-		{MalID: 4, AirStatus: "currently_airing"},
+		{MalID: 1, AirStatus: "currently_airing", CoverURL: "u1"},
+		{MalID: 2, AirStatus: "currently_airing", CoverURL: "u2"},
+		{MalID: 3, AirStatus: "currently_airing", CoverURL: "u3"},
+		{MalID: 4, AirStatus: "currently_airing", CoverURL: "u4"},
 	}
 	m := newPrefetchPicker(items, func(*mal.Item) float64 { return 1 }, 2)
 
@@ -397,8 +531,8 @@ func TestPrefetchFocusCacheHitAndFallback(t *testing.T) {
 	m.height = 50
 	m.paneHeight = 13 // pageSize 10
 
-	// Prefetch fills aired[1].
-	m.Update(latestEpMsg{malID: 1, aired: 3})
+	// Prefetch fills aired[1] (recorded at the fetch site).
+	m.aired.Record(1, 3)
 	if n, _ := m.aired.get(1); n != 3 {
 		t.Fatalf("aired[1] = %v, want 3", n)
 	}
@@ -454,7 +588,7 @@ func TestPrefetchSemaphoreCap(t *testing.T) {
 	}
 }
 
-// TestAiredFailedFetchRetried: AiredFailed (the fetch itself errored — anidb
+// TestAiredFailedFetchRetried: AiredFailed (the fetch itself errored — hianime
 // down/blocked) must NOT be cached as a final answer: the id stays retryable, so
 // re-focusing fetches it again and a later success caches normally. A genuine 0,
 // by contrast, remains a once-per-session answer. (The old behavior cached the
@@ -465,7 +599,7 @@ func TestAiredFailedFetchRetried(t *testing.T) {
 		{MalID: 2, AirStatus: "currently_airing"},
 	}
 	calls := 0
-	failing := true // focus fn mirrors app.go's anidb closure: AiredFailed on error
+	failing := true // focus fn mirrors app.go's hianime closure: AiredFailed on error
 	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil,
 		func(*mal.Item) float64 {
 			calls++
@@ -507,7 +641,7 @@ func TestAiredFailedFetchRetried(t *testing.T) {
 	}
 
 	// A genuine 0 is a final answer — focusing that item never re-fetches.
-	m.Update(latestEpMsg{malID: 2, aired: 0})
+	m.aired.Record(2, 0)
 	m.cursor = 1
 	if cmd := m.latestEpisodeCmd(); cmd != nil {
 		t.Error("focus on genuine-0 item: latestEpisodeCmd non-nil, want nil (cached)")
@@ -517,10 +651,11 @@ func TestAiredFailedFetchRetried(t *testing.T) {
 	}
 }
 
-// TestPrefetchDebugLogsListFirst verifies the prefetch pages on-list (my list)
-// airing items in page 1 and off-list in page 2, and logs that order so the
-// "my list first" priority is observable in the debug log.
-func TestPrefetchDebugLogsListFirst(t *testing.T) {
+// TestPrefetchDebugLogsScope verifies the debug log makes the prefetch's
+// status-filter scoping observable: page 1 logs the filter it dispatched under
+// (carrying only that filter's items), and a later filter change logs its own
+// dispatch.
+func TestPrefetchDebugLogsScope(t *testing.T) {
 	var buf bytes.Buffer
 	mal.SetDebugLog(&buf)
 	defer mal.SetDebugLog(io.Discard)
@@ -531,19 +666,24 @@ func TestPrefetchDebugLogsListFirst(t *testing.T) {
 		{MalID: 3, AirStatus: "currently_airing"}, // off-list
 	}
 	m := newPrefetchPicker(items, func(*mal.Item) float64 { return 1 }, 10)
-	m.prefetchPageCmd(true)  // page 1 → on-list
-	m.prefetchPageCmd(false) // page 2 → off-list
+	m.filter.Status = "My List"
+	m.applyFilter()
+	m.prefetchPageCmd(true) // page 1 → the My List slice
+
+	m.filter.Status = "All"
+	m.applyFilter()
+	m.statusAiredPrefetchCmd() // filter change → the off-list bulk
 
 	out := buf.String()
-	i1 := strings.Index(out, "page 1 (on-list (my list))")
-	i2 := strings.Index(out, "page 2 (off-list)")
-	if i1 < 0 {
-		t.Errorf("missing page-1 (on-list) log line:\n%s", out)
+	i1 := strings.Index(out, `page 1 (status:My List)`)
+	i2 := strings.Index(out, `after filter "All"`)
+	if i1 < 0 || !strings.Contains(out, "malIDs=[1 2]") {
+		t.Errorf("page-1 log missing or didn't carry only the My List items:\n%s", out)
 	}
 	if i2 < 0 || !strings.Contains(out, "malIDs=[3]") {
-		t.Errorf("page-2 (off-list) log missing or didn't carry the off-list item:\n%s", out)
+		t.Errorf("filter-change log missing or didn't carry the off-list item:\n%s", out)
 	}
 	if i1 < 0 || i2 < 0 || i1 > i2 {
-		t.Errorf("expected page-1 log before page-2:\n%s", out)
+		t.Errorf("expected page-1 log before the filter-change log:\n%s", out)
 	}
 }

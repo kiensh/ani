@@ -143,7 +143,7 @@ func RenderReleaseLine(r *playable.Release) string {
 		eps = fmt.Sprintf("ep%d", r.Episode)
 	}
 
-	// Stream items (anidb): show audio [sub]/[dub] + resolution + episode, no
+	// Stream items (hianime): show audio [sub]/[dub] + resolution + episode, no
 	// torrent-specific date/size/seeders.
 	if r.IsStream() {
 		return fmt.Sprintf("       %-16s %-5s %-5s", "["+Truncate(grp, 14)+"]", res, eps)

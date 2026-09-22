@@ -7,7 +7,7 @@ import (
 
 // ProviderHealth tracks reachability of the app's backends for ONE app
 // session: MyAnimeList ("mal" — the anime list), AnimeTosho ("torrent") and
-// anidb.app ("anidb"). A backend is marked down when a real request to it
+// hianime.at ("hianime"). A backend is marked down when a real request to it
 // fails at the transport/HTTP level, and any later success marks it back up —
 // so the warning follows the provider's actual state, including recovery.
 //
@@ -54,10 +54,11 @@ func (h *ProviderHealth) IsDown(backend string) bool {
 }
 
 // Warning returns the "⚠ <name> unreachable (<reason>) — <effect>" line for
-// the first DOWN backend among keys, or "" when none is down. Callers pass
-// only the backends actually in use — the active provider, plus the list
-// source (MAL) for the anime picker — so a down backend the user isn't using
-// never surfaces. Empty keys are skipped.
+// the first DOWN backend among keys, or "" when none is down. A "rate-limited"
+// reason (a 429 cooldown) drops the "unreachable" wording — the backend is
+// up, it's refusing our pace. Callers pass only the backends actually in use —
+// the active provider, plus the list source (MAL) for the anime picker — so a
+// down backend the user isn't using never surfaces. Empty keys are skipped.
 func (h *ProviderHealth) Warning(keys ...string) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -69,6 +70,9 @@ func (h *ProviderHealth) Warning(keys ...string) string {
 		if !down {
 			continue
 		}
+		if reason == "rate-limited" {
+			return fmt.Sprintf("⚠ %s rate-limited (cooling down) — %s", backendName(k), backendEffect(k))
+		}
 		return fmt.Sprintf("⚠ %s unreachable (%s) — %s", backendName(k), reason, backendEffect(k))
 	}
 	return ""
@@ -77,8 +81,8 @@ func (h *ProviderHealth) Warning(keys ...string) string {
 // backendName is the display name for a backend key in the warning line.
 func backendName(backend string) string {
 	switch backend {
-	case "anidb":
-		return "anidb.app"
+	case "hianime":
+		return "hianime.at"
 	case "mal":
 		return "MyAnimeList"
 	default: // "torrent"
@@ -89,7 +93,7 @@ func backendName(backend string) string {
 // backendEffect is what losing the backend costs, for the warning line.
 func backendEffect(backend string) string {
 	switch backend {
-	case "anidb":
+	case "hianime":
 		return "aired counts and streams unavailable"
 	case "mal":
 		return "anime list unavailable"

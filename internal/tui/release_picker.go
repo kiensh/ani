@@ -28,7 +28,7 @@ type releasePicker struct {
 	qualities []string // distinct qualities present, for the quality overlay
 	item      *mal.Item
 	debug     bool
-	provider  string // active backend ("torrent"/"anidb") for the `:` palette switch
+	provider  string // active backend ("torrent"/"hianime") for the `:` palette switch
 
 	// fetch returns the releases for a given episode (cached + scoped by the
 	// caller). Invoked on demand: initially for the default episode, and again
@@ -97,7 +97,7 @@ func newReleasePicker(item *mal.Item, group, quality, sortName string, fetch fun
 	rp.filter.Group = group
 	rp.filter.Quality = quality
 	rp.filter.Sort = ui.NormalizeSort(sortName)
-	// Default filter: caller may pass a specific episode (e.g. anidb's latest
+	// Default filter: caller may pass a specific episode (e.g. hianime's latest
 	// available, or the episode restored across a provider switch);
 	// DefaultEpisodeAll keeps "all"; otherwise compute next-unwatched from the
 	// MAL item. Skipped when the episode filter is disabled (latest-uploads
@@ -128,7 +128,7 @@ func (m *releasePicker) fetchCmd(ep int) tea.Cmd {
 }
 
 // AiredFailed is the aired-count sentinel for "the fetch itself failed" (provider
-// down/blocked) — distinct from a real 0, which IS an answer. The pickers' anidb
+// down/blocked) — distinct from a real 0, which IS an answer. The pickers' hianime
 // lookup returns it on error; the latestEpMsg handlers route it to
 // AiredCache.fail so the id is retried later instead of being cached as a final 0
 // (which pinned the display to "?" for the rest of the session during outages).
@@ -167,7 +167,16 @@ func (m *releasePicker) airedFetchCmd() tea.Cmd {
 	}
 	item := m.item
 	fn := m.latestEpisode
-	return func() tea.Msg { return latestEpMsg{malID: item.MalID, aired: fn(item)} }
+	cache := m.airedCache
+	return func() tea.Msg {
+		aired := fn(item)
+		if cache != nil {
+			// Record where the fetch runs: the count lands in the session
+			// cache even if this picker is torn down before the msg arrives.
+			cache.Record(item.MalID, aired)
+		}
+		return latestEpMsg{malID: item.MalID, aired: aired}
+	}
 }
 
 func (m *releasePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -186,18 +195,9 @@ func (m *releasePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case latestEpMsg:
 		if m.item != nil && msg.malID == m.item.MalID {
-			if msg.aired == AiredFailed {
-				// The fetch failed (anidb down/blocked): keep "?" in the header
-				// and record nothing, so a later entry retries it.
-				if m.airedCache != nil {
-					m.airedCache.fail(msg.malID)
-				}
-				return m, nil
-			}
+			// The fetch goroutine already recorded the outcome (cache.Record);
+			// a failure keeps "?" and stays retryable. Here we only display.
 			m.aired = msg.aired
-			if m.airedCache != nil {
-				m.airedCache.put(msg.malID, msg.aired) // record for the session
-			}
 		}
 		return m, nil
 
@@ -468,12 +468,12 @@ func (m *releasePicker) releaseCommands() []Command {
 		Command{Category: "View", Title: "Quit", Intent: "quit", Keywords: "exit"},
 	)
 	// Provider switch: only when scoped to one anime (the latest-uploads view
-	// has no show for anidb to resolve) and the provider was wired in.
+	// has no show for hianime to resolve) and the provider was wired in.
 	if m.provider != "" && !m.episodeDisabled {
-		torrentActive := m.provider != "anidb"
+		torrentActive := m.provider != "hianime"
 		cmds = append(cmds,
 			Command{Category: "Provider", Title: providerLabel("torrent", torrentActive), Intent: "provider:torrent", Keywords: "animetosho backend"},
-			Command{Category: "Provider", Title: providerLabel("anidb", !torrentActive), Intent: "provider:anidb", Keywords: "stream backend"},
+			Command{Category: "Provider", Title: providerLabel("hianime", !torrentActive), Intent: "provider:hianime", Keywords: "stream backend"},
 		)
 	}
 	return cmds
@@ -520,7 +520,7 @@ func (m *releasePicker) applyCommand(intent string) (tea.Model, tea.Cmd) {
 		// Switch backend for THIS anime (app.Run applies it and re-opens the
 		// release picker under the new provider).
 		src := strings.TrimPrefix(intent, "provider:")
-		if (src != "torrent" && src != "anidb") || src == m.provider {
+		if (src != "torrent" && src != "hianime") || src == m.provider {
 			return m, nil // unknown or already active: no-op
 		}
 		m.result.SourceSwitch = src

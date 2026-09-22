@@ -1,5 +1,5 @@
 // Package playable is the provider-agnostic "thing you can watch" — a release
-// from a torrent index (AnimeTosho) or a streaming variant (anidb.app). The
+// from a torrent index (AnimeTosho) or a streaming variant (hianime). The
 // release picker, filters, sort, and MAL write-back all work over *Release, so
 // any provider that produces these items feeds the same UI.
 package playable
@@ -24,8 +24,12 @@ type Release struct {
 	Leechers  int
 	Magnet    string
 
-	// Stream-only (anidb). When set, the item plays via mpv+URL, not webtorrent.
-	StreamURL string
+	// Stream-only (hianime). When set, the item plays via mpv+URL, not
+	// webtorrent. Referer is the stream host's required referer (it answers
+	// 403 without it); SubtitleURL is an optional remote subtitle track.
+	StreamURL   string
+	Referer     string
+	SubtitleURL string
 }
 
 // IsStream reports whether this item is a direct stream (mpv) rather than a

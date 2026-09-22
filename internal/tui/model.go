@@ -30,7 +30,7 @@ type Result struct {
 	Relogin bool // re-run the browser OAuth flow
 	Logout  bool // forget the saved MAL token
 
-	// SourceSwitch requests a provider change ("torrent"/"anidb") from either
+	// SourceSwitch requests a provider change ("torrent"/"hianime") from either
 	// picker's `:` palette; app.Run applies it (persist + re-select the
 	// provider's filters, then re-resolve — the release picker re-opens on the
 	// same anime).
@@ -66,7 +66,7 @@ func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 	m.provider = provider // drives the palette's provider switch (● active marker)
 	m.health = health     // drives the backend-down warning line (nil-safe)
 	// Size the aired-prefetch semaphore for the provider now that it's known
-	// (newAnimePicker defaults to the torrent cap; anidb gets the gentler one).
+	// (newAnimePicker defaults to the torrent cap; hianime gets the gentler one).
 	m.prefetchSem = make(chan struct{}, m.prefetchCap())
 	if aired != nil {
 		m.aired = aired // reuse the session cache across Esc-from-releases
@@ -90,7 +90,7 @@ func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 // the caller) and is invoked on demand: initially for the default episode, and
 // again whenever the user changes the episode filter. disableEpisode suppresses
 // the episode filter (latest-uploads view). provider is the active backend
-// ("torrent"/"anidb"; empty hides the palette's provider switch). copyMagnet
+// ("torrent"/"hianime"; empty hides the palette's provider switch). copyMagnet
 // backs the Space menu's "Copy Magnet URL"; latestEpisode backs the
 // "watched/aired/total" header; aired/health are the session-scoped caches
 // (aired counts; backend reachability for the down warning) (nil disables each).

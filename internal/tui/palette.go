@@ -9,7 +9,7 @@ import (
 
 // Command is one searchable action in the `:` command palette. Intent is an
 // opaque key the owning picker interprets in its applyCommand switch (e.g.
-// "sort:score", "play", "provider:anidb"); Title + Keywords drive the fuzzy
+// "sort:score", "play", "provider:hianime"); Title + Keywords drive the fuzzy
 // filter; Category groups rows when the filter is empty.
 type Command struct {
 	Category string
