@@ -147,6 +147,9 @@ func resolveMal(opt *Options, aired *tui.AiredCache, health *tui.ProviderHealth,
 		return err == nil && !opt.DryRun
 	}
 	latestEpisode := latestEpisodeFn(opt, health)
+	// Favorite studios for the preview's ★ marker and the filter's "favorite"
+	// match — mal.FavoriteStudios memoizes, so every call after the first is free.
+	favStudios := func() map[string]bool { return mal.FavoriteStudios(opt.Debug) }
 	applyScore := func(malID, score int) bool {
 		err := mal.SetScore(malID, score, opt.DryRun, opt.Debug)
 		return err == nil && !opt.DryRun
@@ -160,7 +163,7 @@ func resolveMal(opt *Options, aired *tui.AiredCache, health *tui.ProviderHealth,
 		// flow is non-interactive (the release picker dry-runs separately).
 		return resolveMalDry(opt, source, query, load)
 	}
-	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetchFn(opt, health), aired, health, opt.Source, animeState, opt.Debug)
+	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetchFn(opt, health), aired, health, opt.Source, animeState, favStudios, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -438,7 +441,7 @@ func resolveAnimetosho(opt *Options, health *tui.ProviderHealth, animeState *tui
 		}
 		return item.AnidbAID, &item, nil
 	}
-	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, health, opt.Source, animeState, opt.Debug)
+	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, health, opt.Source, animeState, nil, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -482,7 +485,7 @@ func resolveHianimeNoLogin(opt *Options, health *tui.ProviderHealth, animeState 
 		fmt.Fprintf(os.Stderr, "DRY-RUN: auto-picked %q\n", item.Title)
 		return 0, &item, nil
 	}
-	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, health, opt.Source, animeState, opt.Debug)
+	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, health, opt.Source, animeState, nil, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}

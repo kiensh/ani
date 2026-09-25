@@ -147,6 +147,88 @@ func TestAnimePickerFilterNav(t *testing.T) {
 	}
 }
 
+// TestAnimePickerFilterAllFields: the fuzzy filter matches every visible
+// field, not just the title — genres, studios, season, type, list status, and
+// air status are all needles ("mushoku", "toei", "fall 1999", "watching",
+// "unaired"), case-insensitively.
+func TestAnimePickerFilterAllFields(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, Title: "Alpha", Genres: "Adventure, Fantasy"},
+		{MalID: 2, Title: "Beta", Studios: "Toei Animation"},
+		{MalID: 3, Title: "Gamma", StartSeason: "fall 1999", MediaType: "tv"},
+		{MalID: 4, Title: "Delta", ListStatus: "on_hold"},
+		{MalID: 5, Title: "Epsilon", AirStatus: "not_yet_aired"},
+		{MalID: 6, Title: "Zeta", WatchedEps: 3}, // off-list but watching → "watching"
+	}
+	cases := []struct {
+		needle string
+		wantID int // the single matching item's MalID (0 = no match)
+	}{
+		{"adventure", 1},
+		{"toei", 2},
+		{"fall 1999", 3},
+		{"on hold", 4},
+		{"unaired", 5},
+		{"watching", 6},
+		{"alpha", 1}, // title matching still works
+		{"nothing matches this", 0},
+	}
+	for _, c := range cases {
+		m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil, nil, false)
+		m.filter.Status = "All"
+		loadAnime(m, items)
+		m.filter.FuzzyText = c.needle
+		m.applyFilter()
+		got := ids(m.view)
+		if c.wantID == 0 && len(got) != 0 {
+			t.Errorf("filter %q: view = %v, want no match", c.needle, got)
+		}
+		if c.wantID != 0 && (len(got) != 1 || got[0] != c.wantID) {
+			t.Errorf("filter %q: view = %v, want [%d]", c.needle, got, c.wantID)
+		}
+	}
+}
+
+// TestAnimePickerFavoriteStudio: the preview marks favorite studios with a
+// "(favorite)" suffix, and the filter's "favorite" needle matches only those
+// items — including after the favorites land mid-session (favStudiosMsg
+// re-applies the filter).
+func TestAnimePickerFavoriteStudio(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, Title: "Alpha", Studios: "MAPPA, Studio Wit"},
+		{MalID: 2, Title: "Beta", Studios: "Toei Animation"},
+	}
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil, nil, false)
+	m.filter.Status = "All"
+	loadAnime(m, items)
+	m.width, m.height = 84, 30
+	m.recomputeLayout()
+	m.fixScroll()
+
+	// Before the favorites arrive: no marker, no "favorite" match.
+	if got := m.renderMetadata(); strings.Contains(got, "(favorite)") {
+		t.Errorf("metadata marks a studio before favorites loaded:\n%s", got)
+	}
+	m.filter.FuzzyText = "favorite"
+	m.applyFilter()
+	if len(m.view) != 0 {
+		t.Errorf("filter favorite before load: view = %v, want none", ids(m.view))
+	}
+
+	// The fetch lands (background cmd → msg): marker + filter match appear.
+	m.Update(favStudiosMsg{studios: map[string]bool{"MAPPA": true}})
+	if got := m.renderMetadata(); !strings.Contains(got, "MAPPA (favorite)") || strings.Contains(got, "Toei Animation (favorite)") {
+		t.Errorf("metadata after favorites = missing per-studio (favorite) marker:\n%s", got)
+	}
+	if len(m.view) != 1 || m.view[0].MalID != 1 {
+		t.Errorf("filter favorite after load: view = %v, want [1]", ids(m.view))
+	}
+	// Multi-studio items mark only the favorite studios.
+	if got := m.renderMetadata(); !strings.Contains(got, "Studio Wit") {
+		t.Errorf("multi-studio line lost the unmarked studio:\n%s", got)
+	}
+}
+
 // TestAnimePickerFilterEnterAccepts: Enter in filter mode keeps the filter
 // applied and returns to normal mode — it must NOT select/quit.
 func TestAnimePickerFilterEnterAccepts(t *testing.T) {

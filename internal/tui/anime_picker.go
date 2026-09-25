@@ -430,6 +430,13 @@ type animePicker struct {
 	coverText    string
 	coverHeights map[int]int // malID → actual rendered cover height (lines), so the placeholder matches on re-focus
 
+	// loadFavorites lazily fetches the user's MAL favorite studios (nil in the
+	// no-MAL paths); favoritesCmd calls it once in the background. favStudios
+	// holds the result: it drives the preview's "(favorite)" studio marker and the filter's
+	// "favorite" match.
+	loadFavorites func() map[string]bool
+	favStudios    map[string]bool
+
 	width, height int
 
 	// Layout, recomputed on WindowSizeMsg. All in terminal cells.
@@ -602,7 +609,9 @@ func (m *animePicker) defaultStatus() string {
 	return "All"
 }
 
-func (m *animePicker) Init() tea.Cmd { return m.loadCmd(m.source, m.query, m.season) }
+func (m *animePicker) Init() tea.Cmd {
+	return tea.Batch(m.loadCmd(m.source, m.query, m.season), m.favoritesCmd())
+}
 
 // itemsLoadedMsg carries one (source, query, season) load's items; Update
 // discards stale results.
@@ -636,6 +645,23 @@ func (m *animePicker) loadCmd(source AnimeSource, query, season string) tea.Cmd 
 type authNameMsg struct {
 	name string
 	ok   bool
+}
+
+// favStudiosMsg carries the user's MAL favorite studios (empty/nil = the fetch
+// failed or there are none): the preview marks those studios "(favorite)" and the
+// fuzzy filter matches "favorite" on them.
+type favStudiosMsg struct {
+	studios map[string]bool
+}
+
+// favoritesCmd fetches the favorite studios in the background so the picker
+// opens without waiting on it (nil when no loader is wired — the no-MAL paths).
+func (m *animePicker) favoritesCmd() tea.Cmd {
+	if m.loadFavorites == nil {
+		return nil
+	}
+	fn := m.loadFavorites
+	return func() tea.Msg { return favStudiosMsg{studios: fn()} }
 }
 
 // fetchAuthNameCmd calls the MAL API for the logged-in user's name (best-effort).
@@ -725,6 +751,13 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.authNameFailed = true
 		}
+		return m, nil
+
+	case favStudiosMsg:
+		m.favStudios = msg.studios
+		// Re-run the filter: a "favorite" needle only matches now that the set
+		// arrived (the fetch lands after the picker's first render).
+		m.applyFilter()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -1856,8 +1889,9 @@ func (m *animePicker) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // applyFilter recomputes m.view: status (always; options depend on source) →
-// fuzzy → sort, then clamps the cursor. Season is never a client filter (it's
-// either the Season load key or forced "All" in My List/search).
+// fuzzy (every visible field, not just the title — see searchText) → sort,
+// then clamps the cursor. Season is never a client filter (it's either the
+// Season load key or forced "All" in My List/search).
 func (m *animePicker) applyFilter() {
 	rs := m.items
 	if m.filter.Status != "" && m.filter.Status != "All" {
@@ -1873,7 +1907,7 @@ func (m *animePicker) applyFilter() {
 		needle := strings.ToLower(m.filter.FuzzyText)
 		filtered := make([]mal.Item, 0, len(rs))
 		for _, it := range rs {
-			if strings.Contains(strings.ToLower(it.Title), needle) {
+			if strings.Contains(m.searchText(it), needle) {
 				filtered = append(filtered, it)
 			}
 		}
@@ -1884,6 +1918,67 @@ func (m *animePicker) applyFilter() {
 		m.cursor = max(0, len(m.view)-1)
 	}
 	m.fixScroll()
+}
+
+// searchText builds the case-insensitive haystack for the fuzzy filter from
+// every visible field — title, genres, studios (plus "favorite" when a studio
+// is on the user's MAL favorites), season, type, list status, and air status —
+// so the filter can target any of them ("mappa", "favorite", "watching",
+// "fall 1999", "unaired"), not just the title.
+func (m *animePicker) searchText(it mal.Item) string {
+	var b strings.Builder
+	b.WriteString(strings.ToLower(it.Title))
+	for _, f := range []string{it.Genres, it.Studios, it.StartSeason, it.MediaType} {
+		if f != "" {
+			b.WriteByte(' ')
+			b.WriteString(strings.ToLower(f))
+		}
+	}
+	if it.ListStatus != "" {
+		b.WriteByte(' ')
+		b.WriteString(strings.ToLower(ui.MALListStatusShort(it.ListStatus)))
+	} else if it.WatchedEps > 0 {
+		b.WriteString(" watching") // the preview shows "· Watching" for this case
+	}
+	if a := ui.MALAirShort(it.AirStatus); a != "" {
+		b.WriteByte(' ')
+		b.WriteString(strings.ToLower(a))
+	}
+	if hasFavoriteStudio(it.Studios, m.favStudios) {
+		b.WriteString(" (favorite)") // mirrors the preview's studios line
+	}
+	return b.String()
+}
+
+// hasFavoriteStudio reports whether any of the comma-separated studios is on
+// the favorites set.
+func hasFavoriteStudio(studios string, favs map[string]bool) bool {
+	if len(favs) == 0 || studios == "" {
+		return false
+	}
+	for _, p := range strings.Split(studios, ",") {
+		if favs[strings.TrimSpace(p)] {
+			return true
+		}
+	}
+	return false
+}
+
+// markFavoriteStudios appends " (favorite)" to every studio on the user's MAL
+// favorites — plain text so it's visible at a glance AND searchable (the
+// fuzzy filter matches the same word). favs nil/empty leaves the string
+// unchanged.
+func markFavoriteStudios(studios string, favs map[string]bool) string {
+	if len(favs) == 0 || studios == "" {
+		return studios
+	}
+	parts := strings.Split(studios, ",")
+	for i, p := range parts {
+		if name := strings.TrimSpace(p); favs[name] {
+			parts[i] = name + " (favorite)"
+		}
+	}
+	return strings.Join(parts, ",")
 }
 
 func (m *animePicker) currentItemCopy() *mal.Item {
@@ -2350,7 +2445,7 @@ func (m *animePicker) renderMetadata() string {
 		lines = append(lines, GenresStyle.Render(wrapTwoLines("Genres: "+cur.Genres, width)))
 	}
 	if cur.Studios != "" {
-		lines = append(lines, StudiosStyle.Render(wrap("Studios: "+cur.Studios, width)))
+		lines = append(lines, StudiosStyle.Render(wrapTwoLines("Studios: "+markFavoriteStudios(cur.Studios, m.favStudios), width)))
 	}
 
 	seasonType := ""
