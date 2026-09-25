@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"ani/internal/mal"
 	"ani/internal/playable"
@@ -460,6 +461,120 @@ func TestSeasonArchiveWindow(t *testing.T) {
 	}
 	if sliceContains(got, "Fall 2013") {
 		t.Errorf("Fall 2013 should be excluded (< 2014): %v", got)
+	}
+}
+
+// TestAnimePickerViewHeightWithLongFilter: the pane title line ("Anime (N)
+// filter: …▏") is rendered inside a Width() box, and lipgloss WRAPS over-wide
+// content — growing the pane past the terminal height and scrolling the header
+// off the top. A filter text longer than the pane is wide must be clipped, not
+// wrapped (the "header hidden while filtering for One Piece" bug).
+func TestAnimePickerViewHeightWithLongFilter(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, Title: "One Piece", TotalEps: 0, WatchedEps: 1178, AirStatus: "currently_airing",
+			ListStatus: "watching", MeanScore: 8.72, Genres: "Action, Adventure, Fantasy",
+			Studios: "Toei Animation", StartSeason: "fall 1999", MediaType: "tv", Members: 5100000, CoverURL: "u"},
+	}
+	for _, sz := range [][2]int{{100, 30}, {84, 30}, {80, 24}} {
+		m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil, nil, false)
+		m.filter.Status = "All"
+		loadAnime(m, items)
+		m.width, m.height = sz[0], sz[1]
+		m.recomputeLayout()
+		m.fixScroll()
+		m.coverText = strings.Repeat("█\n", m.coverRows-1) + "█"
+		m.filter.Filtering = true
+		m.filter.FuzzyText = "one piece episode of nami kanketsu-hen" // longer than the pane is wide
+		m.applyFilter()
+		if got := len(strings.Split(m.View(), "\n")); got > sz[1] {
+			t.Errorf("size %dx%d with a long filter: View = %d lines, want <= %d (header would be pushed off)", sz[0], sz[1], got, sz[1])
+		}
+	}
+}
+
+// TestAnimePickerViewHeightWithAiredCount: once an airing anime's count lands
+// (the prefetch completing), the metadata progress line grows — "ep 1178/1179/?
+// [airing] Watching" — and must not exceed the preview pane's content width:
+// lipgloss wraps an over-wide line inside the pane's Width() box, the pane
+// grows a line, and the header is pushed off the top of the screen. This is the
+// "header hidden on One Piece right after the progress bar finished" bug (the
+// count arriving is what tripped it; with "?" it still fit).
+func TestAnimePickerViewHeightWithAiredCount(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, Title: "One Piece", TotalEps: 0, WatchedEps: 1178, AirStatus: "currently_airing",
+			ListStatus: "watching", MeanScore: 8.72, Genres: "Action, Adventure, Fantasy",
+			Studios: "Toei Animation", StartSeason: "fall 1999", MediaType: "tv", Members: 5100000, CoverURL: "u"},
+	}
+	for _, sz := range [][2]int{{100, 30}, {96, 30}, {92, 30}, {88, 30}, {84, 30}, {80, 24}} {
+		m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil, nil, false)
+		m.filter.Status = "All"
+		loadAnime(m, items)
+		m.width, m.height = sz[0], sz[1]
+		m.recomputeLayout()
+		m.fixScroll()
+		m.coverText = strings.Repeat("█\n", m.coverRows-1) + "█"
+		m.aired.Record(1, 1179) // the prefetch's result for One Piece
+		if got := len(strings.Split(m.View(), "\n")); got > sz[1] {
+			t.Errorf("size %dx%d with aired count cached: View = %d lines, want <= %d (header would be pushed off)", sz[0], sz[1], got, sz[1])
+		}
+	}
+}
+
+// TestClipANSI: the metadata width-guard clips by visible cells (wide runes
+// count as 2) and copies ANSI escapes through so styles survive the cut.
+func TestClipANSI(t *testing.T) {
+	plain := "ep 1178/1179/?  [airing]"
+	if got := clipANSI(plain, 10); got != "ep 1178/11" {
+		t.Errorf("clipANSI(plain, 10) = %q, want first 10 cells", got)
+	}
+	styled := "\x1b[36mep 1178/1179/?\x1b[0m  Watching"
+	got := clipANSI(styled, 14)
+	if want := "\x1b[36mep 1178/1179/?\x1b[0m"; got != want {
+		t.Errorf("clipANSI(styled, 14) = %q, want %q (escape kept, cut at 14 cells)", got, want)
+	}
+	if w := lipgloss.Width(got); w > 14 {
+		t.Errorf("clipped line is %d cells wide, want <= 14", w)
+	}
+	if got := clipANSI("日本語タイトル", 6); got != "日本語" {
+		t.Errorf("clipANSI(cjk, 6) = %q, want 日本語 (3 wide runes = 6 cells)", got)
+	}
+	if got := clipANSI("anything", 0); got != "" {
+		t.Errorf("clipANSI(s, 0) = %q, want empty", got)
+	}
+	// Multi-line entries (appendBadge puts the badge on its own line): each
+	// visual line gets the FULL width budget — the badge must not be clipped by
+	// whatever the first line consumed.
+	badge := "\x1b[46;30;1m Watching \x1b[0m"
+	multiline := clipANSI("ep 1179/1179/?  [airing]\n"+badge, 24)
+	if want := "ep 1179/1179/?  [airing]\n" + badge; multiline != want {
+		t.Errorf("clipANSI(badge on own line, 24) = %q, want %q (per-line budget)", multiline, want)
+	}
+}
+
+// TestWrapTwoLines: preview titles cap at two lines, the second ending with an
+// ellipsis when the title is longer; titles that already fit in two lines (or
+// one) pass through unchanged.
+func TestWrapTwoLines(t *testing.T) {
+	long := "Honzuki no Gekokujou: Shisho ni Naru Tame ni wa Shudan wo Erandeiraremasen - Ryoushu no Youjo"
+	got := wrapTwoLines(long, 32)
+	lines := strings.Split(got, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("wrapTwoLines(long, 32) = %d lines, want 2: %q", len(lines), got)
+	}
+	if !strings.HasSuffix(lines[1], "…") {
+		t.Errorf("second line = %q, want it to end with …", lines[1])
+	}
+	for i, ln := range lines {
+		if w := lipgloss.Width(ln); w > 32 {
+			t.Errorf("line %d is %d cells wide, want <= 32", i, w)
+		}
+	}
+	if got := wrapTwoLines("One Piece", 32); got != "One Piece" {
+		t.Errorf("one-line title: wrapTwoLines = %q, want unchanged", got)
+	}
+	exactlyTwo := "AAA BBB CCC DDD EEE FFF GGG HHH"
+	if got := wrapTwoLines(exactlyTwo, 18); got != wrap(exactlyTwo, 18) {
+		t.Errorf("two-line title: wrapTwoLines = %q, want the plain wrap %q", got, wrap(exactlyTwo, 18))
 	}
 }
 
@@ -1103,6 +1218,33 @@ func TestApplyLoadedClearsStaleInflight(t *testing.T) {
 }
 
 // ---- release picker ----
+
+// TestReleasePickerHeaderFitsWidth: the release picker's header line is joined
+// outside any Width() box, so the TERMINAL wraps an over-wide one (long anime
+// title + filter text) — pushing the fixed sections off-screen. The info part
+// and the filter text are truncated to fit. Widest-line check allows the known
+// +2 of the list box (its border renders outside Width()).
+func TestReleasePickerHeaderFitsWidth(t *testing.T) {
+	item := &mal.Item{Title: strings.Repeat("Very Long Anime Title ", 8), TotalEps: 12,
+		WatchedEps: 3, ListStatus: "watching", AirStatus: "currently_airing"}
+	all := []*playable.Release{mkRel("a", "1080p", 4, false)}
+	m := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
+	loadReleases(m, all)
+	m.filter.Filtering = true
+	m.filter.FuzzyText = strings.Repeat("filter ", 8)
+	m.applyFilter()
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	maxw := 0
+	for _, ln := range strings.Split(m.View(), "\n") {
+		if w := lipgloss.Width(ln); w > maxw {
+			maxw = w
+		}
+	}
+	if maxw > 80+2 {
+		t.Errorf("widest View line = %d cells, want <= %d (over-wide header wraps in the terminal)", maxw, 80+2)
+	}
+}
 
 func TestReleasePickerRender(t *testing.T) {
 	all := []*playable.Release{

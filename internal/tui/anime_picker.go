@@ -2065,7 +2065,13 @@ func (m *animePicker) sourceLabel() string {
 
 func (m *animePicker) headerText() string {
 	if m.query != "" {
-		return HeaderStyle.Render(fmt.Sprintf("Search: %q — %d results", m.query, len(m.view)))
+		label := fmt.Sprintf("Search: %q — %d results", m.query, len(m.view))
+		if m.width > 0 {
+			// The header line is joined outside any Width() box, so the TERMINAL
+			// would wrap an over-wide one — pushing the header itself off-screen.
+			label = ui.Truncate(label, m.width)
+		}
+		return HeaderStyle.Render(label)
 	}
 	switch m.source {
 	case SourceList:
@@ -2114,10 +2120,17 @@ func (m *animePicker) View() string {
 	} else {
 		title := TitleStyle.Render("Anime") + FaintStyle.Render(fmt.Sprintf("  (%d)", len(m.view)))
 		if m.filter.Filtering || m.filter.FuzzyText != "" {
-			title += "  " + FaintStyle.Render("filter: ") + m.filter.FuzzyText
+			label := "  " + FaintStyle.Render("filter: ")
+			cursor := ""
 			if m.filter.Filtering {
-				title += "▏"
+				cursor = "▏"
 			}
+			// The pane title must never exceed its content width: lipgloss wraps
+			// over-wide content, which grows the pane past the terminal height and
+			// pushes the header off the top of the screen (seen with a long filter
+			// text). Clip the filter text to whatever room is left.
+			budget := m.listWidth - 2 - lipgloss.Width(title) - lipgloss.Width(label) - lipgloss.Width(cursor)
+			title += label + clip(m.filter.FuzzyText, budget) + cursor
 		}
 		leftContent = title + "\n" + m.renderList()
 	}
@@ -2248,7 +2261,11 @@ func (m *animePicker) renderList() string {
 		if mal.IsAuthError(m.loadErr) {
 			msg += " — press L to log in"
 		}
-		return ErrorStyle.Render(msg)
+		// Wrap to the pane width and fit the list's line budget: the whole
+		// message stays readable (login hint included) while the pane keeps its
+		// fixed height — an over-wide single line would wrap inside the bordered
+		// box and push the header off-screen.
+		return ErrorStyle.Render(fitPaneHeight(wrap(msg, m.listWidth-2), max(1, m.pageSize())))
 	}
 	ps := m.pageSize()
 	end := m.topItem + ps
@@ -2286,6 +2303,7 @@ func (m *animePicker) renderMetadata() string {
 	if m.coverText != "" {
 		lines = append(lines, strings.Split(m.coverText+"\x1b[0m", "\n")...)
 	}
+	coverLines := len(lines) // metadata lines after this index get clipped to the pane width
 
 	if cur == nil {
 		return fitPaneHeight(strings.Join(padToHeight(lines, m.paneHeight-2), "\n"), m.paneHeight-2)
@@ -2296,21 +2314,25 @@ func (m *animePicker) renderMetadata() string {
 		width = 12
 	}
 
-	lines = append(lines, TitleStyle.Render(wrap(cur.Title, width)))
+	lines = append(lines, TitleStyle.Render(wrapTwoLines(cur.Title, width)))
 
 	progress := ui.FormatProgress(cur.WatchedEps, cur.TotalEps, m.aired.value(cur.MalID), cur.AirStatus == "currently_airing")
 	if a := ui.MALAirShort(cur.AirStatus); a != "" {
 		progress += "  [" + a + "]"
 	}
-	// Render the progress core (wrapped), then append the status badge unwrapped
-	// so its ANSI doesn't get split by line wrapping.
+	// Render the progress core (wrapped), then append the status badge via
+	// appendBadge so the line never exceeds the pane width. Appending it
+	// unconditionally instead overflows on narrow terminals once the aired
+	// count lands (e.g. "ep 1178/1179/?  [airing]  Watching"): lipgloss then
+	// wraps the line inside the pane's Width() box, the pane grows a line, and
+	// the header is pushed off the top of the screen.
 	progressLine := ProgressStyle.Render(wrap(progress, width))
 	if cur.ListStatus != "" {
 		if badge := ui.ColoredStatus(cur.ListStatus); badge != "" {
-			progressLine += "  " + badge
+			progressLine = appendBadge(progressLine, badge, width)
 		}
 	} else if cur.WatchedEps > 0 {
-		progressLine += "  ·  Watching"
+		progressLine = appendBadge(progressLine, "·  Watching", width)
 	}
 	lines = append(lines, progressLine)
 
@@ -2325,7 +2347,7 @@ func (m *animePicker) renderMetadata() string {
 	}
 
 	if cur.Genres != "" {
-		lines = append(lines, GenresStyle.Render(wrap("Genres: "+cur.Genres, width)))
+		lines = append(lines, GenresStyle.Render(wrapTwoLines("Genres: "+cur.Genres, width)))
 	}
 	if cur.Studios != "" {
 		lines = append(lines, StudiosStyle.Render(wrap("Studios: "+cur.Studios, width)))
@@ -2355,7 +2377,85 @@ func (m *animePicker) renderMetadata() string {
 		lines = append(lines, FaintStyle.Render(wrap(strings.Join(parts, "  "), width)))
 	}
 
+	// Clip every metadata line to the pane's content width (ANSI-aware, so the
+	// styled parts survive) — the invariant that keeps the right pane at its
+	// fixed height: lipgloss wraps any over-wide line inside the Width() box,
+	// growing the pane past the terminal. The cover placeholder lines are left
+	// untouched (kitten anchors the image to those exact cells).
+	for i := coverLines; i < len(lines); i++ {
+		lines[i] = clipANSI(lines[i], width)
+	}
 	return fitPaneHeight(strings.Join(lines, "\n"), m.paneHeight-2)
+}
+
+// appendBadge adds a suffix (the colored status badge, or "· Watching") to the
+// wrapped progress line without letting it exceed width cells: inline when it
+// fits after the last wrapped line, else on its own line (the pane's fixed
+// height budget absorbs it). Keeps the badge whole instead of clipped mid-way.
+func appendBadge(progressLine, badge string, width int) string {
+	last := progressLine
+	if i := strings.LastIndexByte(progressLine, '\n'); i >= 0 {
+		last = progressLine[i+1:]
+	}
+	if lipgloss.Width(last)+2+lipgloss.Width(badge) <= width {
+		return progressLine + "  " + badge
+	}
+	return progressLine + "\n" + badge
+}
+
+// clipANSI truncates each visual line of s to at most width visible cells,
+// copying ANSI escape sequences (SGR colors) through unchanged. Per line: an
+// entry can embed newlines (appendBadge puts the status badge on its own line)
+// and each line gets the full width budget. Cell-width aware, so wide runes
+// (CJK) count as 2 — unlike the rune-based clip used for list rows, this backs
+// a width invariant rather than a rough cut.
+func clipANSI(s string, width int) string {
+	if strings.IndexByte(s, '\n') < 0 {
+		return clipANSILine(s, width)
+	}
+	parts := strings.Split(s, "\n")
+	for i := range parts {
+		parts[i] = clipANSILine(parts[i], width)
+	}
+	return strings.Join(parts, "\n")
+}
+
+// clipANSILine is clipANSI for a single newline-free line.
+func clipANSILine(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	var b strings.Builder
+	cells := 0
+	for i := 0; i < len(r); i++ {
+		if r[i] == '\x1b' && i+1 < len(r) {
+			// Escape sequence: copy verbatim (zero width). CSI runs to a final
+			// byte in 0x40..0x7e; anything else is a two-rune escape.
+			j := i + 1
+			if r[j] == '[' {
+				j++
+				for j < len(r) && (r[j] < 0x40 || r[j] > 0x7e) {
+					j++
+				}
+				if j < len(r) {
+					j++
+				}
+			} else {
+				j++
+			}
+			b.WriteString(string(r[i:j]))
+			i = j - 1
+			continue
+		}
+		w := lipgloss.Width(string(r[i]))
+		if cells+w > width {
+			break
+		}
+		cells += w
+		b.WriteRune(r[i])
+	}
+	return b.String()
 }
 
 // fitPaneHeight ensures the joined content occupies exactly maxLines rows.
@@ -2398,6 +2498,20 @@ func wrap(s string, width int) string {
 		return s
 	}
 	return ui.WrapLine(s, width)
+}
+
+// wrapTwoLines wraps s to width cells across at most two lines: anything past
+// the second wrapped line is dropped and the second line ends with an ellipsis.
+// Light-novel-length titles would otherwise crowd out the metadata below the
+// preview title. Shared with the series picker's preview.
+func wrapTwoLines(s string, width int) string {
+	wrapped := wrap(s, width)
+	parts := strings.Split(wrapped, "\n")
+	if len(parts) <= 2 {
+		return wrapped
+	}
+	// Keep the first line; the second carries width-1 cells + "…" for the rest.
+	return parts[0] + "\n" + clipANSI(parts[1], width-1) + "…"
 }
 
 func isPrintable(msg tea.KeyMsg) bool {

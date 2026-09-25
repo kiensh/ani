@@ -646,17 +646,34 @@ func (m *releasePicker) View() string {
 		return "Loading releases…"
 	}
 
-	// Header line 1: anime info + count. (FIXED)
+	// Header line 1: anime info + count. (FIXED) The line is joined outside any
+	// Width() box, so the TERMINAL wraps an over-wide one — which pushes the
+	// fixed sections (and the list) off-screen. Truncate the info part, then the
+	// filter text, to always fit m.width.
 	var h1 string
-	if info := ui.MALItemHeader(m.item, m.aired); info != "" {
-		h1 = HeaderStyle.Render(info) + "  ·  "
+	rels := fmt.Sprintf("%d rels", len(m.view))
+	filtering := m.filter.Filtering || m.filter.FuzzyText != ""
+	cursor := ""
+	if m.filter.Filtering {
+		cursor = "▏"
 	}
-	h1 += FaintStyle.Render(fmt.Sprintf("%d rels", len(m.view)))
-	if m.filter.Filtering || m.filter.FuzzyText != "" {
-		h1 += "  " + FaintStyle.Render("filter: ") + m.filter.FuzzyText
-		if m.filter.Filtering {
-			h1 += "▏"
+	if info := ui.MALItemHeader(m.item, m.aired); info != "" {
+		budget := 0
+		if m.width > 0 {
+			budget = m.width - len("  ·  ") - len(rels)
+			if filtering {
+				budget -= len("  filter: ") + len([]rune(cursor)) // room for the filter suffix
+			}
 		}
+		h1 = HeaderStyle.Render(ui.Truncate(info, budget)) + "  ·  "
+	}
+	h1 += FaintStyle.Render(rels)
+	if filtering {
+		budget := 0
+		if m.width > 0 {
+			budget = m.width - lipgloss.Width(h1) - len("  filter: ") - len([]rune(cursor))
+		}
+		h1 += "  " + FaintStyle.Render("filter: ") + clip(m.filter.FuzzyText, budget) + cursor
 	}
 
 	// Header line 2: filter badges. (FIXED)

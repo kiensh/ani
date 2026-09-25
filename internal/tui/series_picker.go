@@ -40,8 +40,8 @@ type seriesPicker struct {
 	coverRows     int
 
 	// per-aid cached detail + downloaded cover file path ("" = fetched, no cover).
-	year       map[int]string
-	episodes   map[int]int
+	year         map[int]string
+	episodes     map[int]int
 	coverFiles   map[int]string // aid → temp file path (or "" once fetched)
 	coverText    string         // rendered cover placeholder for the focused series
 	coverHeights map[int]int    // aid → actual rendered cover height, so placeholder matches
@@ -54,10 +54,10 @@ type seriesPicker struct {
 
 func newSeriesPicker(header string, series []animetosho.SeriesSummary) *seriesPicker {
 	return &seriesPicker{
-		header:      header,
-		series:      series,
-		year:        map[int]string{},
-		episodes:    map[int]int{},
+		header:       header,
+		series:       series,
+		year:         map[int]string{},
+		episodes:     map[int]int{},
 		coverFiles:   map[int]string{},
 		coverHeights: map[int]int{},
 	}
@@ -219,7 +219,7 @@ func (m *seriesPicker) renderPreview() string {
 		lines = append(lines, strings.Split(m.coverText+"\x1b[0m", "\n")...)
 	}
 
-	lines = append(lines, TitleStyle.Render(wrap(cur.Title, width)))
+	lines = append(lines, TitleStyle.Render(wrapTwoLines(cur.Title, width)))
 
 	meta := []string{fmt.Sprintf("aid %d", cur.AnidbAID)}
 	if cur.TorrentCount > 0 {
