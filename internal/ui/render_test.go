@@ -57,21 +57,23 @@ func TestFormatProgress(t *testing.T) {
 		name   string
 		watched, total int
 		aired  float64
-		airing bool
+		status string
 		want   string
 	}{
-		{"airing, 4 aired of 12", 0, 12, 4, true, "ep 0/4/12"},
-		{"airing, caught up", 4, 12, 4, true, "ep 4/4/12"},
-		{"airing, unknown total", 5, 0, 5, true, "ep 5/5/?"},
-		{"airing, aired unknown, total known", 0, 12, 0, true, "ep 0/?/12"},
-		{"airing, both unknown", 0, 0, 0, true, "ep 0/?/?"},
-		{"not airing, total known", 3, 28, 0, false, "ep 3/28"},
-		{"not airing, finished", 12, 12, 0, false, "ep 12/12"},
-		{"not airing, nothing known", 0, 0, 0, false, ""},
+		{"airing, 4 aired of 12", 0, 12, 4, "currently_airing", "ep 0/4/12"},
+		{"airing, caught up", 4, 12, 4, "currently_airing", "ep 4/4/12"},
+		{"airing, unknown total", 5, 0, 5, "currently_airing", "ep 5/5/?"},
+		{"airing, aired unknown, total known", 0, 12, 0, "currently_airing", "ep 0/?/12"},
+		{"airing, both unknown", 0, 0, 0, "currently_airing", "ep 0/?/?"},
+		{"unaired, total known", 0, 12, 0, "not_yet_aired", "ep 0/?/12"},
+		{"unaired, nothing known", 0, 0, 0, "not_yet_aired", "ep 0/?/?"},
+		{"finished, total known", 3, 28, 0, "finished_airing", "ep 3/28"},
+		{"finished, caught up", 12, 12, 0, "finished_airing", "ep 12/12"},
+		{"unknown status, nothing known", 0, 0, 0, "", ""},
 	}
 	for _, c := range cases {
-		if got := FormatProgress(c.watched, c.total, c.aired, c.airing); got != c.want {
-			t.Errorf("%s: FormatProgress(%v,%v,%v,%v) = %q, want %q", c.name, c.watched, c.total, c.aired, c.airing, got, c.want)
+		if got := FormatProgress(c.watched, c.total, c.aired, c.status); got != c.want {
+			t.Errorf("%s: FormatProgress(%v,%v,%v,%q) = %q, want %q", c.name, c.watched, c.total, c.aired, c.status, got, c.want)
 		}
 	}
 }

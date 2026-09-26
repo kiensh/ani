@@ -19,12 +19,16 @@ func RenderMALLine(m mal.Item) string {
 }
 
 // FormatProgress builds the "ep …" progress string for an anime.
-//   - airing: always three numbers — "ep watched/aired/total", with "?" for an
-//     unknown aired count (no Jikan data) or unknown total. e.g. "0/4/12",
-//     "0/?/12", "0/4/?", "0/?" "?".
-//   - not airing: "ep watched/total" (or "watched/?"); "" when nothing is known.
-func FormatProgress(watched, total int, aired float64, airing bool) string {
-	if airing {
+//   - currently airing or not yet aired: always three numbers — "ep
+//     watched/aired/total", with "?" for an unknown aired count or unknown
+//     total. The number count itself carries the status (three = still in
+//     progress), so no extra "[airing]"-style marker is appended and the
+//     status badge fits inline far more often.
+//   - finished airing (or unknown status): "ep watched/total" (or
+//     "watched/?"); "" when nothing is known.
+func FormatProgress(watched, total int, aired float64, status string) string {
+	switch status {
+	case "currently_airing", "not_yet_aired":
 		a := "?"
 		if aired > 0 {
 			a = formatAired(aired)
@@ -243,7 +247,7 @@ func MALItemHeader(item *mal.Item, aired float64) string {
 	if item == nil {
 		return ""
 	}
-	s := FormatProgress(item.WatchedEps, item.TotalEps, aired, item.AirStatus == "currently_airing")
+	s := FormatProgress(item.WatchedEps, item.TotalEps, aired, item.AirStatus)
 	if badge := ColoredStatus(item.ListStatus); badge != "" {
 		if s != "" {
 			s += "  —  "

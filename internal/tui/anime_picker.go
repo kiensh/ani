@@ -437,6 +437,21 @@ type animePicker struct {
 	loadFavorites func() map[string]bool
 	favStudios    map[string]bool
 
+	// ---- series view (`: Show Series`) ----
+	related       *RelatedSource             // nil (no-MAL paths) hides the command
+	rings         map[int][]mal.RelatedEntry // focused rows' rings: the has-series indicator + palette gating
+	ringErrs      map[int]bool               // ring warm-up failed → skip re-fetching on every focus
+	series        map[int][]seriesEntry      // anchor malID → built franchise view (one build per session)
+	peekItems     map[int]mal.Item           // series malID → full item (details, once per session)
+	itemPending   map[int]bool               // series malID → details fetch in flight
+	pendingSeries bool                       // series build in flight that opens the view on arrival
+
+	seriesView   bool           // left pane shows the focused anime's franchise
+	seriesLabels map[int]string // series malID → relation label ("Sequel"; "" = the anchor)
+	seriesCursor int            // list cursor to restore on Esc-back (-1 = none)
+	seriesStatus string         // status filter to restore on Esc-back
+	seriesSort   string         // sort to restore on Esc-back
+
 	width, height int
 
 	// Layout, recomputed on WindowSizeMsg. All in terminal cells.
@@ -566,6 +581,12 @@ func newAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 		aired:                 NewAiredCache(),
 		prefetchSem:           make(chan struct{}, torrentPrefetchCap),
 		coverHeights:          map[int]int{},
+		rings:                 map[int][]mal.RelatedEntry{},
+		ringErrs:              map[int]bool{},
+		series:                map[int][]seriesEntry{},
+		peekItems:             map[int]mal.Item{},
+		itemPending:           map[int]bool{},
+		seriesCursor:          -1,
 		cache:                 &animeCache{m: map[string][]mal.Item{}},
 		loading:               true,
 		pendingCursor:         -1,
@@ -698,6 +719,12 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
+			// A peeked related anime isn't in m.items — update its cached copy
+			// so the pane reflects the new score immediately.
+			if it, ok := m.peekItems[msg.malID]; ok {
+				it.Score = msg.score
+				m.peekItems[msg.malID] = it
+			}
 			// Rebuild the view so the new score shows immediately — the view
 			// rows are copies, so updating m.items alone isn't visible. No sort
 			// key uses the personal score, so the row can't move.
@@ -712,6 +739,10 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.items[i].WatchedEps = msg.watched
 					break
 				}
+			}
+			if it, ok := m.peekItems[msg.malID]; ok {
+				it.WatchedEps = msg.watched
+				m.peekItems[msg.malID] = it
 			}
 			m.applyFilter()
 		}
@@ -760,6 +791,32 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyFilter()
 		return m, nil
 
+	case relatedRingMsg:
+		// Focus warm-up landed: cache the ring (the indicator + palette gating
+		// read it on the next render). A failure isn't cached — it retries on
+		// the next focus of that anime.
+		if msg.err != nil {
+			m.ringErrs[msg.base] = true
+			return m, nil
+		}
+		m.rings[msg.base] = msg.entries
+		return m, nil
+
+	case seriesLoadedMsg:
+		// Cache only real results — an empty build (nothing related, or every
+		// fetch failed) retries on the next open.
+		if len(msg.entries) > 1 {
+			m.series[msg.base] = msg.entries
+		}
+		if m.pendingSeries {
+			m.pendingSeries = false
+			return m.applySeriesView(msg.base, msg.entries)
+		}
+		return m, nil
+
+	case peekItemMsg:
+		return m.applyPeekItem(msg)
+
 	case tea.KeyMsg:
 		if m.palette.Active() {
 			return m.handlePaletteKey(msg)
@@ -786,6 +843,11 @@ func (m *animePicker) applyLoaded(msg itemsLoadedMsg) (tea.Model, tea.Cmd) {
 	m.cursor = 0
 	m.topItem = 0
 	m.loadErr = msg.err
+	// A fresh load always leaves the series view (Esc-back's reload — with
+	// its cursor/filter restore already staged — or a Tab/season switch made
+	// from inside it).
+	m.seriesView = false
+	m.seriesLabels = nil
 	m.applyFilter()
 	// Session-restored cursor: applied to the first load only (later loads —
 	// Tab/season switches — keep the reset-to-0 above).
@@ -1047,9 +1109,10 @@ const progressBarWidth = 14
 // shrinks, then drops, then the "aired eps" label drops — so a long header
 // still leaves room for progress. Empty when there is nothing to show:
 // prefetch disabled, list still loading, nothing to fetch, every count
-// already cached (hidden once complete), or no room at all.
+// already cached (hidden once complete), or no room at all. The related view
+// hides it: its rows aren't the prefetch's scope.
 func (m *animePicker) airingProgress(avail int) string {
-	if m.latestEpisodePrefetch == nil || m.loading || len(m.items) == 0 {
+	if m.latestEpisodePrefetch == nil || m.loading || m.seriesView || len(m.items) == 0 {
 		return ""
 	}
 	total, done := 0, 0
@@ -1084,7 +1147,15 @@ func (m *animePicker) airingProgress(avail int) string {
 
 func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "q", "esc", "ctrl+c":
+	case "esc":
+		// In the related view, Esc backs out to the normal list (served from
+		// cache, so it's instant). Elsewhere it quits, same as q.
+		if m.seriesView {
+			return m.closeSeriesView()
+		}
+		m.result.Quit = true
+		return m, tea.Batch(tea.Quit, m.quitCmd())
+	case "q", "ctrl+c":
 		m.result.Quit = true
 		return m, tea.Batch(tea.Quit, m.quitCmd())
 	case "tab":
@@ -1299,6 +1370,15 @@ func (m *animePicker) animeCommands() []Command {
 		}
 	}
 
+	// Series view: swap the list to the focused anime's whole franchise —
+	// offered only when its warmed ring says it HAS one (no relations, no
+	// command). Inside the view it re-anchors on the focused series row.
+	if m.related != nil && m.related.List != nil {
+		if ring, ok := m.rings[m.focusedID()]; ok && len(ring) > 0 {
+			cmds = append(cmds, Command{Category: "Series", Title: "Show Series", Intent: "series", Keywords: "franchise prequel sequel season ova movie spin side related"})
+		}
+	}
+
 	cmds = append(cmds,
 		Command{Category: "Account", Title: "Show account", Intent: "account", Keywords: "login status"},
 		Command{Category: "Account", Title: "Re-login (MAL)", Intent: "relogin", Keywords: "auth oauth"},
@@ -1378,6 +1458,8 @@ func (m *animePicker) applyCommand(intent string) (tea.Model, tea.Cmd) {
 		m.cursor = 0
 		m.topItem = 0
 		return m, m.loadCmd(m.source, m.query, m.season)
+	case intent == "series":
+		return m.openSeriesView()
 	case strings.HasPrefix(intent, "sort:"):
 		m.filter.Sort = strings.TrimPrefix(intent, "sort:")
 		m.applyFilter()
@@ -1815,6 +1897,21 @@ func (m *animePicker) applyStatusApplied(msg statusAppliedMsg) (tea.Model, tea.C
 		}
 		break
 	}
+	// A peeked related anime isn't in m.items — mirror the change into its
+	// cached copy so the pane shows it (remove just clears the status).
+	if it, ok := m.peekItems[msg.malID]; ok {
+		if msg.act.Remove {
+			it.ListStatus = ""
+			it.UpdatedAt = time.Time{}
+		} else {
+			it.ListStatus = msg.act.Status
+			it.UpdatedAt = time.Now()
+			if msg.act.Status == "completed" && it.TotalEps > 0 {
+				it.WatchedEps = it.TotalEps
+			}
+		}
+		m.peekItems[msg.malID] = it
+	}
 	m.applyFilter()
 	// Hold the cursor at its index — on the row that shifted into the acted-on
 	// item's slot (it re-sorted away, left the filter, or was removed), clamped
@@ -1947,6 +2044,10 @@ func (m *animePicker) searchText(it mal.Item) string {
 	if hasFavoriteStudio(it.Studios, m.favStudios) {
 		b.WriteString(" (favorite)") // mirrors the preview's studios line
 	}
+	if rel := m.seriesLabels[it.MalID]; rel != "" {
+		b.WriteByte(' ')
+		b.WriteString(strings.ToLower(rel)) // related-view rows: "sequel", "side story", …
+	}
 	return b.String()
 }
 
@@ -1981,7 +2082,36 @@ func markFavoriteStudios(studios string, favs map[string]bool) string {
 	return strings.Join(parts, ",")
 }
 
+// focusedID is the malID of the row under the cursor (0 when there is none) —
+// the anchor a related walk belongs to.
+func (m *animePicker) focusedID() int {
+	if m.cursor < 0 || m.cursor >= len(m.view) {
+		return 0
+	}
+	return m.view[m.cursor].MalID
+}
+
+// currentItemCopy returns the item the preview, write actions (status/score/
+// episode/remove), and Enter target. In the related view the row may still be
+// a thin ring entry (details loading) — nil then, so no write ever hits MAL
+// with a half-loaded item (e.g. watched=0).
 func (m *animePicker) currentItemCopy() *mal.Item {
+	if m.cursor < 0 || m.cursor >= len(m.view) {
+		return nil
+	}
+	it := m.view[m.cursor]
+	if m.seriesView {
+		if _, full := m.peekItems[it.MalID]; !full {
+			return nil
+		}
+	}
+	return &it
+}
+
+// renderItem is the metadata pane's source: like currentItemCopy, but a
+// still-thin related row shows what it has (title/cover) so the pane reflects
+// the focused row even mid-load.
+func (m *animePicker) renderItem() *mal.Item {
 	if m.cursor < 0 || m.cursor >= len(m.view) {
 		return nil
 	}
@@ -2099,10 +2229,11 @@ type coverTextMsg struct {
 	key  int
 }
 
-// focusCmd batches the work done when the focused anime changes: load its cover
-// and (for airing anime) fetch its latest aired episode.
+// focusCmd batches the work done when the focused anime changes: load its
+// cover, fetch its latest aired episode (airing anime), and — in the related
+// view — fill the focused thin row with its full fields.
 func (m *animePicker) focusCmd() tea.Cmd {
-	return tea.Batch(m.loadCoverCmd(), m.latestEpisodeCmd())
+	return tea.Batch(m.loadCoverCmd(), m.latestEpisodeCmd(), m.seriesFocusCmd(), m.ringWarmCmd())
 }
 
 // latestEpisodeCmd fetches the latest aired episode for the focused airing anime
@@ -2130,24 +2261,36 @@ func (m *animePicker) latestEpisodeCmd() tea.Cmd {
 }
 
 func (m *animePicker) loadCoverCmd() tea.Cmd {
-	cur := m.currentItemCopy()
+	cur := m.renderItem() // placeholder covers load from the ring entry too
 	if cur == nil || cur.CoverURL == "" || m.cover == nil {
 		return func() tea.Msg { return coverTextMsg{text: ""} }
 	}
-	path := m.cover.Get(cur.CoverURL)
+	url, malID := cur.CoverURL, cur.MalID
 	cols, rows := m.coverCols, m.coverRows
-	malID := cur.MalID
-	if path == "" {
-		return func() tea.Msg { return coverTextMsg{text: ""} }
+	if path := m.cover.Get(url); path != "" {
+		return func() tea.Msg { return renderCover(malID, path, cols, rows) }
 	}
+	// Not prefetched — a peeked related anime is never in a prefetch page —
+	// so download it on demand, then render.
 	return func() tea.Msg {
-		upload, text, err := RenderCoverPlaceholder(path, cols, rows)
-		if err != nil {
+		path := downloadCoverFile(url)
+		if path == "" {
 			return coverTextMsg{text: ""}
 		}
-		WriteUpload(upload)
-		return coverTextMsg{text: text, key: malID}
+		return renderCover(malID, path, cols, rows)
 	}
+}
+
+// renderCover turns a downloaded cover file into a unicode placeholder and
+// writes the image upload to the tty. Shared by the cached and on-demand
+// cover paths.
+func renderCover(malID int, path string, cols, rows int) tea.Msg {
+	upload, text, err := RenderCoverPlaceholder(path, cols, rows)
+	if err != nil {
+		return coverTextMsg{text: ""}
+	}
+	WriteUpload(upload)
+	return coverTextMsg{text: text, key: malID}
 }
 
 // sourceLabel returns the badge/header label for the active source.
@@ -2159,6 +2302,9 @@ func (m *animePicker) sourceLabel() string {
 }
 
 func (m *animePicker) headerText() string {
+	if m.seriesView {
+		return HeaderStyle.Render(fmt.Sprintf("Series — %d anime", len(m.view)))
+	}
 	if m.query != "" {
 		label := fmt.Sprintf("Search: %q — %d results", m.query, len(m.view))
 		if m.width > 0 {
@@ -2213,7 +2359,11 @@ func (m *animePicker) View() string {
 			leftContent = renderListOverlayContent(m.overlay.kind.String(), m.overlay.items, m.overlay.cursor, m.pageSize())
 		}
 	} else {
-		title := TitleStyle.Render("Anime") + FaintStyle.Render(fmt.Sprintf("  (%d)", len(m.view)))
+		label := "Anime"
+		if m.seriesView {
+			label = "Series"
+		}
+		title := TitleStyle.Render(label) + FaintStyle.Render(fmt.Sprintf("  (%d)", len(m.view)))
 		if m.filter.Filtering || m.filter.FuzzyText != "" {
 			label := "  " + FaintStyle.Render("filter: ")
 			cursor := ""
@@ -2256,7 +2406,13 @@ func (m *animePicker) View() string {
 		header = header + strings.Repeat(" ", m.width-lipgloss.Width(header)-lipgloss.Width(p)) + p
 	}
 	badges := m.renderBadges()
-	help := HelpStyle.Render("j/k move  Tab source  Enter select  / filter  : command  q quit")
+	helpText := "j/k move  Tab source  Enter select  / filter  : command  q quit"
+	if m.width > 0 {
+		// Joined outside any Width() box — the terminal would wrap an over-wide
+		// line and push the header off-screen (same class as the pane-wrap bug).
+		helpText = clip(helpText, m.width)
+	}
+	help := HelpStyle.Render(helpText)
 	if w := m.healthWarning(); w != "" {
 		// A down backend replaces the help line (same slot the release picker's
 		// toast uses) — always visible, no layout shift.
@@ -2373,7 +2529,15 @@ func (m *animePicker) renderList() string {
 	}
 	lines := make([]string, 0, ps)
 	for i := m.topItem; i < end; i++ {
-		text := clip(ui.RenderMALLine(m.view[i]), avail)
+		text := ui.RenderMALLine(m.view[i])
+		// In the related view, lead each row with its relation to the base
+		// anime ("Sequel · Grand Blue Season 2") — also a searchable field.
+		if m.seriesView {
+			if rel := m.seriesLabels[m.view[i].MalID]; rel != "" {
+				text = rel + " · " + text
+			}
+		}
+		text = clip(text, avail)
 		if i == m.cursor {
 			lines = append(lines, SelectedStyle.Render(CursorGlyph+text))
 		} else {
@@ -2389,7 +2553,7 @@ func (m *animePicker) renderList() string {
 // renderMetadata builds the right pane content: cover placeholder region on top,
 // colored metadata below.
 func (m *animePicker) renderMetadata() string {
-	cur := m.currentItemCopy()
+	cur := m.renderItem()
 
 	lines := make([]string, 0, m.coverRows+8)
 	// No blank placeholder: show nothing until the cover loads, then show the
@@ -2409,18 +2573,32 @@ func (m *animePicker) renderMetadata() string {
 		width = 12
 	}
 
-	lines = append(lines, TitleStyle.Render(wrapTwoLines(cur.Title, width)))
-
-	progress := ui.FormatProgress(cur.WatchedEps, cur.TotalEps, m.aired.value(cur.MalID), cur.AirStatus == "currently_airing")
-	if a := ui.MALAirShort(cur.AirStatus); a != "" {
-		progress += "  [" + a + "]"
+	// Metadata lines carry survival priorities: when the pane is too short for
+	// everything (a tall cover plus a wordy entry), whole lines are dropped
+	// from the least valuable up instead of chopping the tail — which is what
+	// used to hide the Series line. Higher priority survives longer.
+	type metaLine struct {
+		text string
+		prio int
 	}
+	var meta []metaLine
+	add := func(text string, prio int) {
+		for i, ln := range strings.Split(text, "\n") {
+			p := prio
+			if i > 0 {
+				p -= 5 // a wrapped continuation drops before its first line
+			}
+			meta = append(meta, metaLine{text: ln, prio: p})
+		}
+	}
+
+	add(TitleStyle.Render(wrapTwoLines(cur.Title, width)), 100)
+
+	progress := ui.FormatProgress(cur.WatchedEps, cur.TotalEps, m.aired.value(cur.MalID), cur.AirStatus)
 	// Render the progress core (wrapped), then append the status badge via
-	// appendBadge so the line never exceeds the pane width. Appending it
-	// unconditionally instead overflows on narrow terminals once the aired
-	// count lands (e.g. "ep 1178/1179/?  [airing]  Watching"): lipgloss then
-	// wraps the line inside the pane's Width() box, the pane grows a line, and
-	// the header is pushed off the top of the screen.
+	// appendBadge so the line never exceeds the pane width. The three-number
+	// form itself carries the airing status, so no "[airing]" marker — the
+	// badge fits inline far more often.
 	progressLine := ProgressStyle.Render(wrap(progress, width))
 	if cur.ListStatus != "" {
 		if badge := ui.ColoredStatus(cur.ListStatus); badge != "" {
@@ -2429,23 +2607,54 @@ func (m *animePicker) renderMetadata() string {
 	} else if cur.WatchedEps > 0 {
 		progressLine = appendBadge(progressLine, "·  Watching", width)
 	}
-	lines = append(lines, progressLine)
+	add(progressLine, 90)
 
+	// Score, rank, and members share one line (all short fixed-width fields,
+	// in the score's color) — except when a personal rating lengthens the
+	// score part, which is the one case that puts rank/members on its own
+	// line. Clipped, never wrapped.
+	var scorePart, rankPart string
 	if cur.MeanScore > 0 {
 		s := fmt.Sprintf("★ %.2f", cur.MeanScore)
 		if cur.Score > 0 {
-			s += fmt.Sprintf("   (your: %d)", cur.Score)
+			s += fmt.Sprintf(" (your: %d)", cur.Score)
 		}
-		lines = append(lines, ScoreStyle.Render(wrap(s, width)))
+		scorePart = ScoreStyle.Render(s)
 	} else if cur.Score > 0 {
-		lines = append(lines, ScoreStyle.Render(wrap(fmt.Sprintf("your score: %d", cur.Score), width)))
+		scorePart = ScoreStyle.Render(fmt.Sprintf("your: %d", cur.Score))
+	}
+	if cur.Rank > 0 || cur.Members > 0 {
+		var parts []string
+		if cur.Rank > 0 {
+			parts = append(parts, fmt.Sprintf("rank #%d", cur.Rank))
+		}
+		if cur.Members > 0 {
+			parts = append(parts, fmt.Sprintf("%s users", ui.HumanCount(cur.Members)))
+		}
+		rankPart = ScoreStyle.Render(strings.Join(parts, " · "))
+	}
+	switch {
+	case scorePart != "" && rankPart != "" && cur.Score == 0:
+		// Compact single-space separators — the merged line must fit narrow
+		// panes without clipping the member count. The separator joins two
+		// already-styled parts, so style it too (a plain "·" would render in
+		// the terminal's default color between them).
+		sep := ScoreStyle.Render(" · ")
+		add(clipANSI(scorePart+sep+rankPart, width), 64)
+	case scorePart != "" && rankPart != "":
+		add(clipANSI(scorePart, width), 64)
+		add(clipANSI(rankPart, width), 20)
+	case scorePart != "":
+		add(clipANSI(scorePart, width), 64)
+	case rankPart != "":
+		add(clipANSI(rankPart, width), 20)
 	}
 
 	if cur.Genres != "" {
-		lines = append(lines, GenresStyle.Render(wrapTwoLines("Genres: "+cur.Genres, width)))
+		add(GenresStyle.Render(wrapTwoLines("Genres: "+cur.Genres, width)), 40)
 	}
 	if cur.Studios != "" {
-		lines = append(lines, StudiosStyle.Render(wrapTwoLines("Studios: "+markFavoriteStudios(cur.Studios, m.favStudios), width)))
+		add(StudiosStyle.Render(wrapTwoLines("Studios: "+markFavoriteStudios(cur.Studios, m.favStudios), width)), 60)
 	}
 
 	seasonType := ""
@@ -2458,18 +2667,32 @@ func (m *animePicker) renderMetadata() string {
 		seasonType = "Type: " + strings.ToUpper(cur.MediaType)
 	}
 	if seasonType != "" {
-		lines = append(lines, FaintStyle.Render(wrap(seasonType, width)))
+		add(FaintStyle.Render(wrap(seasonType, width)), 50)
 	}
 
-	if cur.Rank > 0 || cur.Members > 0 {
-		var parts []string
-		if cur.Rank > 0 {
-			parts = append(parts, fmt.Sprintf("Rank #%d", cur.Rank))
+	// Has-series indicator, last in the pane: same faint style as the Season
+	// and Rank lines it sits with. The focused row's distinct relations, once
+	// its ring has warmed; anime without a series show no line at all. It
+	// outranks genres and rank/members, so a short pane drops those first.
+	if s := m.seriesSummaryLine(); s != "" {
+		add(FaintStyle.Render(s), 45)
+	}
+
+	// Drop the lowest-priority line (last one wins, keeping the order of
+	// equals stable) until the metadata fits what's left of the pane under the
+	// cover. The title and progress always survive.
+	budget := m.paneHeight - 2 - coverLines
+	for len(meta) > budget && budget > 0 {
+		worst := 0
+		for i, ln := range meta {
+			if ln.prio < meta[worst].prio {
+				worst = i
+			}
 		}
-		if cur.Members > 0 {
-			parts = append(parts, fmt.Sprintf("%s members", ui.HumanCount(cur.Members)))
-		}
-		lines = append(lines, FaintStyle.Render(wrap(strings.Join(parts, "  "), width)))
+		meta = append(meta[:worst], meta[worst+1:]...)
+	}
+	for _, ml := range meta {
+		lines = append(lines, ml.text)
 	}
 
 	// Clip every metadata line to the pane's content width (ANSI-aware, so the

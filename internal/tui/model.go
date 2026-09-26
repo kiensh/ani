@@ -59,8 +59,10 @@ type Result struct {
 // carries the session's picker options/cursor/list cache across re-entries
 // (nil = fresh defaults). favorites lazily supplies the user's MAL favorite
 // studios for the preview's "(favorite)" marker and the filter's "favorite" match (nil
-// disables both). Returns the selected anime, or Quit=true on cancel.
-func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) float64, latestEpisodePrefetch func(*mal.Item) float64, aired *AiredCache, health *ProviderHealth, provider string, state *AnimeState, favorites func() map[string]bool, debug bool) (*Result, error) {
+// disables both). related supplies the h/l related-anime walk's ring and
+// full-item lookups (nil disables the keys). Returns the selected anime, or
+// Quit=true on cancel.
+func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) float64, latestEpisodePrefetch func(*mal.Item) float64, aired *AiredCache, health *ProviderHealth, provider string, state *AnimeState, favorites func() map[string]bool, related *RelatedSource, debug bool) (*Result, error) {
 	if load == nil {
 		return &Result{Quit: true}, nil
 	}
@@ -68,6 +70,7 @@ func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 	m.provider = provider       // drives the palette's provider switch (● active marker)
 	m.health = health           // drives the backend-down warning line (nil-safe)
 	m.loadFavorites = favorites // drives the "(favorite)" studio marker + "favorite" filter match (nil-safe)
+	m.related = related         // drives the h/l related-anime walk (nil-safe)
 	// Size the aired-prefetch semaphore for the provider now that it's known
 	// (newAnimePicker defaults to the torrent cap; hianime gets the gentler one).
 	m.prefetchSem = make(chan struct{}, m.prefetchCap())
