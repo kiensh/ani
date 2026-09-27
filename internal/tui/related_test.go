@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"ani/internal/mal"
 )
 
@@ -483,5 +485,156 @@ func TestStatsLineWithPersonalScore(t *testing.T) {
 	}
 	if !strings.Contains(got, "(your: 9)") || !strings.Contains(got, "Series: Prequel") {
 		t.Errorf("tight pane: score and Series should survive:\n%s", got)
+	}
+}
+
+// TestSeriesViewSurvivesReentry: Enter from the series view → release picker
+// → Esc back rebuilds the picker from the session state — the series view
+// re-opens (anchor + cursor, served from the shared caches), and the LIST
+// filters it restores are the pre-view ones, not the view's forced "All"
+// (the reported mismatch).
+func TestSeriesViewSurvivesReentry(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 100, Title: "Grand Blue", StartDate: "2018-07-01", ListStatus: "watching", TotalEps: 12, AirStatus: "finished_airing"},
+		{MalID: 200, Title: "Unrelated"},
+	}
+	rings, full := seriesFixture()
+	m := newSeriesViewPicker(items, relatedFixture(rings, full))
+	m.filter.Status = "My List" // the pre-view list filter
+	m.applyFilter()
+	_, cmd := m.applyCommand("series")
+	m.Update(cmd())
+	m.Update(peekItemMsg{malID: 101, item: full[101]})
+	m.cursor = 2 // moved within the series view (onto S2)
+
+	// Exit with the view open: the state snapshots the view, the pre-view
+	// filters, and the caches.
+	st := NewAnimeState()
+	m.saveState(st)
+	if st.SeriesAnchor != 100 {
+		t.Fatalf("state anchor = %d, want 100", st.SeriesAnchor)
+	}
+	if st.Status != "My List" || st.SeriesCursor != 2 {
+		t.Fatalf("state = status %q cursor %d, want My List / 2", st.Status, st.SeriesCursor)
+	}
+
+	// The rebuilt picker adopts the caches and re-opens the view.
+	next := newSeriesViewPicker(items, relatedFixture(rings, full))
+	next.series, next.peekItems, next.rings = st.caches()
+	next.restoreState(st)
+	if !next.seriesView {
+		t.Fatal("series view not restored on re-entry")
+	}
+	if next.loading {
+		t.Fatal("restored picker still loading — the view renders as \"Loading…\" forever")
+	}
+	if next.cover == nil {
+		t.Fatal("restored view has no cover cache — thumbnails can never load")
+	}
+	if got := next.View(); !strings.Contains(got, "Grand Blue S2") || strings.Contains(got, "Loading") {
+		t.Errorf("restored view should render the series, not a loading screen:\n%s", firstLine(got))
+	}
+	if got := ids(next.view); len(got) != 5 {
+		t.Fatalf("restored view rows = %v, want the 5-entry franchise", got)
+	}
+	if next.cursor != 2 || next.view[next.cursor].MalID != 101 {
+		t.Errorf("restored cursor = %d, want 2 (on S2)", next.cursor)
+	}
+
+	// Esc: back to the NORMAL list with the pre-view status and cursor.
+	model, back := next.Update(escMsg())
+	next = model.(*animePicker)
+	next.Update(back()) // the reload lands
+	if next.seriesView {
+		t.Fatal("Esc did not leave the restored view")
+	}
+	if next.filter.Status != "My List" {
+		t.Errorf("post-Esc status = %q, want My List (the pre-view filter)", next.filter.Status)
+	}
+	if got := ids(next.items); len(got) != 2 || got[0] != 100 {
+		t.Errorf("post-Esc items = %v, want the normal list", got)
+	}
+	if next.cursor != 0 {
+		t.Errorf("post-Esc cursor = %d, want 0 (the pre-view list position)", next.cursor)
+	}
+}
+
+// TestSeriesViewListLoadDoesNotClobber: a list load issued before the view
+// opened (or by a restored picker's leftovers) is discarded while the view
+// shows — the rows stay put.
+func TestSeriesViewListLoadDoesNotClobber(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 100, Title: "Grand Blue", StartDate: "2018-07-01"},
+		{MalID: 200, Title: "Unrelated"},
+	}
+	rings, full := seriesFixture()
+	m := newSeriesViewPicker(items, relatedFixture(rings, full))
+	_, cmd := m.applyCommand("series")
+	m.Update(cmd())
+	if !m.seriesView || len(m.view) != 5 {
+		t.Fatalf("setup: view rows = %v", ids(m.view))
+	}
+	// The (stale) list load lands.
+	m.Update(itemsLoadedMsg{items: items, source: m.source, query: m.query, season: m.season})
+	if !m.seriesView || len(m.view) != 5 {
+		t.Fatalf("a list load clobbered the series view: %v", ids(m.view))
+	}
+}
+
+// TestSeriesViewEscBackServedFromReentryLoad: the restored picker warms the
+// list cache in the background (its result discarded while the view shows),
+// so Esc-back doesn't re-fetch — no "Loading…" round-trip.
+func TestSeriesViewEscBackServedFromReentryLoad(t *testing.T) {
+	items := []mal.Item{{MalID: 100, Title: "Grand Blue", StartDate: "2018-07-01"}}
+	rings, full := seriesFixture()
+	m := newSeriesViewPicker(items, relatedFixture(rings, full))
+	_, cmd := m.applyCommand("series")
+	m.Update(cmd())
+
+	// Exit with the view open; rebuild with a counting loader.
+	st := NewAnimeState()
+	m.saveState(st)
+	loads := 0
+	next := newAnimePicker(SourceSeason, "", func(AnimeSource, string, string) ([]mal.Item, error) {
+		loads++
+		return items, nil
+	}, nil, nil, nil, nil, nil, false)
+	next.related = relatedFixture(rings, full)
+	next.width, next.height = 84, 30
+	next.recomputeLayout()
+	next.series, next.peekItems, next.rings = st.caches()
+	next.restoreState(st)
+	if !next.seriesView || loads != 0 {
+		t.Fatalf("setup: restored=%v loads=%d", next.seriesView, loads)
+	}
+
+	// The re-entry load (from Init's batch) runs and lands — discarded, cached.
+	// Run the batch the way bubbletea does: a BatchMsg is a set of cmds.
+	initCmd := next.Init()
+	batch, ok := initCmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatal("Init did not produce a batch")
+	}
+	for _, c := range batch {
+		if msg := c(); msg != nil {
+			next.Update(msg)
+		}
+	}
+	if loads != 1 {
+		t.Fatalf("re-entry load ran %d times, want 1", loads)
+	}
+	if !next.seriesView {
+		t.Fatal("the re-entry load clobbered the series view")
+	}
+
+	// Esc-back: served from the cache — no second load.
+	model, back := next.Update(escMsg())
+	next = model.(*animePicker)
+	next.Update(back())
+	if loads != 1 {
+		t.Errorf("Esc-back re-fetched the list (%d loads) — want the cached copy", loads)
+	}
+	if got := ids(next.items); len(got) != 1 || got[0] != 100 {
+		t.Errorf("post-Esc items = %v, want the normal list", got)
 	}
 }

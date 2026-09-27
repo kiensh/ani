@@ -218,6 +218,15 @@ func (m *animePicker) applySeriesView(base int, entries []seriesEntry) (tea.Mode
 	if len(entries) <= 1 {
 		return m, nil // only the anchor: nothing related / build failed — stay on the list
 	}
+	m.seriesAnchor = base
+	m.loading = false // mounting the view is content (a restored picker issues no list load)
+	m.loadErr = nil
+	if m.cover == nil {
+		// Normally applyLoaded creates the cache; a restored view skips the
+		// load (and the previous picker's temp dir was cleaned at exit), so
+		// create it here — Init then batch-prefetches the rows' covers.
+		m.cover = NewCoverCache()
+	}
 	if !m.seriesView {
 		// Restore points for Esc-back (a re-anchor keeps the originals).
 		m.seriesCursor = m.cursor

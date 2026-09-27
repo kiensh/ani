@@ -70,14 +70,19 @@ func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 	m.provider = provider       // drives the palette's provider switch (● active marker)
 	m.health = health           // drives the backend-down warning line (nil-safe)
 	m.loadFavorites = favorites // drives the "(favorite)" studio marker + "favorite" filter match (nil-safe)
-	m.related = related         // drives the h/l related-anime walk (nil-safe)
+	m.related = related         // drives the Show Series view (nil-safe)
+	if state != nil {
+		// Adopt the session's shared series caches so the view (and its
+		// fetched details) survive picker re-entries instantly.
+		m.series, m.peekItems, m.rings = state.caches()
+	}
 	// Size the aired-prefetch semaphore for the provider now that it's known
 	// (newAnimePicker defaults to the torrent cap; hianime gets the gentler one).
 	m.prefetchSem = make(chan struct{}, m.prefetchCap())
 	if aired != nil {
 		m.aired = aired // reuse the session cache across Esc-from-releases
 	}
-	m.restoreState(state) // previous options/cursor + list cache (nil-safe)
+	m.restoreState(state) // previous options/cursor/list cache — and an open series view (nil-safe)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	final, err := p.Run()
 	if err != nil {

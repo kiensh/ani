@@ -447,6 +447,7 @@ type animePicker struct {
 	pendingSeries bool                       // series build in flight that opens the view on arrival
 
 	seriesView   bool           // left pane shows the focused anime's franchise
+	seriesAnchor int            // malID the view is anchored on (0 = none)
 	seriesLabels map[int]string // series malID → relation label ("Sequel"; "" = the anchor)
 	seriesCursor int            // list cursor to restore on Esc-back (-1 = none)
 	seriesStatus string         // status filter to restore on Esc-back
@@ -485,17 +486,36 @@ func (c *animeCache) put(key string, items []mal.Item) {
 	c.m[key] = items
 }
 
-// AnimeState is the anime picker's session-scoped UI state (options, cursor),
-// shared across re-entries so backing out of the release picker returns where
-// the user left off. The item list itself is deliberately NOT kept: it must
-// re-fetch on re-entry so MAL updates (watched counts, statuses) show fresh.
-// Also deliberately NOT persisted: a new process starts on defaults.
+// AnimeState is the anime picker's session-scoped UI state, shared across
+// re-entries so backing out of the release picker returns where the user left
+// off — instantly: the list is carried too (seeded into the new picker's
+// cache), because backward should never load anything. In-session writes
+// (statuses, scores) mutate the carried rows, so they persist across
+// re-entries; anything MAL-side that changed outside this session shows on
+// the next process. Also deliberately NOT persisted to disk: a new process
+// starts fresh.
 type AnimeState struct {
 	Source AnimeSource
 	Season string
 	Status string // filter.Status label
 	Sort   string // filter.Sort value
 	Cursor int
+	// Series-view persistence: when the picker exits while the series view is
+	// open, SeriesAnchor holds the viewed anime's malID (0 = normal list) and
+	// SeriesCursor the row inside it — the next picker re-opens the view. The
+	// caches backing it (built series, fetched details, warmed rings) are
+	// session-scoped maps on this state so the re-entry is instant; all writes
+	// happen in Update msg handlers, so a torn-down picker can't race the
+	// next one (its undelivered msgs are dropped at teardown).
+	SeriesAnchor int
+	SeriesCursor int
+	// listItems/listKey carry the last-loaded list, seeded into the next
+	// picker's cache so backward never re-fetches.
+	listItems   []mal.Item
+	listKey     string
+	seriesCache map[int][]seriesEntry
+	peekCache   map[int]mal.Item
+	ringCache   map[int][]mal.RelatedEntry
 	// restored marks a state that has been populated by saveState. Until the
 	// first save, restoreState must not apply anything (the zero values mean
 	// "never used", not "use these").
@@ -506,7 +526,27 @@ type AnimeState struct {
 // default (Season) — AnimeSource's zero value is SourceList, which would
 // otherwise hijack restoreState on a fresh process's first open.
 func NewAnimeState() *AnimeState {
-	return &AnimeState{Source: SourceSeason}
+	return &AnimeState{
+		Source:      SourceSeason,
+		seriesCache: map[int][]seriesEntry{},
+		peekCache:   map[int]mal.Item{},
+		ringCache:   map[int][]mal.RelatedEntry{},
+	}
+}
+
+// caches returns the state's shared maps, creating them on demand (a state
+// built by zero value or an older session has none yet).
+func (st *AnimeState) caches() (series map[int][]seriesEntry, peek map[int]mal.Item, rings map[int][]mal.RelatedEntry) {
+	if st.seriesCache == nil {
+		st.seriesCache = map[int][]seriesEntry{}
+	}
+	if st.peekCache == nil {
+		st.peekCache = map[int]mal.Item{}
+	}
+	if st.ringCache == nil {
+		st.ringCache = map[int][]mal.RelatedEntry{}
+	}
+	return st.seriesCache, st.peekCache, st.ringCache
 }
 
 // restoreState seeds a picker from a previous session's state, overriding the
@@ -537,6 +577,25 @@ func (m *animePicker) restoreState(st *AnimeState) {
 		m.filter.Sort = st.Sort
 	}
 	m.pendingCursor = st.Cursor
+	// The series view re-opens when it was active at exit: mount it from the
+	// shared cache. The normal-list values restored above become the Esc-back
+	// restore points instead (they were saved as the pre-view values).
+	// Seed the list cache when the carried list is what this picker will
+	// load — Init's loadCmd then serves it without touching the network.
+	if st.listItems != nil && st.listKey == animeCacheKey(m.source, m.query, m.season) {
+		m.cache.put(st.listKey, st.listItems)
+	}
+	if st.SeriesAnchor > 0 {
+		if entries, ok := m.series[st.SeriesAnchor]; ok && len(entries) > 1 {
+			listCursor := st.Cursor // where Esc-back lands on the list
+			m.applySeriesView(st.SeriesAnchor, entries)
+			m.seriesCursor = listCursor
+			if st.SeriesCursor > 0 && st.SeriesCursor < len(m.view) {
+				m.cursor = st.SeriesCursor
+			}
+			m.pendingCursor = -1 // the list isn't mounting; its cursor waits on Esc
+		}
+	}
 }
 
 // saveState snapshots the picker's options, cursor, and list cache for the
@@ -547,10 +606,42 @@ func (m *animePicker) saveState(st *AnimeState) {
 	}
 	st.Source = m.source
 	st.Season = m.season
-	st.Status = m.filter.Status
-	st.Sort = m.filter.Sort
-	st.Cursor = m.cursor
+	if m.seriesView {
+		// Exiting with the series view open: snapshot the LIST as it was
+		// before the view (the in-view filter is a forced "All" — saving that
+		// is how the status mismatched on re-entry) plus where the view was.
+		st.Status = firstNonEmpty(m.seriesStatus, m.filter.Status)
+		st.Sort = firstNonEmpty(m.seriesSort, m.filter.Sort)
+		st.Cursor = clamp(m.seriesCursor, 0, max(0, len(m.view)-1))
+		st.SeriesAnchor = m.seriesAnchor
+		st.SeriesCursor = m.cursor
+	} else {
+		st.Status = m.filter.Status
+		st.Sort = m.filter.Sort
+		st.Cursor = m.cursor
+		st.SeriesAnchor = 0
+		st.SeriesCursor = 0
+	}
+	// Hand the series caches to the state (no-op when they were adopted from
+	// it): the picker is exiting, so the next one inherits them as-is.
+	st.seriesCache = m.series
+	st.peekCache = m.peekItems
+	st.ringCache = m.rings
+	// Carry the list for instant backward: the cache entry for what this
+	// picker was showing (kept as-is when this picker never loaded it — a
+	// series-restored picker — so the previous carrier survives).
+	if items, ok := m.cache.get(animeCacheKey(m.source, m.query, m.season)); ok {
+		st.listItems, st.listKey = items, animeCacheKey(m.source, m.query, m.season)
+	}
 	st.restored = true
+}
+
+// firstNonEmpty returns the first non-empty argument.
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 // sortKnown reports whether value is one of sortOptions' values.
@@ -631,6 +722,20 @@ func (m *animePicker) defaultStatus() string {
 }
 
 func (m *animePicker) Init() tea.Cmd {
+	if m.seriesView {
+		// A restored series view: the list load still runs — its result is
+		// discarded while the view shows (applyLoaded's guard), but it lands
+		// in the list cache, so Esc-back is served instantly instead of
+		// paying the network then. Batch-prefetch the rows' covers too (the
+		// previous picker's cover cache died with its temp dir).
+		urls := make([]string, 0, len(m.items))
+		for _, it := range m.items {
+			if it.CoverURL != "" {
+				urls = append(urls, it.CoverURL)
+			}
+		}
+		return tea.Batch(m.favoritesCmd(), m.cover.Download(urls), m.loadCmd(m.source, m.query, m.season))
+	}
 	return tea.Batch(m.loadCmd(m.source, m.query, m.season), m.favoritesCmd())
 }
 
@@ -832,10 +937,28 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// leaveSeriesView drops the series view in favor of a fresh list load (Tab,
+// source switch, season change made from inside it) — clearing the state here
+// lets applyLoaded mount the new list normally.
+func (m *animePicker) leaveSeriesView() {
+	m.seriesView = false
+	m.seriesLabels = nil
+	m.seriesAnchor = 0
+	m.seriesStatus = ""
+	m.seriesSort = ""
+	m.seriesCursor = -1
+}
+
 // applyLoaded ingests a (source, query, season) load's items when it matches
 // what we currently want; stale loads are discarded.
 func (m *animePicker) applyLoaded(msg itemsLoadedMsg) (tea.Model, tea.Cmd) {
 	if msg.source != m.source || msg.query != m.query || msg.season != m.season {
+		return m, nil
+	}
+	if m.seriesView {
+		// The series view is showing; the load stays cached in animeCache for
+		// the Esc-back reload instead of replacing the view. (Switches made
+		// from inside the view leave it first — see leaveSeriesView.)
 		return m, nil
 	}
 	m.items = msg.items
@@ -843,11 +966,6 @@ func (m *animePicker) applyLoaded(msg itemsLoadedMsg) (tea.Model, tea.Cmd) {
 	m.cursor = 0
 	m.topItem = 0
 	m.loadErr = msg.err
-	// A fresh load always leaves the series view (Esc-back's reload — with
-	// its cursor/filter restore already staged — or a Tab/season switch made
-	// from inside it).
-	m.seriesView = false
-	m.seriesLabels = nil
 	m.applyFilter()
 	// Session-restored cursor: applied to the first load only (later loads —
 	// Tab/season switches — keep the reset-to-0 above).
@@ -1170,6 +1288,7 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.season = m.defaultSeason()
 		m.filter.Status = m.defaultStatus()
+		m.leaveSeriesView()
 		m.loading = true
 		m.cursor = 0
 		m.topItem = 0
@@ -1454,6 +1573,7 @@ func (m *animePicker) applyCommand(intent string) (tea.Model, tea.Cmd) {
 		}
 		m.season = m.defaultSeason()
 		m.filter.Status = m.defaultStatus()
+		m.leaveSeriesView()
 		m.loading = true
 		m.cursor = 0
 		m.topItem = 0
@@ -1792,6 +1912,7 @@ func (m *animePicker) applyOverlaySelection() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.season = sel
+		m.leaveSeriesView()
 		m.loading = true
 		m.cursor = 0
 		m.topItem = 0

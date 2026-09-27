@@ -2054,15 +2054,17 @@ func TestAnimeStateCursorRestoredAfterLoad(t *testing.T) {
 	}
 }
 
-// TestAnimeStateRoundTripRefetches: saveState → restoreState carries the
-// options, but NOT the list cache — re-entry must re-fetch so MAL updates made
-// while watching (watched counts, statuses) are reflected, not frozen.
-func TestAnimeStateRoundTripRefetches(t *testing.T) {
-	watched := 3
+// TestAnimeStateRoundTripServesCarriedList: saveState → restoreState carries
+// the options AND the list — backward never re-fetches (the user-facing
+// contract: leaving the release picker returns instantly). In-session row
+// writes ride along (the carried slice is aliased), so a status set before
+// exiting is still set after re-entry; only MAL-side changes made outside
+// this session wait for the next process.
+func TestAnimeStateRoundTripServesCarriedList(t *testing.T) {
 	loads := 0
 	load := AnimeLoad(func(AnimeSource, string, string) ([]mal.Item, error) {
 		loads++
-		return []mal.Item{{MalID: 1, Title: "A", WatchedEps: watched}}, nil
+		return []mal.Item{{MalID: 1, Title: "A", WatchedEps: 3}}, nil
 	})
 
 	a := newAnimePicker(SourceSeason, "", load, nil, nil, nil, nil, nil, false)
@@ -2077,19 +2079,34 @@ func TestAnimeStateRoundTripRefetches(t *testing.T) {
 	st := NewAnimeState()
 	a.saveState(st)
 
-	// "Watch" an episode: MAL write-back bumps the count; re-entry must see it.
-	watched = 4
+	// Re-entry: served from the carried list — no second load.
 	b := newAnimePicker(SourceSeason, "", load, nil, nil, nil, nil, nil, false)
 	b.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	b.restoreState(st)
-	if cmd := b.Init(); cmd != nil { // second picker: fresh load, NOT the old cache
-		cmd()
+	if cmd := b.Init(); cmd != nil {
+		b.Update(cmd()) // run the load and deliver its (cached) msg
 	}
-	if loads != 2 {
-		t.Fatalf("re-entry served a stale cache: %d loads, want 2 (fresh fetch)", loads)
+	if loads != 1 {
+		t.Fatalf("re-entry re-fetched (%d loads) — want the carried list, no network", loads)
+	}
+	if len(b.items) != 1 || b.items[0].Title != "A" {
+		t.Fatalf("re-entry items = %v, want the carried list", b.items)
 	}
 	if b.filter.Sort != a.filter.Sort || b.filter.Status != a.filter.Status {
 		t.Fatal("restore must carry the saved options")
+	}
+
+	// An in-session write persists into the carried rows for the NEXT entry.
+	b.items[0].ListStatus = "on_hold"
+	b.saveState(st)
+	c := newAnimePicker(SourceSeason, "", load, nil, nil, nil, nil, nil, false)
+	c.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	c.restoreState(st)
+	if cmd := c.Init(); cmd != nil {
+		c.Update(cmd())
+	}
+	if loads != 1 || len(c.items) != 1 || c.items[0].ListStatus != "on_hold" {
+		t.Fatalf("third entry: loads=%d items=%+v — want carried rows with the session write", loads, c.items)
 	}
 }
 
