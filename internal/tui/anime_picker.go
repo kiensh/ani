@@ -438,13 +438,15 @@ type animePicker struct {
 	favStudios    map[string]bool
 
 	// ---- series view (`: Show Series`) ----
-	related       *RelatedSource             // nil (no-MAL paths) hides the command
-	rings         map[int][]mal.RelatedEntry // focused rows' rings: the has-series indicator + palette gating
-	ringErrs      map[int]bool               // ring warm-up failed → skip re-fetching on every focus
-	series        map[int][]seriesEntry      // anchor malID → built franchise view (one build per session)
-	peekItems     map[int]mal.Item           // series malID → full item (details, once per session)
-	itemPending   map[int]bool               // series malID → details fetch in flight
-	pendingSeries bool                       // series build in flight that opens the view on arrival
+	related             *RelatedSource             // nil (no-MAL paths) hides the command
+	rings               map[int][]mal.RelatedEntry // focused rows' rings: the has-series indicator + palette gating
+	ringErrs            map[int]bool               // ring warm-up failed → skip re-fetching on every focus
+	series              map[int][]seriesEntry      // anchor malID → built franchise view (one build per session)
+	peekItems           map[int]mal.Item           // series malID → full item (details, once per session)
+	itemPending         map[int]bool               // series malID → details fetch in flight
+	pendingSeries       bool                       // series build in flight that opens the view on arrival
+	seriesBuilding      bool                       // first-entry build in flight — the picker shows a loading screen
+	seriesBuildingTitle string                     // the anchor's title for that screen
 
 	seriesView   bool           // left pane shows the focused anime's franchise
 	seriesAnchor int            // malID the view is anchored on (0 = none)
@@ -531,6 +533,40 @@ func NewAnimeState() *AnimeState {
 		seriesCache: map[int][]seriesEntry{},
 		peekCache:   map[int]mal.Item{},
 		ringCache:   map[int][]mal.RelatedEntry{},
+	}
+}
+
+// PatchItem merges a refreshed item into every carried copy — the list rows,
+// the series-view entries, and the details cache. The app calls it when the
+// release loop exits (its write-back + RefreshItem leave `item` fresh), so
+// the next picker shows the new watched count/status instantly from the
+// carried data instead of serving it stale — backward stays network-free.
+// Runs between TUI programs (app.Run's loop), never concurrently with a picker.
+func (st *AnimeState) PatchItem(it mal.Item) {
+	if st == nil || it.MalID == 0 {
+		return
+	}
+	patch := func(dst *mal.Item) {
+		dst.WatchedEps = it.WatchedEps
+		dst.ListStatus = it.ListStatus
+		dst.Score = it.Score
+		dst.UpdatedAt = it.UpdatedAt
+	}
+	for i := range st.listItems {
+		if st.listItems[i].MalID == it.MalID {
+			patch(&st.listItems[i])
+		}
+	}
+	for _, entries := range st.seriesCache {
+		for i := range entries {
+			if entries[i].Item.MalID == it.MalID {
+				patch(&entries[i].Item)
+			}
+		}
+	}
+	if prev, ok := st.peekCache[it.MalID]; ok {
+		patch(&prev)
+		st.peekCache[it.MalID] = prev
 	}
 }
 
@@ -908,6 +944,8 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case seriesLoadedMsg:
+		m.seriesBuilding = false
+		m.seriesBuildingTitle = ""
 		// Cache only real results — an empty build (nothing related, or every
 		// fetch failed) retries on the next open.
 		if len(msg.entries) > 1 {
@@ -2466,10 +2504,14 @@ func (m *animePicker) View() string {
 		return m.renderAuthStatusModal()
 	}
 
-	// ---- LEFT pane (list / overlay / palette) ----
+	// ---- LEFT pane (list / overlay / palette / series build) ----
 	var leftContent string
 	if m.palette.Active() {
 		leftContent = m.palette.View(m.listWidth-2, m.pageSize())
+	} else if m.seriesBuilding {
+		// First entry into a series view: the franchise walk (rings + details)
+		// is in flight — the list area says so, the rest of the layout stays.
+		leftContent = FaintStyle.Render(fmt.Sprintf("Loading series: %s…", m.seriesBuildingTitle))
 	} else if m.overlay.active() {
 		if m.overlay.kind == animeOverlayEpisode {
 			// Number-input overlay (text prompt, not a list).

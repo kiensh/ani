@@ -210,6 +210,13 @@ func (m *animePicker) openSeriesView() (tea.Model, tea.Cmd) {
 		return m.applySeriesView(row.MalID, entries)
 	}
 	m.pendingSeries = true // open when the build lands
+	if !m.seriesView {
+		// Coming from the normal list: the walk takes a beat (it chains every
+		// season's ring and fetches details), so show a loading screen. A
+		// re-anchor keeps the current view until the new one is ready.
+		m.seriesBuilding = true
+		m.seriesBuildingTitle = row.Title
+	}
 	return m, m.seriesBuildCmd(row)
 }
 

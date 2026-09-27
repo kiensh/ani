@@ -638,3 +638,97 @@ func TestSeriesViewEscBackServedFromReentryLoad(t *testing.T) {
 		t.Errorf("post-Esc items = %v, want the normal list", got)
 	}
 }
+
+// TestSeriesLoadingScreen: a first-entry build shows a loading line until the
+// franchise lands; a re-anchor inside the view keeps showing the current rows
+// instead (no flash of loading).
+func TestSeriesLoadingScreen(t *testing.T) {
+	items := []mal.Item{{MalID: 100, Title: "Grand Blue", StartDate: "2018-07-01"}}
+	rings, full := seriesFixture()
+	m := newSeriesViewPicker(items, relatedFixture(rings, full))
+
+	_, cmd := m.applyCommand("series")
+	if cmd == nil {
+		t.Fatal("no build cmd")
+	}
+	if got := m.View(); !strings.Contains(got, "Loading series: Grand Blue…") {
+		t.Errorf("first entry should show a loading line, got:\n%s", firstLine(got))
+	}
+	if got := m.View(); !strings.Contains(got, "Grand Blue") || !strings.Contains(got, "source:") {
+		t.Errorf("the loading state should keep the header/preview around the left pane:\n%s", got)
+	}
+	m.Update(cmd()) // the build lands
+	if m.seriesBuilding {
+		t.Error("building flag survived the build")
+	}
+	if !m.seriesView || len(m.view) != 5 {
+		t.Fatalf("view did not mount after the build: %v", ids(m.view))
+	}
+
+	// Re-anchor on S3 (cold ring → another build): the current view stays.
+	m.cursor = indexOfID(m.view, 103)
+	_, cmd = m.applyCommand("series")
+	if cmd == nil {
+		t.Fatal("re-anchor issued no build")
+	}
+	if got := m.View(); strings.Contains(got, "Loading series") || !strings.Contains(got, "Grand Blue S2") {
+		t.Errorf("re-anchor should keep showing the current view, got:\n%s", firstLine(got))
+	}
+	m.Update(cmd())
+	if !m.seriesView || m.view[m.cursor].MalID != 103 {
+		t.Errorf("re-anchor did not land on S3: %v cursor=%d", ids(m.view), m.cursor)
+	}
+}
+
+// TestPatchItemKeepsBackwardFresh: after a playback round-trip (the app's
+// write-back + RefreshItem leave the item fresh), PatchItem merges the new
+// watched count/status into every carried copy — the list rows AND the
+// series-view entries — so the instant (cache-served) backward shows current
+// data instead of the stale pre-play values.
+func TestPatchItemKeepsBackwardFresh(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 100, Title: "Grand Blue", StartDate: "2018-07-01", WatchedEps: 4, ListStatus: "watching"},
+	}
+	rings, full := seriesFixture()
+	m := newSeriesViewPicker(items, relatedFixture(rings, full))
+	_, cmd := m.applyCommand("series")
+	m.Update(cmd())
+	m.Update(peekItemMsg{malID: 101, item: full[101]})
+
+	// A real load populates the picker's list cache; saveState carries it.
+	m.cache.put(animeCacheKey(m.source, m.query, m.season), items)
+	st := NewAnimeState()
+	m.saveState(st)
+
+	// The played item comes back refreshed: S2 watched 12 (was 0) and on the
+	// list — as RefreshItem would leave it after the write-back.
+	played := full[101]
+	played.WatchedEps = 12
+	played.ListStatus = "completed"
+	st.PatchItem(played)
+
+	if it := st.listItems[0]; it.MalID != 100 {
+		t.Fatalf("patch touched the wrong row: %+v", it)
+	}
+	entries := st.seriesCache[100]
+	var got mal.Item
+	for _, e := range entries {
+		if e.Item.MalID == 101 {
+			got = e.Item
+		}
+	}
+	if got.WatchedEps != 12 || got.ListStatus != "completed" {
+		t.Fatalf("series entry not patched: %+v", got)
+	}
+
+	// Re-entry serves the carried (patched) data instantly and shows it.
+	next := newSeriesViewPicker(items, relatedFixture(rings, full))
+	next.series, next.peekItems, next.rings = st.caches()
+	next.restoreState(st)
+	if !next.seriesView {
+		t.Fatal("series view not restored")
+	}
+	if it := next.items[indexOfID(next.items, 101)]; it.WatchedEps != 12 || it.ListStatus != "completed" {
+		t.Fatalf("restored row shows stale data: %+v", it)
+	}
+}

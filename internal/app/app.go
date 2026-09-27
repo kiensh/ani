@@ -90,6 +90,10 @@ func Run(opt *Options) error {
 		}
 		if err := releaseLoop(opt, aid, item, aired, health, relcache); err != nil {
 			if errors.Is(err, errBackToAnime) {
+				// The loop's write-back left `item` refreshed (watched count,
+				// status) — merge it into the session's carried rows so the
+				// picker re-entry shows it without re-fetching (instant back).
+				animeState.PatchItem(*item)
 				continue // Esc in release picker (or a dead switched-to provider) → re-resolve
 			}
 			return err
