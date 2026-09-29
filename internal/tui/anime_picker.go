@@ -1621,11 +1621,17 @@ func (m *animePicker) applyCommand(intent string) (tea.Model, tea.Cmd) {
 	case strings.HasPrefix(intent, "sort:"):
 		m.filter.Sort = strings.TrimPrefix(intent, "sort:")
 		m.applyFilter()
-		return m, nil
+		// focusCmd, like the 's' overlay path: re-sorting with the cursor
+		// index held puts a DIFFERENT anime under it — without this the text
+		// metadata updates but the cover keeps showing the previous anime
+		// (m.coverText only changes when loadCoverCmd runs).
+		return m, m.focusCmd()
 	case strings.HasPrefix(intent, "statusfilter:"):
 		m.filter.Status = strings.TrimPrefix(intent, "statusfilter:")
 		m.applyFilter()
-		return m, m.statusAiredPrefetchCmd()
+		// Same as the 't' overlay path: focusCmd for the cover swap above,
+		// plus the aired prefetch for items the filter change revealed.
+		return m, tea.Batch(m.focusCmd(), m.statusAiredPrefetchCmd())
 	case strings.HasPrefix(intent, "statusset:"):
 		it := m.currentItemCopy()
 		if it == nil || it.MalID == 0 || m.applyStatus == nil {

@@ -406,6 +406,78 @@ func TestAnimePickerSortOverlay(t *testing.T) {
 	}
 }
 
+// TestAnimePickerPaletteFilterChangesRefreshCover: changing the sort or status
+// filter via the `:` palette keeps the cursor INDEX but lands it on a different
+// anime — the cover must follow (focusCmd runs loadCoverCmd and replaces
+// m.coverText), not keep showing the previous anime's thumbnail. The 's'/'t'
+// overlay paths already did this; the palette paths returned no cmd at all.
+func TestAnimePickerPaletteFilterChangesRefreshCover(t *testing.T) {
+	items := []mal.Item{
+		{MalID: 1, Title: "Beta"},
+		{MalID: 2, Title: "Alpha"},
+	}
+	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil, nil, false)
+	m.filter.Status = "All"
+	loadAnime(m, items)
+	m.width, m.height = 80, 30
+	m.recomputeLayout()
+	m.fixScroll()
+	if m.view[m.cursor].MalID != 1 {
+		t.Fatalf("setup: cursor row = %d, want 1 (input order)", m.view[m.cursor].MalID)
+	}
+
+	// eachMsg runs a cmd (unwrapping nested tea.BatchMsgs) and feeds each
+	// resulting msg to fn.
+	var eachMsg func(cmd tea.Cmd, fn func(tea.Msg))
+	eachMsg = func(cmd tea.Cmd, fn func(tea.Msg)) {
+		if cmd == nil {
+			return
+		}
+		msg := cmd()
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, c := range batch {
+				eachMsg(c, fn)
+			}
+			return
+		}
+		fn(msg)
+	}
+
+	sawCoverMsg := false
+	model, cmd := m.applyCommand("sort:title")
+	m = model.(*animePicker)
+	if m.view[m.cursor].MalID != 2 {
+		t.Fatalf("after title sort, cursor row = %d, want 2 (Alpha)", m.view[m.cursor].MalID)
+	}
+	if cmd == nil {
+		t.Fatal("palette sort returned no cmd — the cover can never refresh")
+	}
+	eachMsg(cmd, func(msg tea.Msg) {
+		if _, ok := msg.(coverTextMsg); ok {
+			sawCoverMsg = true
+		}
+	})
+	if !sawCoverMsg {
+		t.Error("palette sort ran no cover cmd — the previous anime's thumbnail would stay")
+	}
+
+	// The status-filter intent has the same requirement.
+	sawCoverMsg = false
+	model, cmd = m.applyCommand("statusfilter:All")
+	m = model.(*animePicker)
+	if cmd == nil {
+		t.Fatal("palette statusfilter returned no cmd")
+	}
+	eachMsg(cmd, func(msg tea.Msg) {
+		if _, ok := msg.(coverTextMsg); ok {
+			sawCoverMsg = true
+		}
+	})
+	if !sawCoverMsg {
+		t.Error("palette statusfilter ran no cover cmd — the previous anime's thumbnail would stay")
+	}
+}
+
 // TestAnimePickerSearchDefaultSort verifies search mode (query != "") defaults to
 // "relevance" (preserve MAL's search ranking), while browse defaults to "updated".
 func TestAnimePickerSearchDefaultSort(t *testing.T) {
