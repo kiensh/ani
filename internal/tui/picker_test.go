@@ -1751,6 +1751,34 @@ func TestReleasePickerActionsMenu(t *testing.T) {
 	}
 }
 
+// TestReleasePickerEmptyEpisodeHint: when the provider had nothing for the
+// filtered episode at all (vs. filters hiding fetched rows), the preview says
+// so and points at the episode overlay — an unexplained empty screen reads as
+// "broken" (the hianime player migration hid behind exactly this).
+func TestReleasePickerEmptyEpisodeHint(t *testing.T) {
+	item := &mal.Item{Title: "X", TotalEps: 13, WatchedEps: 12}
+
+	// Fetch done, provider returned nothing for ep 13.
+	m := newReleasePicker(item, "", "", "newest", fetchAll(nil), false, nil, nil, nil, 0, false)
+	loadReleases(m, nil)
+	m.filter.Episode = 13
+	m.fetching = false
+	m.applyFilter()
+	if got := m.renderPreview(); !strings.Contains(got, "provider has no ep 13 yet") {
+		t.Errorf("preview = %q, want the not-uploaded hint", got)
+	}
+
+	// Rows fetched but filters hide them: the generic message.
+	all := []*playable.Release{mkRel("a", "1080p", 5, false)}
+	m2 := newReleasePicker(item, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
+	loadReleases(m2, all)
+	m2.filter.Episode = 13
+	m2.applyFilter()
+	if got := m2.renderPreview(); !strings.Contains(got, "(no releases match)") {
+		t.Errorf("preview = %q, want the generic no-match message", got)
+	}
+}
+
 func TestReleasePickerEscBack(t *testing.T) {
 	all := []*playable.Release{mkRel("a", "1080p", 1, false)}
 	item := &mal.Item{Title: "X", TotalEps: 12, WatchedEps: 0}

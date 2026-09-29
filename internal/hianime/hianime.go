@@ -6,13 +6,16 @@
 //
 // The site lists each season as its own entry numbered from 1, so episode
 // numbers map 1:1 to MAL per-season numbers (unlike the old anidb.app provider,
-// which used cumulative numbering and needed an offset). Streams come from the
-// ZokoAnime server embeds — the only server whose player config we can decode
-// (base64 + XOR with a fixed key, see decodeEmbedBlob).
+// which used cumulative numbering and needed an offset). Every server embed is
+// a megaplay.buzz player page; its sources API answers the master playlist URL
+// AES-encrypted (see decryptEnc), and only the "bcdn" ladder serves its video
+// segments to non-browser clients — the others are bot-trap decoys.
 package hianime
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -21,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -382,42 +386,94 @@ func AiredCount(title string) (float64, error) {
 // ---- Stream resolution ----
 
 // serverRe matches one server row of the servers fragment after whitespace is
-// compacted (the attributes span lines in the raw html). Only ZokoAnime embeds
-// are used — the other servers (HD-1, Vidstream → megacloud) use players whose
-// config we can't decode.
-var serverRe = regexp.MustCompile(`data-type="(sub|dub)" data-server-name="ZokoAnime" data-hash="([^"]+)"`)
+// compacted (the attributes span lines in the raw html). Every row's hash
+// decodes to a megaplay.buzz player page; rows are tried in order until one
+// resolves (the site rotates which server actually works).
+var serverRe = regexp.MustCompile(`data-type="(sub|dub)" data-server-name="([^"]+)" data-hash="([^"]+)"`)
 
-// blobRe extracts the obfuscated player config from a ZokoAnime embed page.
-var blobRe = regexp.MustCompile(`window\.__P="([^"]+)"`)
+// dataIDRe pulls the player file id out of a megaplay player page.
+var dataIDRe = regexp.MustCompile(`data-id="([0-9]+)"`)
 
-// embedKey is the repeating XOR key for the embed page's config blob.
-var embedKey = []byte("otaku-embed-v1")
+// The megaplay player page loads its sources from <origin>/stream/getSourcesNew,
+// which answers the subtitle tracks in the clear and the master-playlist URL
+// AES-encrypted in "enc". The player's client JS decrypts it with AES-256-CBC:
+// a 16-byte literal key zero-padded to 32 bytes, and a fixed 16-byte IV (the
+// same pair its segment layer uses). Only the ladder named by the s= param
+// serves video segments to non-browser clients — the default one hands out
+// bot-trap decoy segment URLs (random hosts, fake extensions) that 404 for
+// mpv/ffmpeg. s=bcdn is the ladder whose segments are plain-fetchable.
+const (
+	sourcesKey = "i?LMTAx0Q6,:}50U" // padded to 32 bytes (AES-256) by decryptEnc
+	sourcesIV  = "W0;27ToaUpl_P%'c"
+	sourcesCDN = "bcdn"
+)
 
-// embedConfig is the decoded player config: the master playlist and subtitle
-// tracks (the site marks the English track default).
-type embedConfig struct {
-	Src       string `json:"src"`
-	Subtitles []struct {
-		Label   string `json:"label"`
+// sourcesResp is the getSourcesNew payload: enc decrypts to {"file": "<master
+// playlist URL>"}; tracks carries the subtitle VTTs (the site marks the English
+// track default).
+type sourcesResp struct {
+	Tracks []struct {
+		File    string `json:"file"`
 		Default bool   `json:"default"`
-		Src     string `json:"src"`
-	} `json:"subtitles"`
+	} `json:"tracks"`
+	Enc string `json:"enc"`
 }
 
-// decodeEmbedConfig base64-decodes the blob and XORs it with embedKey.
-func decodeEmbedBlob(blob string) ([]byte, error) {
-	raw, err := base64.StdEncoding.DecodeString(blob)
+// decryptEnc decrypts one getSourcesNew "enc" blob into the master playlist URL
+// (base64url → AES-256-CBC → PKCS#7 → {"file":…}).
+func decryptEnc(enc string) (string, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(enc, "="))
 	if err != nil {
-		raw, err = base64.RawStdEncoding.DecodeString(blob)
-		if err != nil {
-			return nil, fmt.Errorf("embed blob: decode: %w", err)
-		}
+		return "", fmt.Errorf("sources blob: decode: %w", err)
 	}
-	out := make([]byte, len(raw))
-	for i, b := range raw {
-		out[i] = b ^ embedKey[i%len(embedKey)]
+	if len(raw) == 0 || len(raw)%aes.BlockSize != 0 {
+		return "", fmt.Errorf("sources blob: %d bytes", len(raw))
 	}
-	return out, nil
+	key := make([]byte, 32)
+	copy(key, sourcesKey)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	dst := make([]byte, len(raw))
+	cipher.NewCBCDecrypter(block, []byte(sourcesIV)).CryptBlocks(dst, raw)
+	pad := int(dst[len(dst)-1]) // PKCS#7
+	if pad <= 0 || pad > aes.BlockSize {
+		return "", fmt.Errorf("sources blob: bad padding %d", pad)
+	}
+	var cfg struct {
+		File string `json:"file"`
+	}
+	if err := json.Unmarshal(dst[:len(dst)-pad], &cfg); err != nil {
+		return "", fmt.Errorf("sources blob: %w", err)
+	}
+	if cfg.File == "" {
+		return "", fmt.Errorf("sources blob: no file")
+	}
+	return cfg.File, nil
+}
+
+// getSourcesAJAX fetches the megaplay sources API. The endpoint answers 403
+// ("accepts only AJAX requests") unless the request carries the X-Requested-With
+// header, so it can't ride on get().
+func getSourcesAJAX(u, referer string, v any) error {
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Referer", referer)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("megaplay sources: HTTP %d", resp.StatusCode)
+	}
+	return json.NewDecoder(resp.Body).Decode(v)
 }
 
 // resAttrRe pulls the resolution out of an #EXT-X-STREAM-INF line.
@@ -487,8 +543,11 @@ type streamSet struct {
 	subURL   string
 }
 
-// episodeStreams resolves one episode's sub/dub variants: servers → ZokoAnime
-// hash → embed URL → decoded player config → master playlist ladder.
+// episodeStreams resolves one episode's sub/dub variants: servers → each
+// hash (a megaplay player page) in order until one yields its sources → the
+// decrypted master playlist's ladder. An error means no server row resolved —
+// a site-side change to the player, worth surfacing (vs. a not-yet-uploaded
+// episode, which never reaches here).
 func episodeStreams(epID int) (map[string]streamSet, error) {
 	u := baseURL + "/api/theme/episode/servers?episodeId=" + strconv.Itoa(epID)
 	dbg("hianime: GET %s\n", u)
@@ -498,71 +557,117 @@ func episodeStreams(epID int) (map[string]streamSet, error) {
 	}
 	// The attributes span lines; compact whitespace so serverRe sees one row.
 	compact := strings.Join(strings.Fields(html), " ")
-	hashes := map[string]string{}
-	for _, m := range serverRe.FindAllStringSubmatch(compact, -1) {
-		if _, dup := hashes[m[1]]; !dup {
-			hashes[m[1]] = m[2]
+	hashes := map[string][]string{}
+	rows := serverRe.FindAllStringSubmatch(compact, -1)
+	for _, m := range rows {
+		if !slices.Contains(hashes[m[1]], m[3]) {
+			hashes[m[1]] = append(hashes[m[1]], m[3])
 		}
+	}
+	if len(rows) == 0 {
+		dbg("hianime: episode %d: no server rows\n", epID)
+		return nil, fmt.Errorf("hianime: no playable server for episode %d", epID)
 	}
 	streams := map[string]streamSet{}
 	for _, group := range []string{"sub", "dub"} {
-		hash, ok := hashes[group]
-		if !ok {
-			continue // e.g. no dub for this episode
-		}
-		raw, err := base64.StdEncoding.DecodeString(hash)
-		if err != nil {
-			dbg("hianime: %s hash decode: %v\n", group, err)
-			continue
-		}
-		embed := string(raw)
-		refr := originOf(embed)
-		body, status, err := get(embed, "")
-		if err != nil {
-			dbg("hianime: %s embed: %v\n", group, err)
-			continue
-		}
-		if status != 200 {
-			dbg("hianime: %s embed: HTTP %d\n", group, status)
-			continue
-		}
-		m := blobRe.FindSubmatch(body)
-		if m == nil {
-			dbg("hianime: %s embed: no __P blob\n", group)
-			continue
-		}
-		blob, err := decodeEmbedBlob(string(m[1]))
-		if err != nil {
-			dbg("hianime: %s embed blob: %v\n", group, err)
-			continue
-		}
-		var cfg embedConfig
-		if err := json.Unmarshal(blob, &cfg); err != nil {
-			dbg("hianime: %s embed config: %v\n", group, err)
-			continue
-		}
-		if cfg.Src == "" {
-			continue
-		}
-		vs, err := masterVariants(cfg.Src, refr)
-		if err != nil {
-			dbg("hianime: %s master: %v\n", group, err)
-			continue
-		}
-		if len(vs) == 0 {
-			vs = []variant{{height: "auto", url: cfg.Src}} // let mpv pick
-		}
-		// The default track (marked by the site) is the English subtitle.
-		subURL := ""
-		for _, s := range cfg.Subtitles {
-			if s.Default && s.Src != "" {
-				subURL = s.Src
+		for _, hash := range hashes[group] {
+			ss, ok := resolveServer(group, hash)
+			if ok {
+				streams[group] = ss
 				break
 			}
 		}
-		streams[group] = streamSet{variants: vs, referer: refr, subURL: subURL}
+	}
+	if len(streams) == 0 {
+		return nil, fmt.Errorf("hianime: no playable server for episode %d (%d rows tried)", epID, len(rows))
 	}
 	return streams, nil
+}
+
+// resolveServer resolves one server hash to its stream set. ok=false means this
+// server didn't resolve (error page, no player id, sources failure) — harmless,
+// the next row is tried.
+func resolveServer(group, hash string) (streamSet, bool) {
+	raw, err := base64.StdEncoding.DecodeString(hash)
+	if err != nil {
+		dbg("hianime: %s hash decode: %v\n", group, err)
+		return streamSet{}, false
+	}
+	embed := string(raw)
+	if !strings.HasPrefix(embed, "http") {
+		dbg("hianime: %s hash not a url: %q\n", group, embed)
+		return streamSet{}, false
+	}
+	for _, u := range embedVariants(embed) {
+		body, status, err := get(u, "")
+		if err != nil {
+			dbg("hianime: %s embed %s: %v\n", group, u, err)
+			continue
+		}
+		if status != 200 {
+			dbg("hianime: %s embed %s: HTTP %d\n", group, u, status)
+			continue
+		}
+		m := dataIDRe.FindSubmatch(body)
+		if m == nil {
+			dbg("hianime: %s embed %s: no data-id\n", group, u)
+			continue
+		}
+		ss, err := megaplayStreams(string(m[1]), originOf(u))
+		if err != nil {
+			dbg("hianime: %s sources: %v\n", group, err)
+			continue
+		}
+		return ss, true
+	}
+	return streamSet{}, false
+}
+
+// embedVariants lists the player-page URLs to try for one decoded hash: the URL
+// as-is, then the /videojs/ player form. The plain /stream/ form intermittently
+// serves an error page (seen on some episodes, both sub and dub) while the
+// videojs form has resolved every episode so far.
+func embedVariants(embed string) []string {
+	out := []string{embed}
+	if i := strings.Index(embed, "/stream/"); i >= 0 && !strings.Contains(embed, "/videojs/") {
+		out = append(out, embed[:i]+"/videojs"+embed[i:])
+	}
+	return out
+}
+
+// megaplayStreams resolves one player file id: getSourcesNew → decrypt enc →
+// master playlist ladder. referer is the player origin — the stream host 403s
+// without it.
+func megaplayStreams(dataID, origin string) (streamSet, error) {
+	u := origin + "stream/getSourcesNew?id=" + url.QueryEscape(dataID) + "&s=" + sourcesCDN
+	dbg("hianime: GET %s\n", u)
+	var src sourcesResp
+	if err := getSourcesAJAX(u, origin, &src); err != nil {
+		return streamSet{}, err
+	}
+	if src.Enc == "" {
+		return streamSet{}, fmt.Errorf("no enc blob")
+	}
+	master, err := decryptEnc(src.Enc)
+	if err != nil {
+		return streamSet{}, err
+	}
+	vs, err := masterVariants(master, origin)
+	if err != nil {
+		return streamSet{}, err
+	}
+	if len(vs) == 0 {
+		vs = []variant{{height: "auto", url: master}} // let mpv pick
+	}
+	// The default track (marked by the site) is the English subtitle.
+	subURL := ""
+	for _, tr := range src.Tracks {
+		if tr.Default && tr.File != "" {
+			subURL = tr.File
+			break
+		}
+	}
+	return streamSet{variants: vs, referer: origin, subURL: subURL}, nil
 }
 
 // allEpisodesCap bounds the "all episodes" (episode == 0) fetch: each listed

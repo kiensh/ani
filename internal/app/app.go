@@ -649,8 +649,10 @@ func streamLoop(opt *Options, item *mal.Item, aired *tui.AiredCache, health *tui
 		}
 		rels, e := hianime.FetchReleases(show.ID, ep)
 		if e != nil {
-			// Mark reachability for the warning line (a missing episode is an
-			// empty list, not an error — only transport/HTTP failures land here).
+			// Mark reachability for the warning line. A missing episode is an
+			// empty list, not an error; errors are transport/HTTP failures and
+			// "no playable server" — the player chain broke site-side, which the
+			// warning line and debug log should say instead of an empty screen.
 			health.MarkDown("hianime", downReason(e))
 			mal.LogDebug("hianime fetch ep %d: %v\n", ep, e)
 			return nil // not cached — the next entry retries it

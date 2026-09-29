@@ -806,7 +806,14 @@ func (m *releasePicker) renderPreview() string {
 	// Always exactly rpPreviewLines (3) lines — truncate, never wrap.
 	lines := make([]string, 0, rpPreviewLines)
 	if cur == nil {
-		lines = append(lines, FaintStyle.Render("(no releases match)"))
+		if len(m.all) == 0 && !m.fetching && m.filter.Episode > 0 {
+			// The provider had nothing for this episode at all (vs. filters
+			// hiding fetched rows) — usually "not uploaded yet", which an
+			// unexplained empty screen never says.
+			lines = append(lines, FaintStyle.Render(fmt.Sprintf("(provider has no ep %d yet — press e to pick another)", m.filter.Episode)))
+		} else {
+			lines = append(lines, FaintStyle.Render("(no releases match)"))
+		}
 	} else {
 		lines = append(lines, TitleStyle.Render(ui.Truncate(cur.Title, width)))
 		detail := ui.RenderReleaseLine(cur)

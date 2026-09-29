@@ -1,6 +1,9 @@
 package hianime
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -16,14 +19,17 @@ import (
 	"ani/internal/hostgate"
 )
 
-// encodeBlob builds a window.__P blob: base64(json XOR embedKey).
-func encodeBlob(payload string) string {
-	raw := []byte(payload)
-	out := make([]byte, len(raw))
-	for i, b := range raw {
-		out[i] = b ^ embedKey[i%len(embedKey)]
-	}
-	return base64.StdEncoding.EncodeToString(out)
+// encryptEnc builds a getSourcesNew "enc" blob — the reverse of decryptEnc:
+// base64url(AES-256-CBC(PKCS#7 payload)) with the player's key/IV.
+func encryptEnc(payload string) string {
+	key := make([]byte, 32)
+	copy(key, sourcesKey)
+	block, _ := aes.NewCipher(key)
+	p := []byte(payload)
+	n := aes.BlockSize - len(p)%aes.BlockSize
+	p = append(p, bytes.Repeat([]byte{byte(n)}, n)...)
+	cipher.NewCBCEncrypter(block, []byte(sourcesIV)).CryptBlocks(p, p)
+	return base64.RawURLEncoding.EncodeToString(p)
 }
 
 // TestMain keeps the site-gate pace at zero for the fakes: one test host
@@ -123,11 +129,11 @@ func TestRateLimitCooldown(t *testing.T) {
 // fakeHianime is a stand-in hianime.at: /search returns the given result rows
 // (plus a sidebar that repeats the first row — the dupe must be stripped),
 // /api/theme/episode/list/<num> lists the given episodes, and each episode
-// resolves ZokoAnime sub (+dub) embeds → config blob → a master playlist whose
-// variant URIs are RELATIVE (exercising the join) and which 403s unless the
-// request carries the embed origin as Referer. serversHits counts requests to
-// the servers endpoint (a missing episode must not reach it). Returns a
-// cleanup that restores baseURL.
+// resolves Vidstream sub (+dub) embeds → megaplay player page → getSourcesNew
+// (AJAX-gated) → a master playlist whose variant URIs are RELATIVE (exercising
+// the join) and which 403s unless the request carries the embed origin as
+// Referer. serversHits counts requests to the servers endpoint (a missing
+// episode must not reach it). Returns a cleanup that restores baseURL.
 func fakeHianime(t *testing.T, episodes []Episode, heights []string, withDub bool) (*int32, func()) {
 	t.Helper()
 	var serversHits int32
@@ -155,24 +161,40 @@ func fakeHianime(t *testing.T, episodes []Episode, heights []string, withDub boo
 			atomic.AddInt32(&serversHits, 1)
 			subHash := base64.StdEncoding.EncodeToString([]byte(srv.URL + "/embed/sub"))
 			var b strings.Builder
-			fmt.Fprintf(&b, "<div class=\"item server-item\" data-type=\"sub\"\n    data-server-name=\"ZokoAnime\"\n    data-hash=\"%s\">\n", subHash)
+			fmt.Fprintf(&b, "<div class=\"item server-item\" data-type=\"sub\"\n    data-server-name=\"Vidstream-2\"\n    data-hash=\"%s\">\n", subHash)
 			fmt.Fprintf(&b, "<div class=\"item server-item\" data-type=\"sub\"\n    data-server-name=\"HD-1\"\n    data-hash=\"ignored\">\n")
 			if withDub {
 				dubHash := base64.StdEncoding.EncodeToString([]byte(srv.URL + "/embed/dub"))
-				fmt.Fprintf(&b, "<div class=\"item server-item\" data-type=\"dub\"\n    data-server-name=\"ZokoAnime\"\n    data-hash=\"%s\">\n", dubHash)
+				fmt.Fprintf(&b, "<div class=\"item server-item\" data-type=\"dub\"\n    data-server-name=\"Vidstream-2\"\n    data-hash=\"%s\">\n", dubHash)
 			}
 			writeFragment(w, b.String())
 
+		// A megaplay player page: the file id is all the resolver needs.
 		case r.URL.Path == "/embed/sub" || r.URL.Path == "/embed/dub":
-			cfg := map[string]any{
-				"src": srv.URL + "/master.m3u8",
-				"subtitles": []map[string]any{
-					{"label": "English", "default": r.URL.Path == "/embed/sub", "src": srv.URL + "/en.vtt"},
-					{"label": "Spanish", "default": false, "src": srv.URL + "/es.vtt"},
-				},
+			id := 7002
+			if r.URL.Path == "/embed/sub" {
+				id = 7001
 			}
-			payload, _ := json.Marshal(cfg)
-			fmt.Fprintf(w, "<script>window.__P=%q;window.__Q=%q</script>", encodeBlob(string(payload)), encodeBlob(`{"src":"decoy"}`))
+			fmt.Fprintf(w, `<html><div id="megaplay-player" data-id="%d" data-realid="42"></div></html>`, id)
+
+		// The megaplay sources API: 403 unless asked like the player asks
+		// (AJAX header, embed-origin referer, s=bcdn ladder), then the
+		// encrypted master URL + subtitle tracks (default only for sub).
+		case r.URL.Path == "/stream/getSourcesNew":
+			if r.Header.Get("X-Requested-With") != "XMLHttpRequest" ||
+				r.URL.Query().Get("s") != sourcesCDN ||
+				r.Header.Get("Referer") != srv.URL+"/" {
+				http.Error(w, "This endpoint accepts only AJAX requests.", http.StatusForbidden)
+				return
+			}
+			def := "false"
+			if r.URL.Query().Get("id") == "7001" {
+				def = "true"
+			}
+			tracks := `[{"file":"` + srv.URL + `/en.vtt","label":"English","default":` + def + `},` +
+				`{"file":"` + srv.URL + `/es.vtt","label":"Spanish","default":false}]`
+			enc := encryptEnc(`{"file":"` + srv.URL + `/master.m3u8"}`)
+			fmt.Fprintf(w, `{"tracks":%s,"enc":%q}`, tracks, enc)
 
 		case r.URL.Path == "/master.m3u8":
 			// The stream host enforces the embed origin as referer (403 else).
@@ -449,19 +471,145 @@ func TestCloudflareBlocked(t *testing.T) {
 	}
 }
 
-// TestDecodeEmbedBlob: the blob decode is the base64 + XOR("otaku-embed-v1")
-// round trip the ZokoAnime embed ships.
-func TestDecodeEmbedBlob(t *testing.T) {
-	payload := `{"src":"https://x/master.m3u8","subtitles":[]}`
-	out, err := decodeEmbedBlob(encodeBlob(payload))
+// TestDecryptEnc: the enc blob decode is the base64url + AES-256-CBC (key
+// zero-padded to 32, fixed IV) + PKCS#7 round trip the megaplay player ships.
+func TestDecryptEnc(t *testing.T) {
+	want := `{"file":"https://cdn.example/anime/a/b/master.m3u8"}`
+	got, err := decryptEnc(encryptEnc(want))
 	if err != nil {
-		t.Fatalf("decodeEmbedBlob: %v", err)
+		t.Fatalf("decryptEnc: %v", err)
 	}
-	if string(out) != payload {
-		t.Fatalf("round trip = %q, want %q", out, payload)
+	if got != "https://cdn.example/anime/a/b/master.m3u8" {
+		t.Fatalf("decryptEnc = %q, want the file URL", got)
 	}
-	if _, err := decodeEmbedBlob("!!!not base64!!!"); err == nil {
+	if _, err := decryptEnc("!!!not base64!!!"); err == nil {
 		t.Fatal("garbage blob decoded without error")
+	}
+	// Not a multiple of the AES block size.
+	if _, err := decryptEnc(base64.RawURLEncoding.EncodeToString([]byte("short"))); err == nil {
+		t.Fatal("short blob decoded without error")
+	}
+	// Zero padding byte.
+	if _, err := decryptEnc(base64.RawURLEncoding.EncodeToString(make([]byte, 32))); err == nil {
+		t.Fatal("bad padding decoded without error")
+	}
+	if _, err := decryptEnc(encryptEnc(`{"file":""}`)); err == nil {
+		t.Fatal("empty file decoded without error")
+	}
+	if _, err := decryptEnc(encryptEnc(`not json`)); err == nil {
+		t.Fatal("non-JSON plaintext decoded without error")
+	}
+}
+
+// TestFetchReleasesVideojsRetry: the plain /stream/ embed form intermittently
+// serves an error page; the /videojs/ form of the same embed resolves. The
+// resolver must try both before giving up on a hash.
+func TestFetchReleasesVideojsRetry(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/search":
+			w.Write([]byte(`<h3 class="film-name"> <a href="` + srv.URL + `/watch/show-1" title="Show One">`))
+		case strings.HasPrefix(r.URL.Path, "/api/theme/episode/list/"):
+			writeFragment(w, `<div class="item ep-item" data-number="1" data-id="11">`)
+		case r.URL.Path == "/api/theme/episode/servers":
+			hash := base64.StdEncoding.EncodeToString([]byte(srv.URL + "/stream/s-2/42/sub"))
+			writeFragment(w, fmt.Sprintf(`<div class="item server-item" data-type="sub" data-server-name="Vidstream-2" data-hash="%s">`, hash))
+		case r.URL.Path == "/stream/s-2/42/sub":
+			w.Write([]byte(`<html><head><title>Error - MegaPlay</title></head></html>`))
+		case r.URL.Path == "/videojs/stream/s-2/42/sub":
+			w.Write([]byte(`<div id="megaplay-player" data-id="555">`))
+		case r.URL.Path == "/stream/getSourcesNew":
+			fmt.Fprintf(w, `{"tracks":[],"enc":%q}`, encryptEnc(`{"file":"`+srv.URL+`/master.m3u8"}`))
+		case r.URL.Path == "/master.m3u8":
+			w.Write([]byte("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=1920x1080\nindex-f1.m3u8\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	old := baseURL
+	baseURL = srv.URL
+	defer func() { baseURL = old }()
+
+	rels, err := FetchReleases("show-1", 1)
+	if err != nil {
+		t.Fatalf("FetchReleases(1): %v", err)
+	}
+	if len(rels) != 1 || rels[0].Group != "sub" || rels[0].Resolution != "1080p" {
+		t.Fatalf("rels = %+v, want one sub/1080p row via the videojs embed", rels)
+	}
+}
+
+// TestFetchReleasesServerFallback: when one server row's embed won't resolve,
+// the next row of the same audio type is tried.
+func TestFetchReleasesServerFallback(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/search":
+			w.Write([]byte(`<h3 class="film-name"> <a href="` + srv.URL + `/watch/show-1" title="Show One">`))
+		case strings.HasPrefix(r.URL.Path, "/api/theme/episode/list/"):
+			writeFragment(w, `<div class="item ep-item" data-number="1" data-id="11">`)
+		case r.URL.Path == "/api/theme/episode/servers":
+			bad := base64.StdEncoding.EncodeToString([]byte(srv.URL + "/embed/bad"))
+			good := base64.StdEncoding.EncodeToString([]byte(srv.URL + "/embed/good"))
+			writeFragment(w, fmt.Sprintf(
+				`<div class="item server-item" data-type="sub" data-server-name="Vidstream-2" data-hash="%s">`+
+					`<div class="item server-item" data-type="sub" data-server-name="Vidstream-1 beta" data-hash="%s">`, bad, good))
+		case r.URL.Path == "/embed/bad":
+			w.Write([]byte(`<html><head><title>Error - MegaPlay</title></head></html>`))
+		case r.URL.Path == "/embed/good":
+			w.Write([]byte(`<div id="megaplay-player" data-id="900">`))
+		case r.URL.Path == "/stream/getSourcesNew":
+			fmt.Fprintf(w, `{"tracks":[],"enc":%q}`, encryptEnc(`{"file":"`+srv.URL+`/master.m3u8"}`))
+		case r.URL.Path == "/master.m3u8":
+			w.Write([]byte("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=1280x720\nindex-f2.m3u8\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	old := baseURL
+	baseURL = srv.URL
+	defer func() { baseURL = old }()
+
+	rels, err := FetchReleases("show-1", 1)
+	if err != nil {
+		t.Fatalf("FetchReleases(1): %v", err)
+	}
+	if len(rels) != 1 || rels[0].Resolution != "720p" {
+		t.Fatalf("rels = %+v, want the second server's 720p row", rels)
+	}
+}
+
+// TestFetchReleasesNoPlayableServer: server rows exist but none resolve — the
+// player chain broke site-side. That must surface as an ERROR, not a silent
+// empty row set (an empty list is how a whole megaplay migration hid: the
+// episode listed fine, the aired count worked, and every fetch quietly
+// returned nothing).
+func TestFetchReleasesNoPlayableServer(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/search":
+			w.Write([]byte(`<h3 class="film-name"> <a href="` + srv.URL + `/watch/show-1" title="Show One">`))
+		case strings.HasPrefix(r.URL.Path, "/api/theme/episode/list/"):
+			writeFragment(w, `<div class="item ep-item" data-number="1" data-id="11">`)
+		case r.URL.Path == "/api/theme/episode/servers":
+			hash := base64.StdEncoding.EncodeToString([]byte(srv.URL + "/embed/broken"))
+			writeFragment(w, fmt.Sprintf(`<div class="item server-item" data-type="sub" data-server-name="Vidstream-2" data-hash="%s">`, hash))
+		default:
+			w.Write([]byte(`<html><head><title>Error - MegaPlay</title></head></html>`))
+		}
+	}))
+	defer srv.Close()
+	old := baseURL
+	baseURL = srv.URL
+	defer func() { baseURL = old }()
+
+	if _, err := FetchReleases("show-1", 1); err == nil || !strings.Contains(err.Error(), "no playable server") {
+		t.Fatalf("FetchReleases with only broken embeds = %v, want a no-playable-server error", err)
 	}
 }
 
