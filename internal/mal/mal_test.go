@@ -73,6 +73,61 @@ func TestJikanGetNoRetryOn4xx(t *testing.T) {
 	}
 }
 
+// TestSeasonArchiveCachedAndRetryable: a successful fetch is cached for the
+// process lifetime (the archive changes a few times a year — refetching it on
+// every picker re-open is what made the season overlay slow), while a failure
+// is NOT cached so the next open retries.
+func TestSeasonArchiveCachedAndRetryable(t *testing.T) {
+	hits := 0
+	failing := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if failing {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"data":[{"year":2026,"seasons":["winter","spring","summer","fall"]},{"year":2025,"seasons":["winter","spring"]}]}`)
+	}))
+	defer srv.Close()
+	defer withJikanVars(t, srv.URL)()
+
+	oldCache := seasonArchiveCache
+	seasonArchiveCache = nil
+	defer func() { seasonArchiveCache = oldCache }()
+
+	got := SeasonArchive(false)
+	// Newest-first, later seasons first within a year.
+	want := []string{"Fall 2026", "Summer 2026", "Spring 2026", "Winter 2026", "Spring 2025", "Winter 2025"}
+	if len(got) != len(want) {
+		t.Fatalf("SeasonArchive = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("SeasonArchive[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// Cached: a second call serves without re-hitting the server.
+	if again := SeasonArchive(false); hits != 1 {
+		t.Errorf("second SeasonArchive re-fetched (hits=%d, again=%v)", hits, again)
+	}
+
+	// Failures aren't pinned: nothing cached, and the next call retries.
+	seasonArchiveCache = nil
+	failing = true
+	if got := SeasonArchive(false); got != nil {
+		t.Errorf("failing SeasonArchive = %v, want nil", got)
+	}
+	if seasonArchiveCache != nil {
+		t.Error("a failed fetch was cached — the next open couldn't retry")
+	}
+	failing = false
+	if got := SeasonArchive(false); got == nil {
+		t.Error("SeasonArchive after a failure did not retry")
+	}
+}
+
 func TestAnidbAIDRetriesPastTransient504(t *testing.T) {
 	hits := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

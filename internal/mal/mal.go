@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nstratos/go-myanimelist/mal"
@@ -211,28 +212,24 @@ func ParseSeasonLabel(label string) (year int, season Season, ok bool) {
 // SeasonArchive returns MAL's season archive via Jikan (the JSON mirror of
 // myanimelist.net/anime/season/archive) as newest-first "Summer 2026"-style
 // labels. nil on any error (best-effort; caller falls back to a local list).
+// Successes are cached for the process lifetime — the archive changes a few
+// times a year, and callers refetch on failure so an outage isn't pinned.
 func SeasonArchive(debug bool) []string {
-	const u = "https://api.jikan.moe/v4/seasons"
+	seasonArchiveMu.Lock()
+	cached := seasonArchiveCache
+	seasonArchiveMu.Unlock()
+	if cached != nil {
+		return cached
+	}
+	u := jikanBaseURL + "/seasons"
 	dbg(debug, "DEBUG Jikan GET %s\n", u)
-	req, err := http.NewRequest(http.MethodGet, u, nil)
-	if err != nil {
-		return nil
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil
-	}
 	var d struct {
 		Data []struct {
 			Year    int      `json:"year"`
 			Seasons []string `json:"seasons"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+	if err := jikanGet(u, &d); err != nil {
 		return nil
 	}
 	// Data is newest-year-first; within a year reverse seasons so later seasons
@@ -243,8 +240,16 @@ func SeasonArchive(debug bool) []string {
 			out = append(out, ParseSeason(y.Year, Season(y.Seasons[i])))
 		}
 	}
+	seasonArchiveMu.Lock()
+	seasonArchiveCache = out
+	seasonArchiveMu.Unlock()
 	return out
 }
+
+var (
+	seasonArchiveMu    sync.Mutex
+	seasonArchiveCache []string
+)
 
 // jikanEpisode is one row of Jikan's /anime/{id}/episodes feed; mal_id is the
 // episode number (1-indexed, sequential).
@@ -298,6 +303,13 @@ var (
 	jikanRetryBackoff = 700 * time.Millisecond
 )
 
+// jikanClient bounds each Jikan request. They run on background goroutines, so
+// an unbounded one (http.DefaultClient) doesn't freeze the UI — but a stuck
+// connection would hang the goroutine forever: no retries, no result, and (for
+// the season archive) an overlay that never upgrades past its fallback list.
+// Keeps the shared transport's connection pooling.
+var jikanClient = &http.Client{Timeout: 20 * time.Second}
+
 // jikanGet does an unauthenticated GET against Jikan and decodes JSON into out.
 // It retries transient failures (network errors, HTTP 429, and 5xx — the Jikan→
 // MyAnimeList outages that surface as 504 "Gateway Time-out") up to 3 times so a
@@ -311,7 +323,7 @@ func jikanGet(u string, out any) error {
 		if err != nil {
 			return err // not retryable
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := jikanClient.Do(req)
 		switch {
 		case err != nil:
 			lastErr = err // network error → retry

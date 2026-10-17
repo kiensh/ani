@@ -809,6 +809,13 @@ type authNameMsg struct {
 	ok   bool
 }
 
+// seasonArchiveMsg carries the background Jikan season-archive fetch for the
+// season overlay: nil/empty labels mean the fetch failed and the fallback list
+// stays (the next open retries — mal.SeasonArchive caches successes only).
+type seasonArchiveMsg struct {
+	labels []string
+}
+
 // favStudiosMsg carries the user's MAL favorite studios (empty/nil = the fetch
 // failed or there are none): the preview marks those studios "(favorite)" and the
 // fuzzy filter matches "favorite" on them.
@@ -922,6 +929,26 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.authName, m.authNameFailed = msg.name, false
 		} else {
 			m.authNameFailed = true
+		}
+		return m, nil
+
+	case seasonArchiveMsg:
+		if len(msg.labels) == 0 {
+			return m, nil // fetch failed; the fallback list stays (retry on next open)
+		}
+		m.seasonArchive = msg.labels
+		// If the overlay is open on the fallback list, swap in the archive —
+		// keeping the cursor on the label it was on.
+		if m.overlay.kind == animeOverlaySeason {
+			sel := m.overlay.selected()
+			m.overlay.items = append([]string{mal.SeasonLater}, m.seasonArchiveItems()...)
+			m.overlay.cursor = 0
+			for i, it := range m.overlay.items {
+				if it == sel {
+					m.overlay.cursor = i
+					break
+				}
+			}
 		}
 		return m, nil
 
@@ -1387,7 +1414,7 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "e":
 		// Season filter only applies to the Season source.
 		if m.query == "" && m.source == SourceSeason {
-			m.openSeasonOverlay()
+			return m, m.openSeasonOverlay()
 		}
 		return m, nil
 	case "s":
@@ -1597,7 +1624,7 @@ func (m *animePicker) applyCommand(intent string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case intent == "season":
 		if m.query == "" && m.source == SourceSeason {
-			m.openSeasonOverlay()
+			return m, m.openSeasonOverlay()
 		}
 		return m, nil
 	case intent == "source:mylist", intent == "source:season":
@@ -1695,12 +1722,23 @@ func (m *animePicker) statusOptions() []string {
 	return statusOptionsFull
 }
 
-// openSeasonOverlay builds the Season source's season list: "Later" + the Jikan
-// archive windowed to ~12 years (real future included).
-func (m *animePicker) openSeasonOverlay() {
+// openSeasonOverlay opens the Season source's season list immediately —
+// "Later" + whatever the offline fallback has — and returns a background fetch
+// for the Jikan archive when it isn't loaded yet; seasonArchiveMsg swaps the
+// list in place. (The fetch used to run synchronously here: Jikan rate-limits
+// hard and the request had no timeout, so pressing 'e' froze the whole TUI
+// until it answered.)
+func (m *animePicker) openSeasonOverlay() tea.Cmd {
 	items := []string{mal.SeasonLater}
 	items = append(items, m.seasonArchiveItems()...)
 	m.overlay.open(animeOverlaySeason, items, m.season)
+	if m.seasonArchive != nil {
+		return nil
+	}
+	debug := m.debug
+	return func() tea.Msg {
+		return seasonArchiveMsg{labels: mal.SeasonArchive(debug)}
+	}
 }
 
 // scoreOptions is the score picker list: 1-10 then "Remove Score".
@@ -1820,12 +1858,10 @@ func (m *animePicker) scoreApplyCmd(malID, score int) tea.Cmd {
 }
 
 // seasonArchiveItems returns the browse season list (sans the leading "Later"):
-// the Jikan archive windowed to the latest ~12 years (real future included),
-// falling back to a local current+past list if the archive can't be fetched.
+// the loaded Jikan archive windowed to the latest ~12 years (real future
+// included), or — while the archive hasn't loaded (or its fetch failed) — the
+// local current+past fallback. Pure: no fetching here.
 func (m *animePicker) seasonArchiveItems() []string {
-	if m.seasonArchive == nil {
-		m.seasonArchive = mal.SeasonArchive(m.debug)
-	}
 	arch := m.seasonArchive
 	if len(arch) == 0 {
 		return recentSeasonLabels(m.currentYear, m.currentSeason, 49)

@@ -599,6 +599,60 @@ func TestSeasonSourceSwitch(t *testing.T) {
 	}
 }
 
+// TestSeasonOverlayOpensImmediatelyAndSwapsArchive: pressing 'e' must open the
+// season overlay AT ONCE from the offline fallback list — the Jikan fetch used
+// to run synchronously inside the key handler, and a rate-limited/hung Jikan
+// response (the request had no timeout) froze the whole TUI. The background
+// fetch's arrival swaps the archive in without moving the cursor off its
+// label, a failed fetch leaves the fallback in place, and once loaded no
+// further fetch is dispatched.
+func TestSeasonOverlayOpensImmediatelyAndSwapsArchive(t *testing.T) {
+	m := newAnimePickerForTest() // Season source, sized
+
+	_, cmd := m.Update(keyMsg('e'))
+	if !m.overlay.active() || m.overlay.kind != animeOverlaySeason {
+		t.Fatalf("'e' did not open the season overlay")
+	}
+	if len(m.overlay.items) < 10 || m.overlay.items[0] != mal.SeasonLater {
+		t.Fatalf("overlay opened with %d items (first %q), want the instant fallback list",
+			len(m.overlay.items), m.overlay.items[0])
+	}
+	if cmd == nil {
+		t.Fatal("no background archive fetch dispatched alongside the open")
+	}
+
+	// A fetch landing swaps the list in, keeping the cursor's label selected.
+	m.overlay.cursor = 2
+	sel := m.overlay.selected()
+	archive := append([]string{"Winter 2027", "Fall 2026"}, recentSeasonLabels(m.currentYear, m.currentSeason, 8)...)
+	m.Update(seasonArchiveMsg{labels: archive})
+	if !sliceContains(m.overlay.items, "Winter 2027") {
+		t.Fatalf("archive landing did not swap the overlay list: %v", m.overlay.items[:5])
+	}
+	if m.overlay.selected() != sel {
+		t.Errorf("cursor moved off %q during the swap (now on %q)", sel, m.overlay.selected())
+	}
+
+	// Archive loaded: a re-open serves it with no new fetch.
+	m.overlay.close()
+	_, cmd = m.Update(keyMsg('e'))
+	if cmd != nil {
+		t.Error("archive already loaded — 'e' dispatched another fetch")
+	}
+	if !sliceContains(m.overlay.items, "Winter 2027") {
+		t.Error("re-open lost the loaded archive")
+	}
+
+	// A failed fetch (nil labels) leaves the fallback list in place.
+	m2 := newAnimePickerForTest()
+	m2.Update(keyMsg('e'))
+	before := len(m2.overlay.items)
+	m2.Update(seasonArchiveMsg{})
+	if len(m2.overlay.items) != before || !m2.overlay.active() {
+		t.Errorf("failed fetch disturbed the overlay: %d items, active=%v", len(m2.overlay.items), m2.overlay.active())
+	}
+}
+
 // TestSeasonArchiveWindow verifies the browse season list windows the Jikan
 // archive to ~12 years back, keeping the real future and the current season.
 func TestSeasonArchiveWindow(t *testing.T) {
