@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,17 +22,54 @@ import (
 
 	"ani/internal/config"
 
+	"github.com/muesli/cancelreader"
 	"github.com/nstratos/go-myanimelist/mal"
 	"golang.org/x/oauth2"
 )
 
-// readAuthLine blocks for one line on stdin (used during the one-time OAuth
-// flow to wait for the user to press Enter before opening the browser).
-func readAuthLine() {
-	bufio.NewReader(os.Stdin).ReadString('\n')
+// watchEnter reports each Enter on stdin on the returned channel until stop is
+// called. The read is cancellable: the OAuth flow ends WITHOUT the user
+// pressing Enter whenever they open the URL themselves, and a plain blocking
+// read left behind on stdin would swallow the TUI's first keystroke. stop also
+// waits for the reader goroutine to exit. If stdin can't be made cancellable
+// (not a terminal/pipe the platform supports), no Enter is ever reported — the
+// flow still works through the printed URL.
+func watchEnter() (enter <-chan struct{}, stop func()) {
+	ch := make(chan struct{}, 1)
+	r, err := cancelreader.NewReader(os.Stdin)
+	if err != nil {
+		return ch, func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		br := bufio.NewReader(r)
+		for {
+			if _, err := br.ReadString('\n'); err != nil {
+				return // canceled, or stdin closed
+			}
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
+		}
+	}()
+	return ch, func() {
+		r.Cancel()
+		<-done
+		r.Close()
+	}
 }
 
 const malRedirectPort = "8484"
+
+// Test seams for malBrowserAuth (overridden in tests, like jikanBaseURL): the
+// redirect listener address, the Enter watcher, and the browser opener.
+var (
+	authListenAddr = ":" + malRedirectPort
+	authWatchEnter = watchEnter
+	authOpenURL    = OpenBrowser
+)
 
 var malOAuth2 = oauth2.Config{
 	Endpoint: oauth2.Endpoint{
@@ -331,11 +369,15 @@ func malBrowserAuth(conf *oauth2.Config) (*oauth2.Token, error) {
 	q.Set("state", state)
 	authURL := conf.Endpoint.AuthURL + "?" + q.Encode()
 
-	fmt.Fprintf(os.Stderr, "\nAuthorize ani with MyAnimeList — open this URL in any browser:\n\n  %s\n\nPress Enter to open in default browser, or open the URL manually…\n", authURL)
-	readAuthLine()
-	OpenBrowser(authURL)
-	fmt.Fprintln(os.Stderr, "Waiting for authorization…")
-
+	// Listen BEFORE printing the URL: the user may open it and finish logging
+	// in without ever pressing Enter, and the redirect must find the server
+	// already up (it used to start only after Enter, so an unprompted login
+	// redirected to a closed port). Binding synchronously also surfaces a busy
+	// port as an error here instead of a silent failure in a goroutine.
+	ln, err := net.Listen("tcp", authListenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("listen for the MAL redirect on port %s: %w", malRedirectPort, err)
+	}
 	codeCh := make(chan string, 1)
 	errCh := make(chan error, 1)
 	mux := http.NewServeMux()
@@ -343,28 +385,41 @@ func malBrowserAuth(conf *oauth2.Config) (*oauth2.Token, error) {
 		q := r.URL.Query()
 		if e := q.Get("error"); e != "" {
 			http.Error(w, "auth error: "+e, http.StatusBadRequest)
-			errCh <- fmt.Errorf("auth error: %s", e)
+			sendNonBlocking(errCh, fmt.Errorf("auth error: %s", e))
 			return
 		}
 		if q.Get("state") != state {
+			// A stray request (favicon, an old tab's redirect) — reject it but
+			// keep waiting for the real one.
 			http.Error(w, "state mismatch", http.StatusBadRequest)
-			errCh <- fmt.Errorf("oauth state mismatch")
 			return
 		}
 		fmt.Fprintln(w, "ani authorized with MyAnimeList. You can close this tab and return to the terminal.")
-		codeCh <- q.Get("code")
+		sendNonBlocking(codeCh, q.Get("code"))
 	})
-	srv := &http.Server{Addr: ":" + malRedirectPort, Handler: mux}
-	go srv.ListenAndServe()
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
 	defer srv.Shutdown(context.Background())
 
+	fmt.Fprintf(os.Stderr, "\nAuthorize ani with MyAnimeList — open this URL in any browser:\n\n  %s\n\nPress Enter to open in default browser, or open the URL manually…\n", authURL)
+	enter, stopEnter := authWatchEnter()
+	defer stopEnter()
+
 	var code string
-	select {
-	case code = <-codeCh:
-	case err := <-errCh:
-		return nil, err
-	case <-time.After(5 * time.Minute):
-		return nil, fmt.Errorf("timed out waiting for MAL authorization")
+	timeout := time.After(5 * time.Minute)
+wait:
+	for {
+		select {
+		case <-enter:
+			authOpenURL(authURL)
+			fmt.Fprintln(os.Stderr, "Waiting for authorization…")
+		case code = <-codeCh:
+			break wait
+		case err := <-errCh:
+			return nil, err
+		case <-timeout:
+			return nil, fmt.Errorf("timed out waiting for MAL authorization")
+		}
 	}
 	// Manual token exchange (full control over every param, avoids any
 	// oauth2-library quirks).
@@ -407,6 +462,16 @@ func malBrowserAuth(conf *oauth2.Config) (*oauth2.Token, error) {
 		tok.Expiry = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
 	}
 	return tok, nil
+}
+
+// sendNonBlocking delivers v when the receiver has room and drops it otherwise:
+// the redirect handler can fire more than once (a refresh, a second tab), and
+// a blocked send would hang that request after the flow has moved on.
+func sendNonBlocking[T any](ch chan<- T, v T) {
+	select {
+	case ch <- v:
+	default:
+	}
 }
 
 // Redact masks sensitive values in a url.Values for debug printing.
