@@ -66,6 +66,23 @@ func TestSortedReleases(t *testing.T) {
 	}
 }
 
+func TestSortedReleasesBySeeders(t *testing.T) {
+	if NormalizeSort("seeders") != "seeders" || SortForProvider("seeders", "hianime") != "newest" {
+		t.Fatal("saved seeder sort should apply to torrents and fall back to newest for streams")
+	}
+	rs := []*playable.Release{
+		{Title: "zero", Seeders: 0}, {Title: "first tie", Seeders: 12},
+		{Title: "low", Seeders: 2}, {Title: "second tie", Seeders: 12},
+	}
+	got := SortedReleases(rs, "seeders")
+	if got[0] != rs[1] || got[1] != rs[3] || got[2] != rs[2] || got[3] != rs[0] {
+		t.Fatalf("seeder order = %v, want [first tie second tie low zero]", titles(got))
+	}
+	if rs[0].Title != "zero" {
+		t.Fatal("sorting changed the cached release order")
+	}
+}
+
 func TestFilterByGroup(t *testing.T) {
 	rs := mkReleases()
 	erai := FilterByGroup(rs, "Erai-raws")

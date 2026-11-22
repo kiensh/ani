@@ -800,20 +800,21 @@ func cachedFetch(aid int, cache *releaseCache, health *tui.ProviderHealth) func(
 // chosen release and action ("play"/"download"); disableEpisode suppresses the
 // episode filter (latest-uploads view).
 func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*playable.Release, disableEpisode bool, aired *tui.AiredCache, health *tui.ProviderHealth, defaultEpisode int) (*playable.Release, string, error) {
+	sortName := ui.SortForProvider(opt.Sort, opt.Source)
 	if opt.DryRun {
 		ep := max(defaultEpisode, 0) // DefaultEpisodeAll → plain "all" fetch
 		if ep == 0 && !disableEpisode {
 			ep = tui.DefaultEpisode(item.WatchedEps, item.TotalEps)
 		}
 		all := fetch(ep)
-		view := ui.SortedReleases(ui.FilterByGroup(all, opt.Group), opt.Sort)
+		view := ui.SortedReleases(ui.FilterByGroup(all, opt.Group), sortName)
 		if len(view) == 0 {
 			return nil, "", fmt.Errorf("no releases for group %q", ui.GroupLabel(opt.Group))
 		}
 		fmt.Fprintf(os.Stderr, "DRY-RUN: TUI would show %d releases, auto-picking first\n", len(view))
 		return view[0], "play", nil
 	}
-	res, err := tui.RunReleasePicker(item, opt.Group, opt.Quality, opt.Sort, fetch, disableEpisode, player.CopyToClipboard,
+	res, err := tui.RunReleasePicker(item, opt.Group, opt.Quality, sortName, fetch, disableEpisode, player.CopyToClipboard,
 		latestEpisodeFn(*opt, health), aired, health, defaultEpisode, opt.Source, opt.Debug)
 	if err != nil {
 		return nil, "", err
@@ -825,8 +826,12 @@ func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*playable.Re
 	if res != nil {
 		opt.Group = res.FilterGroup
 		opt.Quality = res.FilterQuality
-		opt.Sort = res.FilterSort
-		config.SaveFilters(res.FilterGroup, res.FilterQuality, res.FilterSort, opt.Source)
+		// Just visiting HiAnime (which shows Newest instead of Most seeders)
+		// must not replace the saved torrent order with that fallback.
+		if res.FilterSort != sortName {
+			opt.Sort = res.FilterSort
+		}
+		config.SaveFilters(res.FilterGroup, res.FilterQuality, opt.Sort, opt.Source)
 	}
 	if res != nil && res.SourceSwitch != "" {
 		// Carry the selected episode so the re-opened picker restores it.

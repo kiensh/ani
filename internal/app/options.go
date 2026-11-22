@@ -10,7 +10,7 @@ type Options struct {
 	Dir     string // download directory (default cwd)
 	Group   string // release-group pre-filter (in-TUI; persisted to config)
 	Quality string // quality filter (from config)
-	Sort    string // newest | oldest | smallest | largest
+	Sort    string // newest | oldest | smallest | largest | seeders (torrent only)
 	Query   string // positional search argument (name or anidb id)
 	Source  string // provider: "torrent" (default) | "hianime"
 }

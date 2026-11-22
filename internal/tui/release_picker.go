@@ -299,7 +299,7 @@ func (m *releasePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.overlay.openEpisode(m.filter.Episode)
 		return m, nil
 	case "s":
-		m.overlay.openSort(m.filter.Sort)
+		m.overlay.openSort(m.filter.Sort, m.provider)
 		return m, nil
 	case "/":
 		m.filter.Filtering = true
@@ -450,8 +450,8 @@ func (m *releasePicker) releaseCommands() []Command {
 	if !m.episodeDisabled {
 		cmds = append(cmds, Command{Category: "Filter", Title: "Set episode…", Intent: "episode", Keywords: "filter number"})
 	}
-	for _, o := range releaseSortOptions {
-		cmds = append(cmds, Command{Category: "Sort", Title: "Sort: " + o.label, Intent: "sort:" + o.value, Keywords: "order"})
+	for _, o := range ui.ReleaseSortOptions(m.provider) {
+		cmds = append(cmds, Command{Category: "Sort", Title: "Sort: " + o.Label, Intent: "sort:" + o.Value, Keywords: "order"})
 	}
 	if cur := m.currentRelease(); cur != nil {
 		cmds = append(cmds,
@@ -532,8 +532,11 @@ func (m *releasePicker) applyCommand(intent string) (tea.Model, tea.Cmd) {
 		m.filter.Quality = strings.TrimPrefix(intent, "quality:")
 		m.applyFilter()
 	case strings.HasPrefix(intent, "sort:"):
-		m.filter.Sort = strings.TrimPrefix(intent, "sort:")
-		m.applyFilter()
+		value := strings.TrimPrefix(intent, "sort:")
+		if ui.SortForProvider(value, m.provider) == value {
+			m.filter.Sort = value
+			m.applyFilter()
+		}
 	}
 	return m, nil
 }

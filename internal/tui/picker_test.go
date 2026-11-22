@@ -1759,6 +1759,44 @@ func TestReleasePickerSortOverlay(t *testing.T) {
 	}
 }
 
+func TestReleasePickerSeederSort(t *testing.T) {
+	all := []*playable.Release{
+		{Episode: 1, Seeders: 0}, {Episode: 2, Seeders: 100}, {Episode: 1, Seeders: 17},
+	}
+	for _, provider := range []string{"torrent", "hianime"} {
+		t.Run(provider, func(t *testing.T) {
+			m := newReleasePicker(&mal.Item{TotalEps: 2}, "", "", "newest", fetchAll(all), false, nil, nil, nil, 0, false)
+			m.provider = provider
+			loadReleases(m, all)
+			m.Update(keyMsg('s'))
+			inOverlay := false
+			for i, label := range m.overlay.items {
+				if label == "Most seeders" {
+					inOverlay = true
+					m.overlay.cursor = i
+				}
+			}
+			inPalette := false
+			for _, cmd := range m.releaseCommands() {
+				if cmd.Intent == "sort:seeders" {
+					inPalette = true
+				}
+			}
+			want := provider == "torrent"
+			if inOverlay != want || inPalette != want {
+				t.Fatalf("Most seeders in overlay/palette = %v/%v, want %v in both", inOverlay, inPalette, want)
+			}
+			if !want {
+				return
+			}
+			_, cmd := m.Update(enterMsg())
+			if cmd != nil || m.filter.Sort != "seeders" || len(m.view) != 2 || m.view[0] != all[2] {
+				t.Fatal("Most seeders should reorder only the loaded releases for episode 1")
+			}
+		})
+	}
+}
+
 // TestReleasePickerEnterPlaysDDownloads verifies Enter selects play and 'd'
 // selects download (the play/download prompt is gone).
 func TestReleasePickerEnterPlaysDDownloads(t *testing.T) {

@@ -167,17 +167,16 @@ func TestFilterApplyEpisode(t *testing.T) {
 }
 
 func TestReleaseSortOptions(t *testing.T) {
-	if v, ok := releaseSortValue("Oldest"); !ok || v != "oldest" {
-		t.Errorf("releaseSortValue(Oldest) = %q,%v want oldest,true", v, ok)
+	var o filterOverlay
+	o.openSort("smallest", "torrent")
+	if got := o.selectedItem(); got != "Smallest" {
+		t.Fatalf("sort overlay opened on %q, want Smallest", got)
 	}
-	if releaseSortLabel("smallest") != "Smallest" {
-		t.Errorf("releaseSortLabel(smallest) = %q, want Smallest", releaseSortLabel("smallest"))
-	}
-	if _, ok := releaseSortValue("Nope"); ok {
-		t.Errorf("releaseSortValue(Nope) = ok, want false")
-	}
-	if len(releaseSortOptions) != 4 {
-		t.Errorf("len(releaseSortOptions) = %d, want 4", len(releaseSortOptions))
+	o.move(-1)
+	var f Filter
+	o.applySelected(&f)
+	if f.Sort != "oldest" {
+		t.Errorf("selected sort = %q, want oldest", f.Sort)
 	}
 }
 

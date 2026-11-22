@@ -14,7 +14,7 @@ import (
 type Config struct {
 	Group   string `json:"group"`   // default group pre-filter, "" = All
 	Quality string `json:"quality"` // default quality filter, "" = All
-	Sort    string `json:"sort"`    // default sort: newest|oldest|smallest|largest
+	Sort    string `json:"sort"`    // default sort: newest|oldest|smallest|largest|seeders (torrent only)
 	Player  string `json:"player"`  // streaming player, default mpv
 	Dir     string `json:"dir"`     // default download dir, "" = cwd
 	Source  string `json:"source"`  // provider: "torrent" (default) | "hianime"

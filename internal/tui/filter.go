@@ -14,43 +14,9 @@ type Filter struct {
 	Group     string // "" = all
 	Quality   string // "" = all, or "1080p", "720p", "480p", "2160p"
 	Episode   int    // 0 = all
-	Sort      string // "newest" (default), "oldest", "smallest", "largest"
+	Sort      string // release order; defaults to "newest"
 	FuzzyText string // fuzzy filter text (only meaningful when Filtering)
 	Filtering bool   // true when in fuzzy filter input mode (after pressing /)
-}
-
-// releaseSortOptions is the release-picker sort overlay list (label → value).
-var releaseSortOptions = []struct{ label, value string }{
-	{"Newest", "newest"},
-	{"Oldest", "oldest"},
-	{"Smallest", "smallest"},
-	{"Largest", "largest"},
-}
-
-func releaseSortLabels() []string {
-	out := make([]string, len(releaseSortOptions))
-	for i, o := range releaseSortOptions {
-		out[i] = o.label
-	}
-	return out
-}
-
-func releaseSortLabel(value string) string {
-	for _, o := range releaseSortOptions {
-		if o.value == value {
-			return o.label
-		}
-	}
-	return value
-}
-
-func releaseSortValue(label string) (string, bool) {
-	for _, o := range releaseSortOptions {
-		if o.label == label {
-			return o.value, true
-		}
-	}
-	return "", false
 }
 
 // SetEpisode sets the episode filter (0 means all).
@@ -259,10 +225,11 @@ const (
 // captures all key input in the release picker.
 type filterOverlay struct {
 	kind        overlayKind
-	items       []string // selectable options (group / quality overlays)
+	items       []string               // labels shown in a list overlay
+	sorts       []ui.ReleaseSortOption // values backing the sort overlay
 	cursor      int
 	text        string // episode input
-	prevEpisode int     // episode before the overlay opened; Esc restores it (cancel)
+	prevEpisode int    // episode before the overlay opened; Esc restores it (cancel)
 }
 
 // active reports whether the overlay is currently capturing input.
@@ -348,18 +315,17 @@ func (o *filterOverlay) selectedItem() string {
 	return ""
 }
 
-// openSort opens the sort overlay (Newest/Oldest/Smallest/Largest), cursor on
-// the current sort's label.
-func (o *filterOverlay) openSort(currentValue string) {
+// openSort opens the provider's sort menu with the current order highlighted.
+func (o *filterOverlay) openSort(currentValue, provider string) {
 	o.kind = overlaySort
-	o.items = releaseSortLabels()
+	o.items = nil
 	o.text = ""
 	o.cursor = 0
-	cur := releaseSortLabel(currentValue)
-	for i, it := range o.items {
-		if it == cur {
+	o.sorts = ui.ReleaseSortOptions(provider)
+	for i, opt := range o.sorts {
+		o.items = append(o.items, opt.Label)
+		if opt.Value == currentValue {
 			o.cursor = i
-			break
 		}
 	}
 }
@@ -399,10 +365,8 @@ func (o *filterOverlay) applySelected(f *Filter) {
 			f.SetEpisode(n)
 		}
 	case overlaySort:
-		if s := o.selectedItem(); s != "" {
-			if v, ok := releaseSortValue(s); ok {
-				f.Sort = v
-			}
+		if o.cursor >= 0 && o.cursor < len(o.sorts) {
+			f.Sort = o.sorts[o.cursor].Value
 		}
 	}
 }

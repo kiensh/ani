@@ -35,20 +35,41 @@ func SortedReleases(rs []*playable.Release, sortName string) []*playable.Release
 		sortBySizeAsc(cp)
 	case "largest":
 		sortBySizeDesc(cp)
+	case "seeders":
+		sort.SliceStable(cp, func(i, j int) bool { return cp[i].Seeders > cp[j].Seeders })
 	default: // "newest"
 		sortByDateDesc(cp)
 	}
 	return cp
 }
 
-// NormalizeSort maps a free-form sort name to a known value (default newest).
-func NormalizeSort(s string) string {
-	switch s {
-	case "newest", "oldest", "smallest", "largest":
-		return s
+type ReleaseSortOption struct{ Label, Value string }
+
+var sharedReleaseSorts = []ReleaseSortOption{
+	{"Newest", "newest"}, {"Oldest", "oldest"}, {"Smallest", "smallest"}, {"Largest", "largest"},
+}
+var torrentReleaseSorts = append(sharedReleaseSorts, ReleaseSortOption{"Most seeders", "seeders"})
+
+// ReleaseSortOptions lists the orders offered by both release-picker menus.
+func ReleaseSortOptions(provider string) []ReleaseSortOption {
+	if provider == "hianime" {
+		return sharedReleaseSorts
+	}
+	return torrentReleaseSorts
+}
+
+// SortForProvider falls back to newest when a saved order doesn't apply.
+func SortForProvider(value, provider string) string {
+	for _, o := range ReleaseSortOptions(provider) {
+		if o.Value == value {
+			return value
+		}
 	}
 	return "newest"
 }
+
+// NormalizeSort accepts all known config values, including torrent-only ones.
+func NormalizeSort(value string) string { return SortForProvider(value, "torrent") }
 
 // ---- group pre-filter (--group; fzf fuzzy filter is also available) ----
 
