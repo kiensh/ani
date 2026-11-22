@@ -7,7 +7,7 @@ import (
 
 // ProviderHealth tracks reachability of the app's backends for ONE app
 // session: MyAnimeList ("mal" — the anime list), AnimeTosho ("torrent") and
-// hianime.at ("hianime"). A backend is marked down when a real request to it
+// hianime.fm ("hianime"). A backend is marked down when a real request to it
 // fails at the transport/HTTP level, and any later success marks it back up —
 // so the warning follows the provider's actual state, including recovery.
 //
@@ -82,7 +82,7 @@ func (h *ProviderHealth) Warning(keys ...string) string {
 func backendName(backend string) string {
 	switch backend {
 	case "hianime":
-		return "hianime.at"
+		return "hianime.fm"
 	case "mal":
 		return "MyAnimeList"
 	default: // "torrent"

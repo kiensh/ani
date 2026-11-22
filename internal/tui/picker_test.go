@@ -1288,7 +1288,7 @@ func TestAiredCacheSharedAcrossPickers(t *testing.T) {
 	items := []mal.Item{{MalID: 1, Title: "A", AirStatus: "currently_airing", ListStatus: "watching"}}
 	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil,
 		func(*mal.Item) float64 { t.Errorf("focus fetch ran; item should be cached"); return 0 },
-		func(*mal.Item) float64 { t.Errorf("prefetch ran; item should be cached"); return 0 },
+		func([]mal.Item) map[int]float64 { t.Errorf("prefetch ran; item should be cached"); return nil },
 		false)
 	m.aired = cache // mirror RunAnimePicker's override
 	loadAnime(m, items)
@@ -1323,7 +1323,7 @@ func TestAnimePickerAiringProgress(t *testing.T) {
 		{MalID: 7, Title: "C", AirStatus: "currently_airing", ListStatus: "completed"}, // done: excluded
 	}
 	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil,
-		func(*mal.Item) float64 { return 0 }, false)
+		bulkCount(0), false)
 	loadAnime(m, items)
 	m.filter.Status = "All" // every non-excluded airing anime counts (4)
 	m.applyFilter()
@@ -1416,7 +1416,7 @@ func TestApplyLoadedClearsStaleInflight(t *testing.T) {
 	items := []mal.Item{{MalID: 1, Title: "A", AirStatus: "currently_airing", ListStatus: "watching"}}
 	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil,
 		func(*mal.Item) float64 { return 3 },
-		func(*mal.Item) float64 { return 3 },
+		bulkCount(3),
 		false)
 	m.aired.markDispatched(77) // marker whose picker died mid-fetch
 	m.applyLoaded(itemsLoadedMsg{items: items, source: m.source, season: m.season})

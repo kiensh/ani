@@ -57,13 +57,14 @@ const latestUploadsAID = -1
 // play/download → write back to MAL. Esc in the release picker returns to
 // anime selection.
 func Run(opt *Options) error {
-	aired := tui.NewAiredCache()       // session-scoped; shared across the anime + release pickers
-	relcache := newReleaseCache()      // session-scoped; fetched releases survive Esc-back / re-entry
-	health := tui.NewProviderHealth()  // session-scoped; backend reachability for the down warning
+	aired := providerAiredCaches{}    // late results always land in their originating provider's cache
+	relcache := newReleaseCache()     // session-scoped; fetched releases survive Esc-back / re-entry
+	health := tui.NewProviderHealth() // session-scoped; backend reachability for the down warning
+	snapshots := newAiredSnapshots(health)
 	animeState := tui.NewAnimeState()  // session-scoped; anime picker's options/cursor/cache survive Esc-back
 	go mal.WarmAidResolvers(opt.Debug) // overlap the one-time Fribb/AniDB map load with the first MAL fetch
 	for {
-		aid, item, err := resolve(opt, aired, health, animeState)
+		aid, item, err := resolve(opt, aired.forSource(opt.Source), health, animeState, snapshots)
 		if errors.Is(err, errRelogin) {
 			if e := mal.Login(opt.Debug); e != nil {
 				fmt.Fprintf(os.Stderr, "ani: login failed: %v\n", e)
@@ -81,7 +82,6 @@ func Run(opt *Options) error {
 			// Provider change from the anime picker's `:` palette: apply it and
 			// re-resolve (the release picker handles its own switches in place).
 			applySourceSwitch(opt, srcSwitch.source, health)
-			aired.Reset()
 			relcache.Reset()
 			continue
 		}
@@ -105,12 +105,12 @@ func Run(opt *Options) error {
 // resolve picks an anime and returns its AniDB id + item. A numeric query is a
 // direct AniDB id (no MAL); otherwise MAL when logged in, else AnimeTosho
 // (series search by name, or latest uploads when no query).
-func resolve(opt *Options, aired *tui.AiredCache, health *tui.ProviderHealth, animeState *tui.AnimeState) (int, *mal.Item, error) {
+func resolve(opt *Options, aired *tui.AiredCache, health *tui.ProviderHealth, animeState *tui.AnimeState, snapshots airedSnapshots) (int, *mal.Item, error) {
 	if n, perr := strconv.Atoi(opt.Query); perr == nil && n > 0 {
 		return resolveAnidb(n)
 	}
 	if mal.LoggedIn() {
-		return resolveMal(opt, aired, health, animeState)
+		return resolveMal(opt, aired, health, animeState, snapshots)
 	}
 	return resolveAnimetosho(opt, health, animeState)
 }
@@ -127,7 +127,7 @@ func resolveAnidb(aid int) (int, *mal.Item, error) {
 // resolveMal runs the anime picker over MAL and resolves the AniDB id from the
 // picked item. Browse opens on Season (current); Tab → My List. A non-empty
 // query means search.
-func resolveMal(opt *Options, aired *tui.AiredCache, health *tui.ProviderHealth, animeState *tui.AnimeState) (int, *mal.Item, error) {
+func resolveMal(opt *Options, aired *tui.AiredCache, health *tui.ProviderHealth, animeState *tui.AnimeState, snapshots airedSnapshots) (int, *mal.Item, error) {
 	query := opt.Query
 	source := tui.SourceSeason // default browse source
 	load := func(src tui.AnimeSource, q, season string) ([]mal.Item, error) {
@@ -150,7 +150,7 @@ func resolveMal(opt *Options, aired *tui.AiredCache, health *tui.ProviderHealth,
 		}
 		return err == nil && !opt.DryRun
 	}
-	latestEpisode := latestEpisodeFn(opt, health)
+	latestEpisode := latestEpisodeFn(*opt, health)
 	// Favorite studios for the preview's "(favorite)" marker and the filter's
 	// "favorite" match — mal.FavoriteStudios memoizes, so every call after the
 	// first is free.
@@ -174,7 +174,7 @@ func resolveMal(opt *Options, aired *tui.AiredCache, health *tui.ProviderHealth,
 		// flow is non-interactive (the release picker dry-runs separately).
 		return resolveMalDry(opt, source, query, load)
 	}
-	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, latestEpisodePrefetchFn(opt, health), aired, health, opt.Source, animeState, favStudios, relatedSrc, opt.Debug)
+	res, err := tui.RunAnimePicker(source, query, load, applyStatus, applyScore, applyWatched, latestEpisode, snapshots.prefetch(*opt), aired, health, opt.Source, animeState, favStudios, relatedSrc, opt.Debug)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -296,7 +296,7 @@ func downReason(err error) string {
 // health (cleared by any success), which is what drives the pickers' warning
 // line. A Jikan failure is NOT marked on health — Jikan mirrors episode data,
 // it isn't the MAL list backend, so the "list unavailable" warning would lie.
-func latestEpisodeFn(opt *Options, health *tui.ProviderHealth) func(*mal.Item) float64 {
+func latestEpisodeFn(opt Options, health *tui.ProviderHealth) func(*mal.Item) float64 {
 	return func(item *mal.Item) float64 {
 		if item == nil {
 			return 0
@@ -310,7 +310,7 @@ func latestEpisodeFn(opt *Options, health *tui.ProviderHealth) func(*mal.Item) f
 			health.MarkUp("hianime")
 			return n
 		}
-		if aid := resolveAidFast(item, opt); aid > 0 {
+		if aid := resolveAidFast(item, &opt); aid > 0 {
 			n, err := animetosho.LatestEpisode(aid, item.TotalEps)
 			if err != nil {
 				health.MarkDown("torrent", downReason(err)) // drives the warning line
@@ -323,43 +323,6 @@ func latestEpisodeFn(opt *Options, health *tui.ProviderHealth) func(*mal.Item) f
 		if err != nil {
 			return tui.AiredFailed // both sources failed — unknown, retry later
 		}
-		return float64(n)
-	}
-}
-
-// latestEpisodePrefetchFn is the background-prefetch variant of latestEpisodeFn:
-// fast-only (no Jikan), and it skips items whose AniDB id can't be resolved from
-// the fast sources (override → item aid → Fribb → AniDB titles). Those need the
-// manual AnimeTosho selection first, so their aired count isn't available yet —
-// and the background prefetch never calls Jikan (rate-limited, errors for some).
-// Returns 0 when skipped/unknown; a provider fetch error returns tui.AiredFailed
-// (uncached, retried later) and marks it down on health for the warning line.
-// The focus path (latestEpisodeFn) still tries the full chain (incl. Jikan) on
-// demand for items the prefetch didn't fill.
-func latestEpisodePrefetchFn(opt *Options, health *tui.ProviderHealth) func(*mal.Item) float64 {
-	return func(item *mal.Item) float64 {
-		if item == nil {
-			return 0
-		}
-		if opt.Source == "hianime" {
-			n, err := hianime.AiredCount(item.Title)
-			if err != nil {
-				health.MarkDown("hianime", downReason(err)) // drives the warning line
-				return tui.AiredFailed                      // fetch failed — the pickers won't cache it
-			}
-			health.MarkUp("hianime")
-			return n
-		}
-		aid := resolveAidFast(item, opt)
-		if aid <= 0 {
-			return 0
-		}
-		n, err := animetosho.LatestEpisode(aid, item.TotalEps)
-		if err != nil {
-			health.MarkDown("torrent", downReason(err)) // drives the warning line
-			return tui.AiredFailed                      // fetch failed — the pickers won't cache it
-		}
-		health.MarkUp("torrent")
 		return float64(n)
 	}
 }
@@ -521,7 +484,7 @@ func seriesToItems(ss []animetosho.SeriesSummary) []mal.Item {
 
 // applySourceSwitch persists the new provider and re-selects its saved
 // group/quality (mirrors main.go's startup selection) so a mid-session switch
-// picks up the right filters. The caller resets the aired cache — counts are
+// picks up the right filters. Each provider has its own aired cache — counts are
 // provider-specific (torrent's release proxy vs hianime's episode list — each
 // fails on different anime), so the old values and zeros don't apply.
 //
@@ -562,18 +525,18 @@ func applySourceSwitch(opt *Options, source string, health *tui.ProviderHealth) 
 // newest releases site-wide with the episode filter disabled; that view offers
 // no switch (hianime resolves per show). Returns errBackToAnime when the user
 // backs out.
-func releaseLoop(opt *Options, aid int, item *mal.Item, aired *tui.AiredCache, health *tui.ProviderHealth, relcache *releaseCache) error {
+func releaseLoop(opt *Options, aid int, item *mal.Item, aired providerAiredCaches, health *tui.ProviderHealth, relcache *releaseCache) error {
 	// Episode to restore after a provider switch: keeps the user's selection
 	// when the same anime re-opens on the other backend (0 = none yet).
 	reentryEpisode := 0
 	for {
-		err := runReleaseLoop(opt, aid, item, aired, health, relcache, reentryEpisode)
+		err := runReleaseLoop(opt, aid, item, aired.forSource(opt.Source), health, relcache, reentryEpisode)
 		var srcSwitch errSourceSwitch
 		if !errors.As(err, &srcSwitch) {
 			return err
 		}
 		applySourceSwitch(opt, srcSwitch.source, health)
-		aired.Reset()
+		item.AiredEps = 0 // the carried count belonged to the old provider
 		relcache.Reset()
 		reentryEpisode = srcSwitch.episode
 		if health.IsDown(opt.Source) {
@@ -851,7 +814,7 @@ func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*playable.Re
 		return view[0], "play", nil
 	}
 	res, err := tui.RunReleasePicker(item, opt.Group, opt.Quality, opt.Sort, fetch, disableEpisode, player.CopyToClipboard,
-		latestEpisodeFn(opt, health), aired, health, defaultEpisode, opt.Source, opt.Debug)
+		latestEpisodeFn(*opt, health), aired, health, defaultEpisode, opt.Source, opt.Debug)
 	if err != nil {
 		return nil, "", err
 	}
@@ -925,7 +888,7 @@ Logged-in flow:  browse My List / This Season / Search  ->  pick a release
 Not logged in:   AnimeTosho series search, or the latest uploads.
 
 Provider: set "source" in config.json to "torrent" (default: AnimeTosho torrents
-          via webtorrent) or "hianime" (hianime.at streaming via mpv — sub/dub +
+          via webtorrent) or "hianime" (hianime.fm streaming via mpv — sub/dub +
           quality selection in the release picker).
 
 Config: $XDG_CONFIG_HOME/ani/config.json  (player, dir, group/quality/sort, source)`)

@@ -62,7 +62,7 @@ type Result struct {
 // disables both). related supplies the h/l related-anime walk's ring and
 // full-item lookups (nil disables the keys). Returns the selected anime, or
 // Quit=true on cancel.
-func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) float64, latestEpisodePrefetch func(*mal.Item) float64, aired *AiredCache, health *ProviderHealth, provider string, state *AnimeState, favorites func() map[string]bool, related *RelatedSource, debug bool) (*Result, error) {
+func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatus func(int, int, StatusAction) bool, applyScore func(int, int) bool, applyWatched func(int, int) bool, latestEpisode func(*mal.Item) float64, latestEpisodePrefetch AiredPrefetch, aired *AiredCache, health *ProviderHealth, provider string, state *AnimeState, favorites func() map[string]bool, related *RelatedSource, debug bool) (*Result, error) {
 	if load == nil {
 		return &Result{Quit: true}, nil
 	}
@@ -76,9 +76,6 @@ func RunAnimePicker(source AnimeSource, query string, load AnimeLoad, applyStatu
 		// fetched details) survive picker re-entries instantly.
 		m.series, m.peekItems, m.rings = state.caches()
 	}
-	// Size the aired-prefetch semaphore for the provider now that it's known
-	// (newAnimePicker defaults to the torrent cap; hianime gets the gentler one).
-	m.prefetchSem = make(chan struct{}, m.prefetchCap())
 	if aired != nil {
 		m.aired = aired // reuse the session cache across Esc-from-releases
 	}

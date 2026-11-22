@@ -3,6 +3,8 @@ package tui
 import (
 	"sync"
 	"time"
+
+	"ani/internal/mal"
 )
 
 // inflightTTL is how long an in-flight marker blocks a re-dispatch. A fetch
@@ -11,43 +13,41 @@ import (
 // instead of staying dead for the rest of the session.
 const inflightTTL = 10 * time.Second
 
-// AiredCache memoizes the latest-aired-episode count per MAL id for ONE app
-// session. Each anime's count is computed AT MOST ONCE per session (until the app
-// exits): a computed 0 is stored too — it is not retried this session. A FAILED
-// fetch (the provider itself errored — hianime down/blocked/rate-limited) stores
-// nothing (see fail) and stays retryable on focus or the next picker entry, so a
-// transient outage can't pin the display to "?" for the rest of the session.
-//
-// It is owned by app.Run and shared across the anime picker and the release
-// picker (and across Esc-from-releases, which recreate the picker), so a count
-// computed anywhere is never re-fetched. app.Run resets the cache on a provider
-// switch (counts are provider-specific).
-//
-// CONCURRENCY: results are recorded by the fetch goroutines themselves (Record,
-// from the latestEp cmd closures), so a value lands even when the picker that
-// dispatched the fetch is torn down before it completes — the result is not
-// routed through the model's Update loop. Dispatch/inspect calls (shouldFetch,
-// markDispatched, …) run on the Update goroutine. Every method takes the mutex.
+// AiredCache is shared by both pickers for one provider. Focused lookups
+// (including a genuine zero) last the session; listing hints can be replaced
+// by a later snapshot. Neither a failed request nor a missing listing row is
+// a count. Commands record hits here even when their picker has exited.
 type AiredCache struct {
 	mu       sync.Mutex
 	values   map[int]float64   // malID → computed count (incl. 0); presence = "done this session"
+	listed   map[int]float64   // snapshot hints; never override a focused response
 	inflight map[int]time.Time // malID → dispatch time of the in-flight fetch (dedup)
 }
 
 // NewAiredCache returns an empty session-scoped aired-episode cache.
 func NewAiredCache() *AiredCache {
-	return &AiredCache{values: map[int]float64{}, inflight: map[int]time.Time{}}
+	return &AiredCache{values: map[int]float64{}, listed: map[int]float64{}, inflight: map[int]time.Time{}}
 }
 
-// Reset clears all cached counts and in-flight markers. app.Run calls it on a
-// provider switch: counts are provider-specific, so the old values and zeros
-// don't apply. Resetting in place (vs replacing the cache) keeps every holder
-// of the pointer — the release picker mid-switch — on the fresh cache.
-func (c *AiredCache) Reset() {
+// seed replaces hints for the requested rows only. A show leaving the feed
+// becomes eligible for a focused lookup again.
+func (c *AiredCache) seed(items []mal.Item, counts map[int]float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.values = map[int]float64{}
-	c.inflight = map[int]time.Time{}
+	for _, it := range items {
+		if n := counts[it.MalID]; n > 0 {
+			c.listed[it.MalID] = n
+		} else {
+			delete(c.listed, it.MalID)
+		}
+	}
+}
+
+func (c *AiredCache) hasExact(id int) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.values[id]
+	return ok
 }
 
 // clearInflight drops every in-flight marker without touching stored counts.
@@ -66,16 +66,18 @@ func (c *AiredCache) clearInflight() {
 func (c *AiredCache) get(malID int) (float64, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	n, ok := c.values[malID]
+	if n, ok := c.values[malID]; ok {
+		return n, true
+	}
+	n, ok := c.listed[malID]
 	return n, ok
 }
 
 // value returns the cached count, or 0 if none (map-like zero semantics, for
 // render / carrying into the release picker).
 func (c *AiredCache) value(malID int) float64 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.values[malID]
+	n, _ := c.get(malID)
+	return n
 }
 
 // shouldFetch is false once a count has been computed for malID OR a fetch went
@@ -84,7 +86,7 @@ func (c *AiredCache) value(malID int) float64 {
 func (c *AiredCache) shouldFetch(malID int) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, done := c.values[malID]; done {
+	if _, done := c.values[malID]; done || c.listed[malID] > 0 {
 		return false
 	}
 	t, flying := c.inflight[malID]

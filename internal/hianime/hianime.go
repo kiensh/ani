@@ -41,7 +41,10 @@ const (
 )
 
 // baseURL is the site root (a var so tests can point it at httptest).
-var baseURL = "https://hianime.at"
+// hianime.at now 301-redirects every request here: calling it directly saves
+// a round trip per request, and the pacing gate (isSiteURL) keys on this
+// host — on the old domain it was pacing the redirect, not the real traffic.
+var baseURL = "https://hianime.fm"
 
 // Pooled client: Go's DefaultTransport reuses only ~2 idle conns/host. A pooled
 // transport lets the aired-count prefetch (one search+episodes per airing anime)

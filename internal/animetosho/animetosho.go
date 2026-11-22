@@ -29,8 +29,11 @@ const (
 	CoverBase = "https://animetosho.xyz/static/img/anidb_covers/"
 )
 
-// toshoBase is the feed root (a var so tests can point it at httptest).
-var toshoBase = "https://feed.animetosho.xyz"
+// toshoBase is the feed root (a var so tests can point it at httptest). The
+// .xyz feed host now 308-redirects every request here; calling it directly
+// saves a round trip per request, and keys the pacing gate on the host that
+// actually answers.
+var toshoBase = "https://feed.animetosho.net"
 
 // toshoHTTP pools connections to the feed host. Go's http.DefaultClient reuses
 // only ~2 idle conns per host (DefaultTransport.MaxIdleConnsPerHost=2), which
@@ -441,6 +444,14 @@ func LatestEpisode(aid, total int) (int, error) {
 		dbg("LatestEpisode aid=%d total=%d fetch-err=%v\n", aid, total, err)
 		return 0, err
 	}
+	return latestFromEntries(aid, total, entries), nil
+}
+
+// latestFromEntries applies LatestEpisode's rules (≥ minGroups groups per
+// episode, the total cap, the gap-walk) to one anime's releases. Shared by the
+// per-anime fetch and the bulk feed index, so both read episodes the same way.
+// 0 = no episode qualifies yet.
+func latestFromEntries(aid, total int, entries []Entry) int {
 	groups := map[int]map[string]struct{}{} // ep -> set of release groups
 	for _, e := range entries {
 		ep := e.Series.EpisodeNumber
@@ -462,7 +473,7 @@ func LatestEpisode(aid, total int) (int, error) {
 	}
 	if len(supported) == 0 {
 		dbg("LatestEpisode aid=%d total=%d supported=[] -> 0\n", aid, total)
-		return 0, nil
+		return 0
 	}
 	slices.Sort(supported)
 
@@ -479,7 +490,7 @@ func LatestEpisode(aid, total int) (int, error) {
 		}
 		if latest > 0 {
 			dbg("LatestEpisode aid=%d total=%d supported=%v -> %d (capped)\n", aid, total, supported, latest)
-			return latest, nil
+			return latest
 		}
 		// Every supported episode exceeded the total (only cumulative numbering
 		// reached minGroups) — fall through to the gap-walk fallback below.
@@ -496,5 +507,5 @@ func LatestEpisode(aid, total int) (int, error) {
 		latest = supported[i]
 	}
 	dbg("LatestEpisode aid=%d total=%d supported=%v -> %d (gap-walk)\n", aid, total, supported, latest)
-	return latest, nil
+	return latest
 }

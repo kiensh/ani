@@ -23,8 +23,8 @@ func TestProviderHealthMarking(t *testing.T) {
 		t.Fatal("hianime not down after MarkDown")
 	}
 	w := h.Warning("hianime")
-	if !strings.Contains(w, "hianime.at unreachable (HTTP 503)") {
-		t.Fatalf("Warning = %q, want the hianime.at down line with reason", w)
+	if !strings.Contains(w, "hianime.fm unreachable (HTTP 503)") {
+		t.Fatalf("Warning = %q, want the hianime.fm down line with reason", w)
 	}
 	if !strings.Contains(w, "streams unavailable") {
 		t.Fatalf("Warning = %q, want the hianime effect text", w)
@@ -48,7 +48,7 @@ func TestProviderHealthWarningScoping(t *testing.T) {
 		t.Fatalf("torrent-only Warning = %q, want empty (hianime is not in use)", w)
 	}
 	// Switching to hianime: now it warns.
-	if w := h.Warning("hianime"); !strings.Contains(w, "hianime.at unreachable") {
+	if w := h.Warning("hianime"); !strings.Contains(w, "hianime.fm unreachable") {
 		t.Fatalf("hianime Warning = %q, want the down line", w)
 	}
 
@@ -67,7 +67,7 @@ func TestProviderHealthWarningScoping(t *testing.T) {
 	// the site is up, it's refusing our pace.
 	h2 := NewProviderHealth()
 	h2.MarkDown("hianime", "rate-limited")
-	if w := h2.Warning("hianime"); !strings.Contains(w, "hianime.at rate-limited (cooling down)") {
+	if w := h2.Warning("hianime"); !strings.Contains(w, "hianime.fm rate-limited (cooling down)") {
 		t.Fatalf("rate-limited Warning = %q, want the cooling-down line", w)
 	}
 	if strings.Contains(h2.Warning("hianime"), "unreachable") {
@@ -97,7 +97,7 @@ func TestAnimePickerDownWarning(t *testing.T) {
 	m.provider = "hianime"
 	m.health = NewProviderHealth()
 	m.health.MarkDown("hianime", "HTTP 503")
-	if out := m.View(); !strings.Contains(out, "hianime.at unreachable (HTTP 503)") {
+	if out := m.View(); !strings.Contains(out, "hianime.fm unreachable (HTTP 503)") {
 		t.Errorf("View with hianime down: warning line missing")
 	}
 
@@ -143,7 +143,7 @@ func TestReleasePickerDownWarning(t *testing.T) {
 	m.provider = "hianime"
 	m.health = NewProviderHealth()
 	m.health.MarkDown("hianime", "HTTP 503")
-	if out := m.View(); !strings.Contains(out, "hianime.at unreachable (HTTP 503)") {
+	if out := m.View(); !strings.Contains(out, "hianime.fm unreachable (HTTP 503)") {
 		t.Errorf("View with hianime down: warning line missing")
 	}
 
@@ -166,7 +166,7 @@ func TestReleasePickerDownWarning(t *testing.T) {
 		t.Errorf("View with toast over warning: toast should win the help line")
 	}
 	m.Update(clearToastMsg{})
-	if out := m.View(); !strings.Contains(out, "hianime.at unreachable") {
+	if out := m.View(); !strings.Contains(out, "hianime.fm unreachable") {
 		t.Errorf("View after toast cleared: warning should be back")
 	}
 }

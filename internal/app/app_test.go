@@ -6,10 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"ani/internal/animetosho"
+	"ani/internal/hianime"
 	"ani/internal/mal"
 	"ani/internal/tui"
 )
@@ -25,13 +28,6 @@ func toshoEpBody(ep int, groups []string) string {
 		b += fmt.Sprintf(`{"release_group":%q,"date_added":"2026-07-12T00:00:00Z","series":{"episode_number":%d}}`, g, ep)
 	}
 	return b + `]}}`
-}
-
-// TestLatestEpisodePrefetchNilItem: a nil item short-circuits to 0.
-func TestLatestEpisodePrefetchNilItem(t *testing.T) {
-	if got := latestEpisodePrefetchFn(&Options{}, tui.NewProviderHealth())(nil); got != 0 {
-		t.Errorf("prefetch(nil) = %v, want 0", got)
-	}
 }
 
 // TestCachedFetchSessionReuse: the release cache is session-scoped — a second
@@ -143,59 +139,118 @@ func TestDownReason(t *testing.T) {
 	}
 }
 
-// TestLatestEpisodePrefetchResolvable: with the aid resolvable (item.AnidbAID
-// short-circuits resolveAidFast), the prefetch returns AnimeTosho's latest episode.
-func TestLatestEpisodePrefetchResolvable(t *testing.T) {
+// The bulk response can cover just a fraction of a season. In particular
+// a miss must not trigger /series/<aid>, and must not look like a real 0.
+func TestSeasonPrefetchRequestBudget(t *testing.T) {
+	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(toshoEpBody(7, []string{"A", "B", "C"})))
+		requests.Add(1)
+		if r.URL.Path != "/json/v1/search" {
+			t.Errorf("unexpected per-show request: %v", r.URL)
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `{"data":[{"release_group":"A","series":{"anidb_aid":1,"episode_number":5}},{"release_group":"B","series":{"anidb_aid":1,"episode_number":5}},{"release_group":"C","series":{"anidb_aid":1,"episode_number":5}}]}`)
 	}))
 	defer srv.Close()
 	defer animetosho.SetToshoBaseForTest(srv.URL)()
-
-	got := latestEpisodePrefetchFn(&Options{}, tui.NewProviderHealth())(&mal.Item{AnidbAID: 12345})
-	if got != 7 {
-		t.Errorf("prefetch(resolvable aid) = %v, want 7", got)
+	items := make([]mal.Item, 90)
+	for i := range items {
+		items[i] = mal.Item{MalID: i + 10000, AnidbAID: i + 1, TotalEps: 12}
 	}
-}
-
-// TestLatestEpisodePrefetchEmptyNoFallback: when the feed is empty, the prefetch
-// returns 0 — it must NOT fall back to Jikan (unlike the full latestEpisodeFn).
-func TestLatestEpisodePrefetchEmptyNoFallback(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"data":{"releases":[]}}`))
-	}))
-	defer srv.Close()
-	defer animetosho.SetToshoBaseForTest(srv.URL)()
-
-	got := latestEpisodePrefetchFn(&Options{}, tui.NewProviderHealth())(&mal.Item{AnidbAID: 12345})
-	if got != 0 {
-		t.Errorf("prefetch(empty feed) = %v, want 0 (no Jikan fallback in prefetch)", got)
-	}
-}
-
-// TestLatestEpisodePrefetchFetchError: a fetch failure (the feed answering 429
-// during a prefetch burst) must surface as AiredFailed — unknown and retried —
-// and mark the provider down for the warning line. Returning 0 here would get
-// cached as a real "no episodes yet" and pin the display to "?" all session
-// (the bar counted it done), which is exactly what the animetosho 429s did.
-func TestLatestEpisodePrefetchFetchError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
-	}))
-	defer srv.Close()
-	defer animetosho.SetToshoBaseForTest(srv.URL)()
-
 	health := tui.NewProviderHealth()
-	got := latestEpisodePrefetchFn(&Options{}, health)(&mal.Item{AnidbAID: 12345})
-	if got != tui.AiredFailed {
-		t.Errorf("prefetch(429) = %v, want AiredFailed (retry later, don't cache)", got)
+	snapshots := newAiredSnapshots(health)
+	for _, rows := range [][]mal.Item{nil, items[:3], items, items} {
+		got := snapshots.prefetch(Options{})(rows)
+		if len(rows) > 0 && (len(got) != 1 || got[10000] != 5) {
+			t.Fatalf("counts = %v, want only the confirmed show", got)
+		}
 	}
+	health.MarkDown("torrent", "rate-limited") // a release fetch failed after the snapshot
+	snapshots.prefetch(Options{})(items)
 	if !health.IsDown("torrent") {
-		t.Error("torrent not marked down after a 429 — the warning line stays silent")
+		t.Fatal("an in-memory hit cleared a newer rate-limit warning")
 	}
-	if w := health.Warning("torrent"); !strings.Contains(w, "rate-limited") {
-		t.Errorf("Warning(torrent) = %q, want the rate-limited line", w)
+
+	if n := requests.Load(); n != 1 {
+		t.Errorf("%d provider requests for the season, want 1", n)
+	}
+}
+
+func TestSeasonPrefetchRateLimited(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	defer animetosho.SetToshoBaseForTest(srv.URL)()
+	health := tui.NewProviderHealth()
+	s := newAiredSnapshots(health)
+	prefetch := s.prefetch(Options{})
+	items := []mal.Item{{MalID: 99, AnidbAID: 1}}
+	for range 3 {
+		if got := prefetch(items); len(got) != 0 {
+			t.Fatal(got)
+		}
+	}
+	if !strings.Contains(health.Warning("torrent"), "rate-limited") || requests.Load() != 1 {
+		t.Errorf("warning=%q requests=%d", health.Warning("torrent"), requests.Load())
+	}
+}
+
+func TestUnlistedHiAnimeDoesNotFanOut(t *testing.T) {
+	var calls atomic.Int32
+	s := airedSnapshots{listing: cachedSnapshot(func() (hianime.EpisodeListing, error) { calls.Add(1); return hianime.EpisodeListing{}, nil }, time.Now)}
+	lookup := s.prefetch(Options{Source: "hianime"})
+	items := make([]mal.Item, 100)
+	for i := range items {
+		items[i] = mal.Item{MalID: i + 1, Title: fmt.Sprintf("Show %d", i)}
+	}
+	for range 2 {
+		if got := lookup(items); len(got) != 0 {
+			t.Fatal(got)
+		}
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("made %d listing requests, want 1", n)
+	}
+}
+
+func TestSnapshotSharesRefreshAndBacksOff(t *testing.T) {
+	now := time.Now()
+	n := 0
+	fail := false
+	load := cachedSnapshot(func() (int, error) {
+		n++
+		if fail {
+			return 0, errors.New("unavailable")
+		}
+		return n, nil
+	}, func() time.Time { return now })
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			v, err := load()
+			if v != 1 || err != nil {
+				t.Errorf("cold load %v, %v", v, err)
+			}
+		}()
+	}
+	wg.Wait()
+	now = now.Add(11 * time.Minute)
+	fail = true
+	for range 20 {
+		v, err := load()
+		if v != 1 || err == nil || n != 2 {
+			t.Fatalf("during outage: got %d, %v after %d requests", v, err, n)
+		}
+	}
+	now = now.Add(2 * time.Minute)
+	fail = false
+	if v, err := load(); v != 3 || err != nil {
+		t.Fatalf("after recovery: %d, %v", v, err)
 	}
 }
