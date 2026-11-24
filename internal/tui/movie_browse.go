@@ -11,8 +11,8 @@ import (
 type movieView int
 
 const (
-	movieRecent movieView = iota
-	movieWatchlist
+	movieWatchlist movieView = iota // also the return view for an explicit CLI search
+	movieRecent
 	movieResults
 )
 

@@ -19,10 +19,10 @@ func finishMovieLoad(t *testing.T, m *moviePicker, cmd tea.Cmd) {
 	m.Update(cmd())
 }
 
-func TestMovieLandingRecentlyAdded(t *testing.T) {
+func TestMovieLandingMyWatchlist(t *testing.T) {
 	for _, mode := range []string{"connected", "skip", "authorize"} {
 		t.Run(mode, func(t *testing.T) {
-			a := &movieAccountStub{connected: mode == "connected"}
+			a := &movieAccountStub{connected: mode == "connected", shelf: []trakt.Title{{Name: "Saved film", Kind: "movie", ID: 10}}}
 			f := &movieFixture{recent: []flixhq.Title{{Name: "A new arrival", Kind: "movie"}}}
 			m := newMoviePicker("", f, a, nil, nil)
 			m.width, m.height = 100, 24
@@ -41,9 +41,18 @@ func TestMovieLandingRecentlyAdded(t *testing.T) {
 					m.Update(nextMovieEvent(t, events)) // canceled prompt listener
 				}
 			}
-			finishMovieLoad(t, m, cmd)
-			if m.stage != movieTitles || m.view != movieRecent || f.recentCalls != 1 || f.lastQuery != "" || a.shelfCalls != 0 || !strings.Contains(m.View(), "Recently Added") || !strings.Contains(m.View(), "A new arrival") {
-				t.Fatalf("not a catalog-only landing: %s", m.View())
+			if mode == "skip" {
+				if cmd != nil || a.shelfCalls != 0 || !strings.Contains(m.View(), "Connect Trakt with L") {
+					t.Fatal("signed-out landing must stay on watchlist without fetching it")
+				}
+			} else {
+				finishMovieLoad(t, m, cmd)
+				if a.shelfCalls != 1 || !strings.Contains(m.View(), "Saved film") {
+					t.Fatal("missing saved watchlist")
+				}
+			}
+			if m.stage != movieTitles || m.view != movieWatchlist || f.recentCalls != 0 || f.lastQuery != "" || !strings.Contains(m.View(), "My Watchlist") {
+				t.Fatalf("not a watchlist-first landing: %s", m.View())
 			}
 			if cmd := m.Init(); cmd != nil {
 				t.Fatal("resuming picker should keep the loaded shelf")
@@ -53,8 +62,8 @@ func TestMovieLandingRecentlyAdded(t *testing.T) {
 }
 
 func TestMovieSearchBackToHome(t *testing.T) {
-	a := &movieAccountStub{connected: true}
-	f := &movieFixture{recent: []flixhq.Title{{Name: "One"}, {Name: "Two"}}, titles: []flixhq.Title{{Name: "1917", Kind: "movie"}}}
+	a := &movieAccountStub{connected: true, shelf: []trakt.Title{{Name: "One", Kind: "movie", ID: 1}, {Name: "Two", Kind: "movie", ID: 2}}}
+	f := &movieFixture{titles: []flixhq.Title{{Name: "1917", Kind: "movie"}}}
 	m := newMoviePicker("1917", f, a, nil, nil)
 	finishMovieLoad(t, m, m.Init())
 	if m.view != movieResults || a.shelfCalls != 0 || f.recentCalls != 0 || f.lastQuery != "1917" {
@@ -71,7 +80,7 @@ func TestMovieSearchBackToHome(t *testing.T) {
 			finishMovieLoad(t, m, search)
 		}
 		_, back := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-		if back != nil || m.view != movieRecent || m.stage != movieTitles || m.cursor[movieTitles] != 1 || f.recentCalls != 1 || a.shelfCalls != 0 {
+		if back != nil || m.view != movieWatchlist || m.stage != movieTitles || m.cursor[movieTitles] != 1 || f.recentCalls != 0 || a.shelfCalls != 1 {
 			t.Fatal("search must return to the same home row without a reload")
 		}
 	}
@@ -84,7 +93,6 @@ func TestMovieWatchlistMatchRequiresProviderChoice(t *testing.T) {
 	m := newMoviePicker("", f, a, nil, state)
 	m.width, m.height = 100, 24
 	finishMovieLoad(t, m, m.Init())
-	finishMovieLoad(t, m, chooseMovieCommand(t, m, "view my watchlist"))
 	m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	if m.view != movieWatchlist || a.shelfCalls != 1 || f.lastQuery != "" || f.series != "" || m.titles[1].URL != "" || !strings.Contains(m.View(), "[movie] The Gift (2000)") {
 		t.Fatalf("watchlist load must use ranked Trakt rows, not provider searches: %s", m.View())
@@ -124,6 +132,11 @@ func TestMovieBrowseFailureRecoveryAndCanceledRequest(t *testing.T) {
 	m := newMoviePicker("", f, a, nil, nil)
 	m.width, m.height = 90, 24
 	finishMovieLoad(t, m, m.Init())
+	if m.view != movieWatchlist || f.recentCalls != 0 || !strings.Contains(m.View(), "watchlist unavailable") {
+		t.Fatal("failed watchlist should not redirect to Recently Added")
+	}
+	_, recent := m.Update(movieKey("v"))
+	finishMovieLoad(t, m, recent)
 	if !strings.Contains(m.View(), "catalog unavailable") || !strings.Contains(m.View(), "r to retry") {
 		t.Fatal("missing recently added fallback and retry")
 	}
@@ -158,16 +171,15 @@ func TestMovieWatchlistNeedsAuthorizationAndClearsOnLogout(t *testing.T) {
 	f := &movieFixture{}
 	m := newMoviePicker("", f, a, nil, nil)
 	m.width, m.height = 90, 24
-	_, browse := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	finishMovieLoad(t, m, browse)
-	_, list := m.Update(movieKey("v"))
-	if list != nil || a.shelfCalls != 0 || !strings.Contains(m.View(), "Connect Trakt with L") || !strings.Contains(m.View(), "v for Recently Added") {
+	_, list := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.view != movieWatchlist || f.recentCalls != 0 || list != nil || a.shelfCalls != 0 || !strings.Contains(m.View(), "Connect Trakt with L") || !strings.Contains(m.View(), "v for Recently Added") {
 		t.Fatal("signed-out watchlist asked Trakt or trapped the user")
 	}
 	a.login = func(context.Context, func(string, string)) error { a.connected = true; return nil }
 	_, login := m.Update(movieKey("L"))
 	events := runMovieLogin(t, login)
 	_, list = m.Update(nextMovieEvent(t, events))
+	// Approval should load the watchlist directly, without switching views.
 	m.Update(nextMovieEvent(t, events))
 	finishMovieLoad(t, m, list)
 	if a.shelfCalls != 1 || !strings.Contains(m.View(), "Private title") {
@@ -182,6 +194,13 @@ func TestMovieWatchlistNeedsAuthorizationAndClearsOnLogout(t *testing.T) {
 	_, recent := m.Update(movieKey("v"))
 	finishMovieLoad(t, m, recent)
 	if m.view != movieRecent || a.shelfCalls != 1 {
-		t.Fatal("signed-out watchlist had no way back to Recently Added")
+		t.Fatal("signed-out watchlist had no way to open Recently Added")
+	}
+	_, back := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if back != nil || m.view != movieWatchlist || f.recentCalls != 1 {
+		t.Fatal("Esc from Recently Added should return to My Watchlist")
+	}
+	if _, quit := m.Update(tea.KeyMsg{Type: tea.KeyEsc}); quit == nil {
+		t.Fatal("Esc at home should exit")
 	}
 }

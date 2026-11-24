@@ -12,7 +12,7 @@ This uses device authorization, not a callback server. If you registered a diffe
 
 ## Browse movies and shows
 
-Movies & TV opens on **Recently Added**, signed in or out. It mixes FlixHQ’s Latest Movies and Latest TV Shows; it’s not a ranking by original release date. Use **/** to search, or **v** to switch to your Trakt **My Watchlist**. Selecting a watchlist item opens matching provider results so you can confirm the right title and year. A title argument (for example `ani --movies Breaking Bad`) still opens search results directly.
+Movies & TV opens on **My Watchlist**, even when the list is empty. If you skip sign-in, it stays there with a connection hint instead of fetching provider titles. Press **v** for **Recently Added** (FlixHQ’s Latest Movies and Latest TV Shows), **v** again to return, or **/** to search. Selecting a watchlist item opens matching provider results so you can confirm the right title and year. A title argument (for example `ani --movies Breaking Bad`) still opens search results directly.
 
 Highlight a provider title to see its poster, synopsis and available details; on narrow terminals the preview sits below the list. Loading a preview does not play or track anything.
 

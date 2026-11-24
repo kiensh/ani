@@ -79,7 +79,7 @@ func newMoviePicker(query string, catalog MovieCatalog, account MovieAccount, op
 		if state.initial {
 			state.stage, state.view, state.query = movieSearch, movieResults, []rune(query)
 		} else {
-			state.stage, state.view = movieTitles, movieRecent
+			state.stage, state.view = movieTitles, movieWatchlist
 		}
 		if !m.connected {
 			m.offerLogin()
@@ -305,8 +305,8 @@ func (m *moviePicker) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.stage == movieSearch || m.view == movieResults {
 					return m, m.returnHome()
 				}
-				if m.view == movieWatchlist {
-					return m, m.showView(movieRecent)
+				if m.view == movieRecent {
+					return m, m.showView(movieWatchlist)
 				}
 				return m, m.leave("")
 			default:
@@ -395,8 +395,8 @@ func (m *moviePicker) leave(source MediaSource) tea.Cmd {
 
 func (m *moviePicker) movieCommands() []Command {
 	cmds := append(mediaSourceCommands(MediaMovies),
-		Command{Category: "View", Title: "Recently Added", Intent: "view:recent", Keywords: "home browse flixhq latest movies series"},
-		Command{Category: "View", Title: "My Watchlist", Intent: "view:watchlist", Keywords: "trakt saved movies series"},
+		Command{Category: "View", Title: "My Watchlist", Intent: "view:watchlist", Keywords: "home trakt saved movies series"},
+		Command{Category: "View", Title: "Recently Added", Intent: "view:recent", Keywords: "browse flixhq latest movies series"},
 	)
 	login := "Connect Trakt"
 	if m.connected {
@@ -476,9 +476,9 @@ func (m *moviePicker) View() string {
 	if m.stage == movieTitles {
 		switch m.view {
 		case movieWatchlist:
-			help = "Enter find on FlixHQ · v Recently Added · / search · r refresh · Esc back · q exit"
+			help = "Enter find on FlixHQ · v Recently Added · / search · r refresh · q exit"
 		case movieRecent:
-			help = "Enter open/play · v My Watchlist · / search · r refresh · w watchlist · m watched · q exit"
+			help = "Enter open/play · v/Esc My Watchlist · / search · r refresh · w watchlist · m watched · q exit"
 		case movieResults:
 			help = "Enter open/play · Esc back · / search · v views · w watchlist · m watched · q exit"
 		}

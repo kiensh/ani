@@ -63,20 +63,16 @@ func resolveMovie(ctx context.Context, resolve func(context.Context, string) (*p
 func dryRunMovies(c tui.MovieCatalog, query string, play func(flixhq.Title, *flixhq.Episode) error) error {
 	ctx := context.Background()
 	query = strings.TrimSpace(query)
-	var titles []flixhq.Title
-	var err error
 	if query == "" {
-		titles, err = c.RecentlyAdded(ctx)
-	} else {
-		titles, err = c.Search(ctx, query)
+		// Don't load private watchlist rows or pick an unrelated release on a dry-run.
+		fmt.Fprintln(os.Stderr, "DRY-RUN: Movies & TV opens on My Watchlist. Pass a title to preview a player command.")
+		return nil
 	}
+	titles, err := c.Search(ctx, query)
 	if err != nil {
 		return err
 	}
 	if len(titles) == 0 {
-		if query == "" {
-			return fmt.Errorf("no titles in Recently Added")
-		}
 		return fmt.Errorf("no movies or series found for %q", query)
 	}
 	t := titles[0]

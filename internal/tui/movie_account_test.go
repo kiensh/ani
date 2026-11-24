@@ -151,8 +151,9 @@ func TestMovieDeviceLoginAndTrackingWithoutRestart(t *testing.T) {
 		return errors.New("headless")
 	}, nil)
 	t.Cleanup(m.stopLoad)
-	_, browse := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m.Update(browse())
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc}) // skip account, then opt in to the provider shelf
+	_, browse := m.Update(movieKey("v"))
+	finishMovieLoad(t, m, browse)
 	m.Update(movieKey("w"))
 	_, login := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	events := runMovieLogin(t, login)
@@ -274,8 +275,7 @@ func TestMovieDeviceFlowFailureAndUntrustedPrompt(t *testing.T) {
 		m.Update(nextMovieEvent(t, events))
 	}
 	_, browse := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	finishMovieLoad(t, m, browse)
-	if m.dialog.mode != movieAccountClosed || m.problem != "" || string(m.query) != "" || f.recentCalls != 1 {
+	if browse != nil || m.view != movieWatchlist || m.dialog.mode != movieAccountClosed || m.problem != "" || string(m.query) != "" || f.recentCalls != 0 {
 		t.Fatal("unable to continue browsing after login failed")
 	}
 }

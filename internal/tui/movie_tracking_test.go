@@ -103,7 +103,7 @@ func TestTraktWatchlistCancelFailureAndManualChoice(t *testing.T) {
 func trackingPicker(s *trackerStub, title flixhq.Title) *moviePicker {
 	a := &movieAccountStub{trackerStub: s, connected: true}
 	m := newMoviePicker("", nil, a, nil, nil)
-	m.stage, m.titles = movieTitles, []flixhq.Title{title}
+	m.stage, m.view, m.titles = movieTitles, movieRecent, []flixhq.Title{title}
 	m.width, m.height = 80, 20
 	return m
 }
@@ -111,7 +111,7 @@ func trackingPicker(s *trackerStub, title flixhq.Title) *moviePicker {
 func TestTraktIsOptionalAndNeverWritesOnPlay(t *testing.T) {
 	a := &movieAccountStub{trackerStub: &trackerStub{}}
 	m := newMoviePicker("", nil, a, nil, nil)
-	m.stage, m.titles = movieTitles, []flixhq.Title{{Name: "Test", Kind: "movie"}}
+	m.stage, m.view, m.titles = movieTitles, movieRecent, []flixhq.Title{{Name: "Test", Kind: "movie"}}
 	m.Update(tea.KeyMsg{Type: tea.KeyEsc}) // skip the welcome offer
 	for _, key := range []string{"w", "m"} {
 		_, cmd := m.Update(movieKey(key))

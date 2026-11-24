@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 
 	"ani/internal/flixhq"
@@ -63,8 +62,8 @@ func TestMovieDryRunSelectionAndPlayback(t *testing.T) {
 func TestMovieDryRunErrors(t *testing.T) {
 	c := &catalogStub{}
 	never := func(flixhq.Title, *flixhq.Episode) error { t.Fatal("unexpected playback"); return nil }
-	if err := dryRunMovies(c, "", never); err == nil || c.searched != "<recent>" || !strings.Contains(err.Error(), "Recently Added") {
-		t.Fatalf("empty Recently Added: %v", err)
+	if err := dryRunMovies(c, "", never); err != nil || c.searched != "" {
+		t.Fatalf("no-query dry-run must not select a provider title: %v, %q", err, c.searched)
 	}
 	if err := dryRunMovies(c, "absent", never); err == nil {
 		t.Fatal("expected empty search error")
