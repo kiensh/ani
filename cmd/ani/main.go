@@ -83,7 +83,7 @@ func run(args []string) error {
 		Dir:     cfg.Dir,
 		Query:   cli.Query,
 		Movies:  cli.Movies,
-		Source:  cfg.Source,
+		Source:  app.OrDefault(cfg.Source, "torrent"),
 	}
 	runErr := app.Run(o)
 

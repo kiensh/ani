@@ -17,9 +17,9 @@ const traktHelp = `Usage: ani trakt <command>
   watchlist   List movies and shows on your Trakt watchlist
   history     Show your 20 most recent movie/episode history entries
 
-In ani --movies, use w to add a watchlist item or m to mark a movie/episode
-watched. Both actions ask you to confirm the Trakt match. Playback alone never
-changes your account.
+In the TUI, Tab switches to Movies & TV. Connect Trakt there on first entry or
+press L later; these CLI commands are optional. Use w for your watchlist or m
+to mark a movie/episode watched. Playback alone never changes your account.
 
 Watchpane uses Trakt but is not endorsed or certified by Trakt.`
 

@@ -20,8 +20,8 @@ import (
 // — so the header, preview, and help never get pushed off-screen.
 //
 // Keys (when no overlay is active): j/k navigate, g group overlay, r quality
-// overlay, e episode overlay, s cycle sort, / fuzzy filter, Enter select, Esc
-// back to anime selection, q quit.
+// overlay, e episode overlay, s sort overlay, / fuzzy filter, Enter select, Esc
+// back to anime selection, Tab switch media source, q quit.
 type releasePicker struct {
 	all       []*playable.Release
 	groups    []string // distinct groups, for the group overlay
@@ -250,6 +250,8 @@ func (m *releasePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Quit is NOT set — Back distinguishes "back" from "quit".
 		m.result.Back = true
 		return m, tea.Quit
+	case "tab":
+		return m.applyCommand("source:movies")
 	case "home":
 		m.cursor = 0
 		m.fixScroll()
@@ -438,8 +440,11 @@ func (m *releasePicker) handlePaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // per-release actions (when a release is focused), the view actions, and the
 // provider switch (when scoped to one anime).
 func (m *releasePicker) releaseCommands() []Command {
-	var cmds []Command
-	cmds = append(cmds, Command{Category: "Filter", Title: "All groups", Intent: "group:", Keywords: "group audio"})
+	cmds := mediaSourceCommands(MediaAnime)
+	cmds = append(cmds,
+		Command{Category: "Filter", Title: "Filter list…", Intent: "filter", Keywords: "search fuzzy"},
+		Command{Category: "Filter", Title: "All groups", Intent: "group:", Keywords: "group audio"},
+	)
 	for _, g := range m.groups {
 		cmds = append(cmds, Command{Category: "Filter", Title: "Group: " + g, Intent: "group:" + g, Keywords: "group audio"})
 	}
@@ -463,9 +468,8 @@ func (m *releasePicker) releaseCommands() []Command {
 		}
 	}
 	cmds = append(cmds,
-		Command{Category: "View", Title: "Filter list…", Intent: "filter", Keywords: "search fuzzy"},
-		Command{Category: "View", Title: "Back to anime", Intent: "back", Keywords: "esc return"},
-		Command{Category: "View", Title: "Quit", Intent: "quit", Keywords: "exit"},
+		Command{Category: "Navigation", Title: "Back to anime", Intent: "back", Keywords: "esc return"},
+		Command{Category: "Navigation", Title: "Quit", Intent: "quit", Keywords: "exit"},
 	)
 	// Provider switch: only when scoped to one anime (the latest-uploads view
 	// has no show for hianime to resolve) and the provider was wired in.
@@ -476,7 +480,7 @@ func (m *releasePicker) releaseCommands() []Command {
 			Command{Category: "Provider", Title: providerLabel("hianime", !torrentActive), Intent: "provider:hianime", Keywords: "stream backend"},
 		)
 	}
-	return append(cmds, movieCatalogCommand)
+	return cmds
 }
 
 // applyCommand runs a palette intent, reusing the same mutators/flags as the
@@ -516,8 +520,10 @@ func (m *releasePicker) applyCommand(intent string) (tea.Model, tea.Cmd) {
 	case intent == "quit":
 		m.result.Quit = true
 		return m, tea.Quit
-	case intent == movieCatalogCommand.Intent:
-		m.result.SourceSwitch = "flixhq"
+	case intent == "source:anime":
+		return m, nil
+	case intent == "source:movies":
+		m.result.MediaSwitch = MediaMovies
 		return m, tea.Quit
 	case strings.HasPrefix(intent, "provider:"):
 		// Switch backend for THIS anime (app.Run applies it and re-opens the
@@ -656,7 +662,7 @@ func (m *releasePicker) View() string {
 	// Width() box, so the TERMINAL wraps an over-wide one — which pushes the
 	// fixed sections (and the list) off-screen. Truncate the info part, then the
 	// filter text, to always fit m.width.
-	var h1 string
+	h1 := animeSourceHeader(m.provider) + "  "
 	rels := fmt.Sprintf("%d rels", len(m.view))
 	filtering := m.filter.Filtering || m.filter.FuzzyText != ""
 	cursor := ""
@@ -664,14 +670,13 @@ func (m *releasePicker) View() string {
 		cursor = "▏"
 	}
 	if info := ui.MALItemHeader(m.item, m.aired); info != "" {
-		budget := 0
-		if m.width > 0 {
-			budget = m.width - len("  ·  ") - len(rels)
-			if filtering {
-				budget -= len("  filter: ") + len([]rune(cursor)) // room for the filter suffix
-			}
+		budget := m.width - lipgloss.Width(h1) - lipgloss.Width("  ·  ") - len(rels)
+		if filtering {
+			budget -= len("  filter: ") + len([]rune(cursor)) // room for the filter suffix
 		}
-		h1 = HeaderStyle.Render(ui.Truncate(info, budget)) + "  ·  "
+		if budget > 0 {
+			h1 += HeaderStyle.MaxWidth(budget).Render(info) + "  ·  "
+		}
 	}
 	h1 += FaintStyle.Render(rels)
 	if filtering {
@@ -682,19 +687,16 @@ func (m *releasePicker) View() string {
 		h1 += "  " + FaintStyle.Render("filter: ") + clip(m.filter.FuzzyText, budget) + cursor
 	}
 
-	// Header line 2: filter badges. (FIXED)
-	h2 := m.renderBadges()
+	line := lipgloss.NewStyle().MaxWidth(m.width)
+	h1 = line.Render(h1)
+	// Header line 2: view and filter badges. (FIXED)
+	h2 := line.Render(m.renderBadges())
 
 	// List area: scrolls WITHIN a fixed height, bordered. While a fetch is in
 	// flight show a "Loading…" state; an overlay replaces the whole list region
 	// (border included) so the fixed header/preview/help stay put.
 	var listArea string
 	switch {
-	case m.fetching:
-		listArea = ListBorderStyle.
-			Width(m.width).
-			Height(m.listHeight()).
-			Render(m.loadingText())
 	case m.palette.Active():
 		listArea = OverlayBorderStyle.
 			Width(m.width).
@@ -705,6 +707,11 @@ func (m *releasePicker) View() string {
 			Width(m.width).
 			Height(m.listHeight()).
 			Render(m.renderOverlayContent())
+	case m.fetching:
+		listArea = ListBorderStyle.
+			Width(m.width).
+			Height(m.listHeight()).
+			Render(m.loadingText())
 	default:
 		listArea = ListBorderStyle.
 			Width(m.width).
@@ -715,7 +722,14 @@ func (m *releasePicker) View() string {
 	// Preview of the focused release. (FIXED)
 	preview := m.renderPreview()
 
-	help := HelpStyle.Render(rpHelpText)
+	helpText := rpHelpText
+	switch {
+	case m.palette.Active(), m.overlay.active():
+		helpText = "Enter apply  Esc cancel"
+	case m.filter.Filtering:
+		helpText = "Type to filter  Enter keep  Esc clear"
+	}
+	help := HelpStyle.MaxWidth(m.width).Render(helpText)
 	if m.toast != "" {
 		// Transient confirmation (e.g. "✓ Magnet copied") in place of the help line.
 		help = lipgloss.NewStyle().Foreground(colorSuccess).Bold(true).Render(m.toast)
@@ -752,21 +766,28 @@ func (m *releasePicker) loadingText() string {
 // the rest are dim.
 func (m *releasePicker) renderBadges() string {
 	group := ui.GroupLabel(m.filter.Group)
+	view := "Releases"
+	if m.episodeDisabled {
+		view = "Latest uploads"
+	}
 	parts := []string{
+		conditionalBadge("view:"+view, true),
 		filterBadge("group", "g", group, m.filter.Group != ""),
 	}
 	qLabel := qualityLabel(m.filter.Quality)
 	parts = append(parts, filterBadge("resolution", "r", qLabel, m.filter.Quality != ""))
-	if m.filter.Episode > 0 {
-		parts = append(parts, filterBadge("ep", "e", fmt.Sprintf("%d", m.filter.Episode), true))
-	} else {
-		parts = append(parts, filterBadge("ep", "e", "all", false))
+	if !m.episodeDisabled {
+		ep := "all"
+		if m.filter.Episode > 0 {
+			ep = fmt.Sprintf("%d", m.filter.Episode)
+		}
+		parts = append(parts, filterBadge("ep", "e", ep, m.filter.Episode > 0))
 	}
 	parts = append(parts, filterBadge("sort", "s", ui.NormalizeSort(m.filter.Sort), false))
 	return strings.Join(parts, " ")
 }
 
-const rpHelpText = "j/k move  Enter play  / filter  : command  d download  Esc back  q quit"
+const rpHelpText = "Tab source: Movies & TV  : command  Enter play  / filter  d download  Esc back  q quit  j/k move"
 
 // renderList draws the visible slice of the filtered list with a cursor glyph.
 // Each line is rendered independently with a full style reset so the selected

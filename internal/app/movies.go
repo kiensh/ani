@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"ani/internal/browser"
 	"ani/internal/flixhq"
 	"ani/internal/playable"
 	"ani/internal/player"
@@ -16,7 +17,7 @@ import (
 
 // browseMovies never changes the anime provider or writes progress to MAL. The
 // catalog supplies a movie/episode page; only that selected page is resolved.
-func browseMovies(opt *Options, query string) error {
+func browseMovies(opt *Options, state *tui.MovieState) (tui.MediaSource, error) {
 	c := flixhq.New()
 	play := func(t flixhq.Title, ep *flixhq.Episode) error {
 		if !opt.DryRun {
@@ -36,13 +37,9 @@ func browseMovies(opt *Options, query string) error {
 		return nil
 	}
 	if opt.DryRun {
-		return dryRunMovies(c, query, play)
+		return "", dryRunMovies(c, opt.Query, play)
 	}
-	var tracker tui.MovieTracker
-	if account := trakt.New(); account.Connected() {
-		tracker = account
-	}
-	return tui.RunMoviePicker(query, c, play, tracker)
+	return tui.RunMoviePicker(opt.Query, c, play, trakt.New(), browser.Open, state)
 }
 
 func resolveMovie(ctx context.Context, resolve func(context.Context, string) (*playable.Release, error), t flixhq.Title, ep *flixhq.Episode) (*playable.Release, error) {

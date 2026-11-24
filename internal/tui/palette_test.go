@@ -55,6 +55,16 @@ func TestPaletteFilterNarrowsAndSelects(t *testing.T) {
 	}
 }
 
+func TestPaletteAcceptsFullCommandName(t *testing.T) {
+	var p Palette
+	p.Open([]Command{{Title: "Anime", Intent: "source:anime"}, {Title: "Connect Trakt", Intent: "trakt:login"}})
+	p.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Connect Trakt"), Paste: true})
+	p.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if p.Selected().Intent != "trakt:login" {
+		t.Fatalf("pasted command selected %q", p.Selected().Intent)
+	}
+}
+
 func TestPaletteEscapeCancels(t *testing.T) {
 	p := &Palette{}
 	p.Open([]Command{{Category: "X", Title: "Quit", Intent: "quit"}})

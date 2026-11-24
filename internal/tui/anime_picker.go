@@ -15,8 +15,8 @@ import (
 	"ani/internal/ui"
 )
 
-// AnimeSource selects which MAL dataset the anime picker shows (browse only).
-// Search (query != "") is separate; the source is ignored there.
+// AnimeSource selects the MAL browse view (My List or Season), not the media source.
+// Search (query != "") is separate; the browse view is ignored there.
 type AnimeSource int
 
 const (
@@ -358,7 +358,7 @@ func (k animeOverlayKind) String() string {
 
 // ---- model ----
 
-// animePicker is the MAL anime selection screen. Two browse sources (Tab):
+// animePicker is the MAL anime selection screen. Its two browse views (v) are
 // My List (the user's whole list, season filter disabled) and Season (browse one
 // season or "Later"/upcoming, where "Not in My List" works). Search is a
 // separate query-driven mode.
@@ -592,7 +592,7 @@ func (m *animePicker) restoreState(st *AnimeState) {
 		return
 	}
 	if m.query == "" && (st.Source == SourceList || st.Source == SourceSeason) && st.Source != m.source {
-		// Mirrors the Tab handler: a source change recomputes its derived
+		// Like setBrowseView, a view change recomputes its derived
 		// defaults (season, status) before the saved values are validated on top.
 		m.source = st.Source
 		m.season = m.defaultSeason()
@@ -1007,8 +1007,8 @@ func (m *animePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// leaveSeriesView drops the series view in favor of a fresh list load (Tab,
-// source switch, season change made from inside it) — clearing the state here
+// leaveSeriesView drops the series view in favor of a fresh list load (browse
+// view or season changed from inside it) — clearing the state here
 // lets applyLoaded mount the new list normally.
 func (m *animePicker) leaveSeriesView() {
 	m.seriesView = false
@@ -1038,7 +1038,7 @@ func (m *animePicker) applyLoaded(msg itemsLoadedMsg) (tea.Model, tea.Cmd) {
 	m.loadErr = msg.err
 	m.applyFilter()
 	// Session-restored cursor: applied to the first load only (later loads —
-	// Tab/season switches — keep the reset-to-0 above).
+	// browse view/season switches — keep the reset-to-0 above).
 	if m.pendingCursor >= 0 && len(m.view) > 0 {
 		m.cursor = min(m.pendingCursor, len(m.view)-1)
 		m.fixScroll()
@@ -1285,22 +1285,12 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.result.Quit = true
 		return m, tea.Batch(tea.Quit, m.quitCmd())
 	case "tab":
-		// Toggle My List ↔ Season (browse only; search is query-driven).
-		if m.query != "" {
-			return m, nil
-		}
+		return m.applyCommand("source:movies")
+	case "v":
 		if m.source == SourceList {
-			m.source = SourceSeason
-		} else {
-			m.source = SourceList
+			return m.setBrowseView(SourceSeason)
 		}
-		m.season = m.defaultSeason()
-		m.filter.Status = m.defaultStatus()
-		m.leaveSeriesView()
-		m.loading = true
-		m.cursor = 0
-		m.topItem = 0
-		return m, m.loadCmd(m.source, m.query, m.season)
+		return m.setBrowseView(SourceList)
 	case "up", "k":
 		if len(m.view) > 0 {
 			if m.cursor > 0 {
@@ -1407,6 +1397,26 @@ func (m *animePicker) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// setBrowseView switches MAL datasets without changing the media source or playback provider.
+func (m *animePicker) setBrowseView(view AnimeSource) (tea.Model, tea.Cmd) {
+	if m.query != "" {
+		return m, nil
+	}
+	if m.source == view {
+		if m.seriesView {
+			return m.closeSeriesView() // return to the underlying view with its filters
+		}
+		return m, nil
+	}
+	m.source = view
+	m.season = m.defaultSeason()
+	m.filter.Status = m.defaultStatus()
+	m.leaveSeriesView()
+	m.loading = true
+	m.cursor, m.topItem = 0, 0
+	return m, m.loadCmd(m.source, m.query, m.season)
+}
+
 // openAccountModal opens the read-only account/status overlay: an offline
 // snapshot now plus a best-effort username fetch. Shared by the `a` key and the
 // palette's "Show account" command.
@@ -1442,7 +1452,19 @@ func (m *animePicker) handlePaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // item when a writer is wired), account, and quit. Rebuilt each open so it
 // reflects the current item's status, the current source, and the provider.
 func (m *animePicker) animeCommands() []Command {
-	var cmds []Command
+	cmds := mediaSourceCommands(MediaAnime)
+	if m.query == "" { // MAL search is query-driven, not a browse view.
+		for _, opt := range []struct {
+			view   AnimeSource
+			intent string
+		}{{SourceList, "view:mylist"}, {SourceSeason, "view:season"}} {
+			label := opt.view.String()
+			if !m.seriesView && opt.view == m.source {
+				label = "● " + label
+			}
+			cmds = append(cmds, Command{Category: "View", Title: label, Intent: opt.intent, Keywords: "browse"})
+		}
+	}
 
 	for _, o := range sortOptions {
 		cmds = append(cmds, Command{Category: "Sort", Title: "Sort by " + o.label, Intent: "sort:" + o.value, Keywords: "order"})
@@ -1453,22 +1475,14 @@ func (m *animePicker) animeCommands() []Command {
 		cmds = append(cmds, Command{Category: "Filter", Title: "Status: " + s, Intent: "statusfilter:" + s, Keywords: "list"})
 	}
 
-	if m.query == "" { // search is query-driven; source/season only apply to browse
-		if m.source == SourceList {
-			cmds = append(cmds, Command{Category: "Source", Title: "Switch to Season", Intent: "source:season", Keywords: "browse current"})
-		} else {
-			cmds = append(cmds, Command{Category: "Source", Title: "Switch to My List", Intent: "source:mylist", Keywords: "browse"})
-		}
-		if m.source == SourceSeason {
-			cmds = append(cmds, Command{Category: "Source", Title: "Change season…", Intent: "season", Keywords: "year cour"})
-		}
+	if m.query == "" && m.source == SourceSeason {
+		cmds = append(cmds, Command{Category: "Filter", Title: "Change season…", Intent: "season", Keywords: "year cour"})
 	}
 
 	torrentActive := m.provider != "hianime"
 	cmds = append(cmds,
 		Command{Category: "Provider", Title: providerLabel("torrent", torrentActive), Intent: "provider:torrent", Keywords: "animetosho backend"},
 		Command{Category: "Provider", Title: providerLabel("hianime", !torrentActive), Intent: "provider:hianime", Keywords: "stream backend"},
-		movieCatalogCommand,
 	)
 
 	// Per-anime actions target the focused row (same as the Space menu); only
@@ -1511,7 +1525,7 @@ func (m *animePicker) animeCommands() []Command {
 		Command{Category: "Account", Title: "Show account", Intent: "account", Keywords: "login status"},
 		Command{Category: "Account", Title: "Re-login (MAL)", Intent: "relogin", Keywords: "auth oauth"},
 		Command{Category: "Account", Title: "Log out", Intent: "logout", Keywords: "auth sign out"},
-		Command{Category: "View", Title: "Quit", Intent: "quit", Keywords: "exit"},
+		Command{Category: "Navigation", Title: "Quit", Intent: "quit", Keywords: "exit"},
 	)
 	return cmds
 }
@@ -1536,13 +1550,13 @@ func providerShortName(name string) string {
 	return "AnimeTosho"
 }
 
-// providerHeader renders the active-provider marker for the title headers:
-// "● hianime.fm" in cyan. Empty provider renders nothing.
-func providerHeader(provider string) string {
-	if provider == "" {
-		return ""
+// animeSourceHeader identifies the media source separately from its playback provider.
+func animeSourceHeader(provider string) string {
+	header := HeaderStyle.Render("Source: Anime")
+	if provider != "" {
+		header += ProviderStyle.Render("  ·  Provider: " + providerShortName(provider))
 	}
-	return ProviderStyle.Render("● " + providerShortName(provider))
+	return header
 }
 
 // applyCommand runs a palette intent, reusing the same mutators/callbacks and
@@ -1571,22 +1585,10 @@ func (m *animePicker) applyCommand(intent string) (tea.Model, tea.Cmd) {
 			return m, m.openSeasonOverlay()
 		}
 		return m, nil
-	case intent == "source:mylist", intent == "source:season":
-		if m.query != "" {
-			return m, nil
-		}
-		if intent == "source:mylist" {
-			m.source = SourceList
-		} else {
-			m.source = SourceSeason
-		}
-		m.season = m.defaultSeason()
-		m.filter.Status = m.defaultStatus()
-		m.leaveSeriesView()
-		m.loading = true
-		m.cursor = 0
-		m.topItem = 0
-		return m, m.loadCmd(m.source, m.query, m.season)
+	case intent == "view:mylist":
+		return m.setBrowseView(SourceList)
+	case intent == "view:season":
+		return m.setBrowseView(SourceSeason)
 	case intent == "series":
 		return m.openSeriesView()
 	case strings.HasPrefix(intent, "sort:"):
@@ -1644,8 +1646,10 @@ func (m *animePicker) applyCommand(intent string) (tea.Model, tea.Cmd) {
 		m.overlay.text = fmt.Sprintf("Remove %q from your list?", it.Title)
 		m.overlay.pendingAction = StatusAction{Remove: true}
 		return m, nil
-	case intent == movieCatalogCommand.Intent:
-		m.result.SourceSwitch = "flixhq"
+	case intent == "source:anime":
+		return m, nil
+	case intent == "source:movies":
+		m.result.MediaSwitch = MediaMovies
 		return m, tea.Batch(tea.Quit, m.quitCmd())
 	case strings.HasPrefix(intent, "provider:"):
 		src := strings.TrimPrefix(intent, "provider:")
@@ -2447,8 +2451,11 @@ func renderCover(malID int, path string, cols, rows int) tea.Msg {
 	return coverTextMsg{text: text, key: malID}
 }
 
-// sourceLabel returns the badge/header label for the active source.
-func (m *animePicker) sourceLabel() string {
+// viewLabel identifies the MAL view within the Anime source.
+func (m *animePicker) viewLabel() string {
+	if m.seriesView {
+		return "Series"
+	}
 	if m.query != "" {
 		return "Search"
 	}
@@ -2483,15 +2490,6 @@ func (m *animePicker) View() string {
 	if m.width == 0 {
 		return "Loading anime…"
 	}
-	if m.loading {
-		label := m.season
-		if m.query != "" {
-			label = fmt.Sprintf("search %q", m.query)
-		} else if m.source == SourceList {
-			label = "my list"
-		}
-		return FaintStyle.Render(fmt.Sprintf("Loading %s…", label))
-	}
 	switch m.overlay.kind {
 	case animeOverlayConfirm:
 		return m.renderConfirmModal()
@@ -2503,10 +2501,6 @@ func (m *animePicker) View() string {
 	var leftContent string
 	if m.palette.Active() {
 		leftContent = m.palette.View(m.listWidth-2, m.pageSize())
-	} else if m.seriesBuilding {
-		// First entry into a series view: the franchise walk (rings + details)
-		// is in flight — the list area says so, the rest of the layout stays.
-		leftContent = FaintStyle.Render(fmt.Sprintf("Loading series: %s…", m.seriesBuildingTitle))
 	} else if m.overlay.active() {
 		if m.overlay.kind == animeOverlayEpisode {
 			// Number-input overlay (text prompt, not a list).
@@ -2516,6 +2510,10 @@ func (m *animePicker) View() string {
 		} else {
 			leftContent = renderListOverlayContent(m.overlay.kind.String(), m.overlay.items, m.overlay.cursor, m.pageSize())
 		}
+	} else if m.seriesBuilding {
+		leftContent = FaintStyle.Render(fmt.Sprintf("Loading series: %s…", m.seriesBuildingTitle))
+	} else if m.loading {
+		leftContent = FaintStyle.Render("Loading anime…")
 	} else {
 		label := "Anime"
 		if m.seriesView {
@@ -2547,16 +2545,16 @@ func (m *animePicker) View() string {
 	if previewWidth < 25 {
 		previewWidth = 25
 	}
-	rightContent := m.renderMetadata()
+	rightContent := ""
+	if !m.loading { // do not preview a row from the previous view during a reload
+		rightContent = m.renderMetadata()
+	}
 	rightPane := PreviewBorderStyle.
 		Width(previewWidth).
 		Height(m.paneHeight - 2).
 		Render(rightContent)
 
-	header := m.headerText()
-	if p := providerHeader(m.provider); p != "" {
-		header += "   " + p
-	}
+	header := lipgloss.NewStyle().MaxWidth(m.width).Render(animeSourceHeader(m.provider) + "  " + m.headerText())
 	// The header's right side is the roomiest spot for the prefetch progress —
 	// avail reserves one gap cell; airingProgress already fits within it, so the
 	// right-aligning gap below is always ≥ 1.
@@ -2564,13 +2562,18 @@ func (m *animePicker) View() string {
 		header = header + strings.Repeat(" ", m.width-lipgloss.Width(header)-lipgloss.Width(p)) + p
 	}
 	badges := m.renderBadges()
-	helpText := "j/k move  Tab source  Enter select  / filter  : command  q quit"
-	if m.width > 0 {
-		// Joined outside any Width() box — the terminal would wrap an over-wide
-		// line and push the header off-screen (same class as the pane-wrap bug).
-		helpText = clip(helpText, m.width)
+	helpText := "Tab source: Movies & TV"
+	if m.query == "" {
+		helpText += "  v view"
 	}
-	help := HelpStyle.Render(helpText)
+	helpText += "  : command  / filter  Enter select  q quit  j/k move"
+	switch {
+	case m.palette.Active(), m.overlay.active():
+		helpText = "Enter apply  Esc back"
+	case m.filter.Filtering:
+		helpText = "Type to filter  Enter keep  Esc clear"
+	}
+	help := HelpStyle.MaxWidth(m.width).Render(helpText)
 	if w := m.healthWarning(); w != "" {
 		// A down backend replaces the help line (same slot the release picker's
 		// toast uses) — always visible, no layout shift.
@@ -2647,12 +2650,11 @@ func (m *animePicker) renderAuthStatusModal() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
 }
 
-// renderBadges renders the source/status/season/sort badge line, each label
-// (except source, which Tab cycles) underlining its shortcut key. The season
-// badge only shows for the Season source (it's forced "All" and hidden elsewhere).
+// renderBadges labels the current anime view and its filters. The season
+// badge only shows in Season (it's forced "All" and hidden elsewhere).
 func (m *animePicker) renderBadges() string {
 	parts := []string{
-		conditionalBadge("source:"+m.sourceLabel(), true),
+		conditionalBadge("view:"+m.viewLabel(), true),
 		filterBadge("status", "t", m.filter.Status, m.filter.Status != "All"),
 	}
 	if m.query == "" && m.source == SourceSeason {

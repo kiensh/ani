@@ -51,8 +51,8 @@ type traktWriteMsg struct {
 }
 
 func (m *moviePicker) openTrackForm(watchlist bool) tea.Cmd {
-	if m.tracker == nil {
-		m.problem = "Trakt is not connected. Run ani trakt login, then reopen Movies & TV."
+	if !m.connected {
+		m.offerLogin()
 		return nil
 	}
 	t := m.titles[m.cursor[movieTitles]]
@@ -68,7 +68,7 @@ func (m *moviePicker) openTrackForm(watchlist bool) tea.Cmd {
 	m.track = f
 	ctx, id := m.beginRequest()
 	return func() tea.Msg {
-		titles, err := m.tracker.Search(ctx, t.Kind, t.Name)
+		titles, err := m.account.Search(ctx, t.Kind, t.Name)
 		return traktMatchesMsg{id, titles, err}
 	}
 }
@@ -136,9 +136,9 @@ func (m *moviePicker) trackKey(key string) tea.Cmd {
 		return func() tea.Msg {
 			var err error
 			if f.watchlist {
-				err = m.tracker.AddWatchlist(ctx, t)
+				err = m.account.AddWatchlist(ctx, t)
 			} else {
-				err = m.tracker.MarkWatched(ctx, t, f.season, f.episode)
+				err = m.account.MarkWatched(ctx, t, f.season, f.episode)
 			}
 			return traktWriteMsg{id, t.Name, err}
 		}
@@ -148,7 +148,7 @@ func (m *moviePicker) trackKey(key string) tea.Cmd {
 
 func (m *moviePicker) savedTrack(msg traktWriteMsg) {
 	f := m.track
-	if f == nil || !f.saving || msg.id != m.request {
+	if f == nil || !f.saving || m.cancel == nil || msg.id != m.request {
 		return
 	}
 	m.stopLoad()

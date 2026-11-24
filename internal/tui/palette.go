@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -100,8 +101,17 @@ func (p *Palette) HandleKey(msg tea.KeyMsg) (done, selected bool) {
 		p.input = []rune(dropLastWord(string(p.input)))
 		p.refilter()
 	default:
-		if isPrintable(msg) {
-			p.input = append(p.input, []rune(msg.String())...)
+		if !msg.Alt && (msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace) {
+			if msg.Type == tea.KeySpace {
+				p.input = append(p.input, ' ')
+			} else {
+				// Fast typing and bracketed paste can deliver a whole command in one message.
+				for _, r := range msg.Runes {
+					if unicode.IsPrint(r) {
+						p.input = append(p.input, r)
+					}
+				}
+			}
 			p.refilter()
 		}
 	}

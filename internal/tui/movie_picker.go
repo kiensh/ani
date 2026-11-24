@@ -11,8 +11,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-var movieCatalogCommand = Command{Category: "Catalog", Title: "Search movies & TV (FlixHQ)", Intent: "catalog:flixhq", Keywords: "film series streaming vidmoly provider"}
-
 // MovieCatalog is deliberately separate from MAL: even a numeric film title is a search.
 type MovieCatalog interface {
 	Search(context.Context, string) ([]flixhq.Title, error)
@@ -35,37 +33,63 @@ type movieLoaded struct {
 	err      error
 }
 
-type moviePicker struct {
-	catalog  MovieCatalog
-	stage    movieStage
-	query    []rune
-	titles   []flixhq.Title
-	seasons  []int
-	bySeason map[int][]flixhq.Episode
-	cursor   [4]int // retain the selected row when backing up one level
+// MovieState retains navigation (not account credentials, modals, or pending
+// commands) when the user switches sources. Its zero value starts a new session.
+type MovieState struct {
+	visited, initial bool
+	stage            movieStage
+	query            []rune
+	titles           []flixhq.Title
+	seasons          []int
+	bySeason         map[int][]flixhq.Episode
+	cursor           [4]int
+}
 
-	initial       bool
+type moviePicker struct {
+	*MovieState
+	catalog       MovieCatalog
+	account       MovieAccount
+	openURL       func(string) error
+	connected     bool
+	dialog        movieAccountDialog
+	track         *movieTrackForm
+	palette       Palette
+	editing       bool
 	request       int
 	cancel        context.CancelFunc
 	problem       string
 	notice        string
-	tracker       MovieTracker // nil unless this device is connected
-	track         *movieTrackForm
+	source        MediaSource
 	play          bool
 	width, height int
 }
 
+func newMoviePicker(query string, catalog MovieCatalog, account MovieAccount, openURL func(string) error, state *MovieState) *moviePicker {
+	if state == nil {
+		state = &MovieState{}
+	}
+	m := &moviePicker{MovieState: state, catalog: catalog, account: account, openURL: openURL}
+	m.refreshAccount()
+	if !state.visited {
+		state.visited, state.initial, state.query = true, strings.TrimSpace(query) != "", []rune(query)
+		if !m.connected {
+			m.offerLogin()
+		}
+	}
+	return m
+}
+
 // RunMoviePicker releases the terminal before resolving and playing a selection.
 // Reuse the same list and cursor afterwards, including on a dead embed.
-func RunMoviePicker(query string, catalog MovieCatalog, play func(flixhq.Title, *flixhq.Episode) error, tracker MovieTracker) error {
-	m := &moviePicker{catalog: catalog, query: []rune(query), initial: query != "", tracker: tracker}
+func RunMoviePicker(query string, catalog MovieCatalog, play func(flixhq.Title, *flixhq.Episode) error, account MovieAccount, openURL func(string) error, state *MovieState) (MediaSource, error) {
+	m := newMoviePicker(query, catalog, account, openURL, state)
 	defer m.stopLoad()
 	for {
 		if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
-			return err
+			return "", err
 		}
 		if !m.play {
-			return nil
+			return m.source, nil
 		}
 		m.play = false
 		var episode *flixhq.Episode
@@ -74,14 +98,16 @@ func RunMoviePicker(query string, catalog MovieCatalog, play func(flixhq.Title, 
 		}
 		if err := play(m.titles[m.cursor[movieTitles]], episode); err != nil {
 			m.problem = err.Error()
-		} else if m.tracker != nil {
+		} else if m.connected {
 			m.notice = "Finished watching? Press m to mark this selection watched on Trakt."
 		}
 	}
 }
 
 func (m *moviePicker) Init() tea.Cmd {
-	if m.initial {
+	// A query passed with --movies still runs, but only after the user has
+	// acted on the optional first-entry prompt. Returning from mpv never reruns it.
+	if m.initial && m.dialog.mode == movieAccountClosed {
 		m.initial = false
 		return m.load()
 	}
@@ -135,6 +161,7 @@ func (m *moviePicker) loaded(msg movieLoaded) {
 			return
 		}
 		m.titles, m.cursor[movieTitles], m.stage = msg.titles, 0, movieTitles
+		m.editing = false
 		return
 	}
 	if len(msg.episodes) == 0 {
@@ -182,14 +209,41 @@ func (m *moviePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loadedTrackMatches(msg)
 	case traktWriteMsg:
 		m.savedTrack(msg)
+	case movieDevicePromptMsg:
+		return m, m.showDevicePrompt(msg)
+	case movieBrowserMsg:
+		if m.awaitingLogin(msg.id) {
+			m.dialog.browserFailed = msg.err != nil
+		}
+	case movieAccountDoneMsg:
+		return m, m.accountDone(msg)
 	case tea.KeyMsg:
 		key := msg.String()
-		if m.track != nil && key != "ctrl+c" {
+		if key == "tab" {
+			return m, m.leave(MediaAnime)
+		}
+		if m.palette.Active() {
+			if _, selected := m.palette.HandleKey(msg); selected {
+				return m, m.applyMovieCommand(m.palette.Selected().Intent)
+			}
+			return m, nil
+		}
+		if key == "ctrl+c" {
+			return m, m.leave("")
+		}
+		typing := m.stage == movieSearch && m.editing && m.dialog.mode == movieAccountClosed && m.cancel == nil
+		if key == "ctrl+p" || (key == ":" && !typing) {
+			m.palette.Open(m.movieCommands())
+			return m, nil
+		}
+		if m.dialog.mode != movieAccountClosed {
+			return m, m.accountKey(key)
+		}
+		if m.track != nil {
 			return m, m.trackKey(key)
 		}
-		if key == "ctrl+c" || (key == "q" && m.stage != movieSearch) {
-			m.stopLoad()
-			return m, tea.Quit
+		if key == "q" && m.stage != movieSearch {
+			return m, m.leave("")
 		}
 		if m.cancel != nil {
 			if key == "esc" {
@@ -199,13 +253,23 @@ func (m *moviePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.problem, m.notice = "", ""
 		if key == "esc" {
-			if m.stage == movieSearch {
-				return m, tea.Quit
+			if typing {
+				m.editing = false
+			} else if m.stage == movieSearch {
+				return m, m.leave("")
+			} else {
+				m.stage--
 			}
-			m.stage--
 			return m, nil
 		}
+		if key == "L" && !typing {
+			return m, m.startLogin()
+		}
 		if m.stage == movieSearch {
+			if key == "/" && !m.editing {
+				m.editing = true
+				return m, nil
+			}
 			switch key {
 			case "enter":
 				if strings.TrimSpace(string(m.query)) != "" {
@@ -219,10 +283,12 @@ func (m *moviePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			default:
 				if msg.Type == tea.KeySpace {
+					m.editing = true
 					m.query = append(m.query, ' ')
 				} else if msg.Type == tea.KeyRunes && !msg.Alt {
 					for _, r := range msg.Runes {
 						if unicode.IsPrint(r) {
+							m.editing = true
 							m.query = append(m.query, r)
 						}
 					}
@@ -244,7 +310,7 @@ func (m *moviePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "m", "w":
 			return m, m.openTrackForm(key == "w")
 		case "/":
-			m.stage = movieSearch
+			m.stage, m.editing = movieSearch, true
 		case "enter":
 			switch m.stage {
 			case movieTitles:
@@ -262,13 +328,65 @@ func (m *moviePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *moviePicker) View() string {
-	if m.track != nil {
-		return m.trackView()
+func (m *moviePicker) leave(source MediaSource) tea.Cmd {
+	m.stopLoad()
+	m.source, m.play = source, false
+	return tea.Quit
+}
+
+func (m *moviePicker) movieCommands() []Command {
+	cmds := mediaSourceCommands(MediaMovies)
+	login := "Connect Trakt"
+	if m.connected {
+		login = "Reauthorize Trakt"
 	}
-	lines := []string{HeaderStyle.Render("Movies & TV") + ProviderStyle.Render("  ·  FlixHQ")}
+	cmds = append(cmds, Command{Category: "Account", Title: login, Intent: "trakt:login", Keywords: "connect sign in login device code"})
+	if m.connected {
+		cmds = append(cmds, Command{Category: "Account", Title: "Disconnect Trakt", Intent: "trakt:logout", Keywords: "logout sign out forget account"})
+	}
+	return cmds
+}
+
+func (m *moviePicker) applyMovieCommand(intent string) tea.Cmd {
+	switch intent {
+	case "source:anime":
+		return m.leave(MediaAnime)
+	case "trakt:login":
+		return m.startLogin()
+	case "trakt:logout":
+		if m.connected && m.dialog.mode != movieAccountDisconnecting && !(m.track != nil && m.track.saving) {
+			m.stopLoad()
+			m.track, m.problem, m.notice = nil, "", ""
+			m.dialog = movieAccountDialog{mode: movieAccountConfirmLogout}
+		}
+	}
+	return nil // selecting the current source leaves the picker in place
+}
+
+func (m *moviePicker) View() string {
+	status := "signed out"
+	if m.connected {
+		status = "connected"
+	}
+	header := HeaderStyle.Render("Source: Movies & TV") + ProviderStyle.Render("  ·  Provider: FlixHQ") + FaintStyle.Render("  ·  Trakt: "+status)
+	if m.palette.Active() {
+		return header + "\n" + OverlayBorderStyle.Render(m.palette.View(m.width-2, m.height-5)) + "\n" + HelpStyle.Render("Type to filter · ↑/↓ select · Enter run · Esc close")
+	}
+	if m.dialog.mode != movieAccountClosed {
+		return header + "\n" + m.accountView()
+	}
+	if m.track != nil {
+		return header + "\n" + m.trackView()
+	}
+	lines := []string{header}
 	if m.stage == movieSearch {
-		lines = append(lines, "Search: "+string(m.query)+"▏")
+		field := "Search: " + string(m.query)
+		if m.editing {
+			field += "▏"
+		} else if len(m.query) == 0 {
+			field += FaintStyle.Render("/ to enter a title")
+		}
+		lines = append(lines, field)
 	} else {
 		heading := "Results for " + quote(string(m.query))
 		if m.stage >= movieSeasons {
@@ -314,8 +432,16 @@ func (m *moviePicker) View() string {
 		lines = append(lines, FaintStyle.Render(m.notice))
 	}
 	help := "↑/↓ select · Enter open/play · w watchlist · m watched · / search · Esc back · q exit"
-	if m.stage == movieSearch {
-		help = "Type a title · Enter search · Ctrl+U clear · Esc exit"
+	shortcuts := ": commands · L connect Trakt · Tab switch to Anime"
+	if m.connected {
+		shortcuts = ": commands · L reauthorize Trakt · Tab switch to Anime"
 	}
-	return strings.Join(append(lines, HelpStyle.Render(help)), "\n")
+	if m.stage == movieSearch {
+		help = "/ type a title · Enter search · Ctrl+U clear · Esc quit"
+		if m.editing {
+			help = "Type a title · Enter search · Ctrl+U clear · Esc finish editing"
+			shortcuts = "Ctrl+P commands · Tab switch to Anime"
+		}
+	}
+	return strings.Join(append(lines, HelpStyle.Render(help), HelpStyle.Render(shortcuts)), "\n")
 }

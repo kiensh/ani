@@ -541,26 +541,159 @@ func TestAnimePickerSeasonDisabledInMyList(t *testing.T) {
 	}
 }
 
-// TestAnimePickerTabToggle verifies Tab flips Season ↔ My List and reloads.
-func TestAnimePickerTabToggle(t *testing.T) {
-	items := []mal.Item{{MalID: 1, Title: "A"}}
-	m := newAnimePicker(SourceSeason, "", animeLoadAll(items), nil, nil, nil, nil, nil, false)
-	loadAnime(m, items)
-	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+func TestAnimeBrowseViews(t *testing.T) {
+	m := newAnimePickerForTest()
+	m.provider = "hianime"
+	m.filter.Sort, m.filter.FuzzyText = "score", "alpha"
+	loadAnime(m, nil)
 
-	m.Update(tabMsg())
-	if m.source != SourceList {
-		t.Errorf("after Tab, source = %v, want SourceList", m.source)
+	_, cmd := m.Update(keyMsg('v'))
+	if cmd == nil || !m.loading {
+		t.Fatal("v should reload the other anime view")
 	}
-	if m.season != mal.SeasonAll {
-		t.Errorf("after Tab to My List, season = %q, want All", m.season)
+	loaded := cmd().(itemsLoadedMsg)
+	if loaded.source != SourceList || loaded.season != mal.SeasonAll || m.filter.Status != "All" {
+		t.Fatalf("v: loaded %+v, status %q; want My List across all seasons", loaded, m.filter.Status)
 	}
-	if !m.loading {
-		t.Errorf("after Tab, loading = false, want true (reload)")
+	m.Update(loaded)
+	t.Cleanup(m.cover.Cleanup)
+	if got := m.View(); !strings.Contains(got, "view:My List") || !strings.Contains(got, "v view") {
+		t.Fatalf("My List view or shortcut not labeled:\n%s", got)
 	}
-	m.Update(tabMsg())
-	if m.source != SourceSeason {
-		t.Errorf("after second Tab, source = %v, want SourceSeason", m.source)
+	m.Update(keyMsg(':'))
+	for _, r := range "view season" {
+		m.Update(keyMsg(r))
+	}
+	_, cmd = m.Update(enterMsg())
+	if cmd == nil {
+		t.Fatal(": View → Season should reload the season view")
+	}
+	loaded = cmd().(itemsLoadedMsg)
+	if loaded.source != SourceSeason || loaded.season != m.currentLabel || m.filter.Status != "My List" {
+		t.Fatalf("palette: loaded %+v, status %q; want Season with its default status", loaded, m.filter.Status)
+	}
+	if m.filter.Sort != "score" || m.filter.FuzzyText != "alpha" || m.provider != "hianime" || *m.result != (Result{}) {
+		t.Fatalf("a local view change lost filters or switched sources: %+v, %+v", m.filter, *m.result)
+	}
+}
+
+// Changing media source must leave the anime list, release filters, and provider
+// untouched, whether the request comes from Tab or from a palette selection.
+func TestAnimeAndReleaseMediaSources(t *testing.T) {
+	for _, via := range []string{"Tab", "palette"} {
+		browse := newAnimePickerForTest()
+		search := newAnimePicker(SourceList, "alpha", nil, nil, nil, nil, nil, nil, false)
+		releases := newReleasePicker(&mal.Item{Title: "Alpha", TotalEps: 12}, "Fansubs", "1080p", "newest", nil, false, nil, nil, nil, 7, false)
+		browse.provider, search.provider, releases.provider = "hianime", "hianime", "hianime"
+		for _, tc := range []struct {
+			view    string
+			picker  tea.Model
+			palette *Palette
+			result  *Result
+		}{
+			{"Season", browse, &browse.palette, browse.result},
+			{"Search", search, &search.palette, search.result},
+			{"Releases", releases, &releases.palette, releases.result},
+		} {
+			t.Run(tc.view+"/"+via, func(t *testing.T) {
+				tc.picker.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+				out := tc.picker.View()
+				for _, label := range []string{"Source: Anime", "view:" + tc.view, "Provider: hianime.fm", "Tab source"} {
+					if !strings.Contains(out, label) {
+						t.Errorf("screen missing %q:\n%s", label, out)
+					}
+				}
+				tc.picker.Update(keyMsg(':'))
+				sources, views := map[string]string{}, map[string]string{}
+				for _, c := range tc.palette.all {
+					switch c.Category {
+					case "Source":
+						sources[c.Intent] = c.Title
+					case "View":
+						views[c.Intent] = c.Title
+					case "Catalog":
+						t.Fatalf("obsolete catalog in palette: %+v", c)
+					}
+				}
+				if len(sources) != 2 || sources["source:anime"] != "● Anime" || sources["source:movies"] != "Movies & TV" {
+					t.Fatalf("unexpected media source commands: %v", sources)
+				}
+				if tc.view == "Season" {
+					if len(views) != 2 || views["view:mylist"] != "My List" || views["view:season"] != "● Season" {
+						t.Fatalf("unexpected browse views: %v", views)
+					}
+				} else if len(views) != 0 {
+					t.Fatalf("browse views should not appear here: %v", views)
+				}
+				for _, r := range "source anime" {
+					tc.picker.Update(keyMsg(r))
+				}
+				_, cmd := tc.picker.Update(enterMsg())
+				if cmd != nil || *tc.result != (Result{}) || tc.palette.Active() || tc.palette.Selected().Intent != "source:anime" {
+					t.Fatalf("selecting the active source was not a no-op: %+v", tc.result)
+				}
+				key := tabMsg()
+				if via == "palette" {
+					tc.picker.Update(keyMsg(':'))
+					for _, r := range "source movies" {
+						tc.picker.Update(keyMsg(r))
+					}
+					key = enterMsg()
+				}
+				_, cmd = tc.picker.Update(key)
+				if cmd == nil || *tc.result != (Result{MediaSwitch: MediaMovies}) {
+					t.Fatalf("want a media switch only; got %+v", tc.result)
+				}
+			})
+		}
+		if browse.source != SourceSeason || search.query != "alpha" || releases.filter.Episode != 7 || releases.filter.Group != "Fansubs" || releases.filter.Quality != "1080p" {
+			t.Error("changing media altered the anime browsing context")
+		}
+	}
+}
+
+func TestSourceShortcutsRespectInputContext(t *testing.T) {
+	a := newAnimePickerForTest()
+	r := newReleasePicker(nil, "", "", "newest", nil, true, nil, nil, nil, 0, false)
+	for _, tc := range []struct {
+		name       string
+		picker     tea.Model
+		wantFuzzy  string // in the anime filter, Tab is an existing shortcut for a space
+		overlayKey rune
+		active     func() bool
+		fuzzy      *string
+		palette    *Palette
+		result     *Result
+	}{
+		{"Anime", a, " v:", 't', a.overlay.active, &a.filter.FuzzyText, &a.palette, a.result},
+		{"Releases", r, "v:", 'g', r.overlay.active, &r.filter.FuzzyText, &r.palette, r.result},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, open := range []rune{'/', tc.overlayKey, ':'} {
+				tc.picker.Update(keyMsg(open))
+				for _, key := range []tea.KeyMsg{tabMsg(), keyMsg('v'), keyMsg(':')} {
+					tc.picker.Update(key)
+					if *tc.result != (Result{}) || a.source != SourceSeason {
+						t.Fatalf("%v escaped %q input mode", key, open)
+					}
+				}
+				switch open {
+				case '/':
+					if *tc.fuzzy != tc.wantFuzzy || tc.palette.Active() {
+						t.Errorf("filter did not capture input: %q", *tc.fuzzy)
+					}
+				case ':':
+					if !tc.palette.Active() || string(tc.palette.input) != "v:" {
+						t.Errorf("palette did not capture input: %q", tc.palette.input)
+					}
+				default:
+					if !tc.active() || tc.palette.Active() {
+						t.Error("shortcut escaped the active overlay")
+					}
+				}
+				tc.picker.Update(escMsg())
+			}
+		})
 	}
 }
 
@@ -1624,8 +1757,8 @@ func TestReleasePickerProviderSwitch(t *testing.T) {
 	// Picking the other provider requests the switch and quits.
 	model, cmd := m.applyCommand("provider:hianime")
 	rp := model.(*releasePicker)
-	if rp.result.SourceSwitch != "hianime" {
-		t.Errorf("SourceSwitch = %q, want hianime", rp.result.SourceSwitch)
+	if *rp.result != (Result{SourceSwitch: "hianime"}) {
+		t.Errorf("expected only a provider switch to hianime, got %+v", rp.result)
 	}
 	if cmd == nil {
 		t.Error("provider switch returned no quit cmd")
@@ -2211,7 +2344,7 @@ func TestAnimeStateRestoreOptions(t *testing.T) {
 }
 
 // TestAnimeStateCursorRestoredAfterLoad: the session cursor applies to the
-// first load only; a later load (Tab/season switch) resets it to 0.
+// first load only; a later load (view/season switch) resets it to 0.
 func TestAnimeStateCursorRestoredAfterLoad(t *testing.T) {
 	items := []mal.Item{
 		{MalID: 1, Title: "A"}, {MalID: 2, Title: "B"}, {MalID: 3, Title: "C"},

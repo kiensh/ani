@@ -36,7 +36,7 @@ func movieKey(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes
 
 func TestTraktConfirmExactEpisodeAndAvoidRemake(t *testing.T) {
 	s := &trackerStub{results: []trakt.Title{{ID: 9, Kind: "movie", Name: "Dig", Year: 2026}, {ID: 3, Kind: "series", Name: "Dig", Year: 2015}, {ID: 4, Kind: "series", Name: "Dig", Year: 2026}}}
-	m := &moviePicker{tracker: s, stage: movieTitles, width: 80, height: 20, titles: []flixhq.Title{{Name: "Dig", Year: "2026", Kind: "series"}}}
+	m := trackingPicker(s, flixhq.Title{Name: "Dig", Year: "2026", Kind: "series"})
 	m.Update(movieKey("m"))
 	if m.track != nil || !strings.Contains(m.problem, "Select an episode") {
 		t.Fatal("whole-series mark was allowed")
@@ -63,7 +63,7 @@ func TestTraktConfirmExactEpisodeAndAvoidRemake(t *testing.T) {
 
 func TestTraktWatchlistCancelFailureAndManualChoice(t *testing.T) {
 	s := &trackerStub{results: []trakt.Title{{ID: 3, Kind: "movie", Name: "The Gift", Year: 2000}, {ID: 4, Kind: "movie", Name: "The Gift", Year: 2015}}}
-	m := &moviePicker{tracker: s, stage: movieTitles, titles: []flixhq.Title{{Name: "The Gift", Kind: "movie"}}, width: 80, height: 20}
+	m := trackingPicker(s, flixhq.Title{Name: "The Gift", Kind: "movie"})
 	_, find := m.Update(movieKey("w"))
 	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m.Update(find())
@@ -100,16 +100,33 @@ func TestTraktWatchlistCancelFailureAndManualChoice(t *testing.T) {
 	}
 }
 
+func trackingPicker(s *trackerStub, title flixhq.Title) *moviePicker {
+	a := &movieAccountStub{trackerStub: s, connected: true}
+	m := newMoviePicker("", nil, a, nil, nil)
+	m.stage, m.titles = movieTitles, []flixhq.Title{title}
+	m.width, m.height = 80, 20
+	return m
+}
+
 func TestTraktIsOptionalAndNeverWritesOnPlay(t *testing.T) {
-	m := &moviePicker{stage: movieTitles, titles: []flixhq.Title{{Name: "Test", Kind: "movie"}}}
-	_, cmd := m.Update(movieKey("w"))
-	if cmd != nil || !strings.Contains(m.problem, "ani trakt login") {
-		t.Fatal("missing offline login hint")
+	a := &movieAccountStub{trackerStub: &trackerStub{}}
+	m := newMoviePicker("", nil, a, nil, nil)
+	m.stage, m.titles = movieTitles, []flixhq.Title{{Name: "Test", Kind: "movie"}}
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc}) // skip the welcome offer
+	for _, key := range []string{"w", "m"} {
+		_, cmd := m.Update(movieKey(key))
+		if cmd != nil || m.track != nil || !strings.Contains(m.View(), "Continue without an account") {
+			t.Fatalf("%s should offer connection without starting it: %s", key, m.View())
+		}
+		m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	}
-	s := &trackerStub{}
-	m.tracker = s
-	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !m.play || cmd == nil || m.track != nil || s.query != "" || s.watched != 0 {
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.play || cmd == nil || m.track != nil || a.query != "" || a.watched != 0 || a.watchlist != 0 {
 		t.Fatal("opening mpv should not track a title")
+	}
+	connected := trackingPicker(a.trackerStub, m.titles[0])
+	_, cmd = connected.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil || !connected.play || connected.track != nil || a.query != "" || a.watched != 0 || a.watchlist != 0 {
+		t.Fatal("connecting an account must not enable automatic tracking")
 	}
 }

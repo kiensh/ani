@@ -29,7 +29,7 @@ func (f *movieFixture) Episodes(ctx context.Context, t flixhq.Title) ([]flixhq.E
 
 func TestMoviePickerNavigation(t *testing.T) {
 	f := &movieFixture{titles: []flixhq.Title{{Name: "Test", Kind: "movie", Year: "2010", URL: "/one"}, {Name: "Test", Kind: "series", Year: "2025", URL: "/two"}}, eps: []flixhq.Episode{{Season: 3, Number: 2, Name: "Other"}, {Season: 1, Number: 2, Name: "Second"}, {Season: 3, Number: 1, Name: "First"}}}
-	m := &moviePicker{catalog: f, width: 80, height: 22}
+	m := &moviePicker{MovieState: &MovieState{}, catalog: f, width: 80, height: 22}
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("사과 Pie")})
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m.Update(cmd())
@@ -70,7 +70,7 @@ func TestMoviePickerNavigation(t *testing.T) {
 
 func TestMovieSearchCancelRetryAndEmpty(t *testing.T) {
 	f := &movieFixture{err: errors.New("catalog unavailable")}
-	m := &moviePicker{catalog: f, initial: true, query: []rune("Test")}
+	m := &moviePicker{MovieState: &MovieState{initial: true, query: []rune("Test")}, catalog: f}
 	first := m.Init()
 	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m.Update(first())
@@ -96,18 +96,26 @@ func TestMovieSearchCancelRetryAndEmpty(t *testing.T) {
 }
 
 func TestMovieCatalogAccessibleFromLatestUploads(t *testing.T) {
-	m := newReleasePicker(nil, "", "", "newest", nil, true, nil, nil, nil, 0, false)
-	found := false
-	for _, c := range m.releaseCommands() {
-		if c.Intent == movieCatalogCommand.Intent {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("missing movie catalog command on logged-out landing page")
-	}
-	_, cmd := m.applyCommand(movieCatalogCommand.Intent)
-	if m.result.SourceSwitch != "flixhq" || cmd == nil {
-		t.Fatal("did not open movie catalog")
+	for _, via := range []string{"Tab", "palette"} {
+		t.Run(via, func(t *testing.T) {
+			m := newReleasePicker(nil, "", "", "newest", nil, true, nil, nil, nil, 0, false)
+			m.provider = "torrent"
+			m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+			key := tabMsg()
+			if via == "palette" {
+				m.Update(keyMsg(':')) // the initial fetch has not even returned yet
+				for _, r := range "source movies" {
+					m.Update(keyMsg(r))
+				}
+				if !strings.Contains(m.View(), "Movies & TV") {
+					t.Fatal("Movies & TV source not visible on the logged-out landing page")
+				}
+				key = enterMsg()
+			}
+			_, cmd := m.Update(key)
+			if cmd == nil || *m.result != (Result{MediaSwitch: MediaMovies}) || m.provider != "torrent" {
+				t.Fatalf("expected only a media switch, got %+v (provider %q)", *m.result, m.provider)
+			}
+		})
 	}
 }

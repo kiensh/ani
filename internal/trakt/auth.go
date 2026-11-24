@@ -58,7 +58,7 @@ func (c *Client) Login(ctx context.Context, prompt func(verificationURL, userCod
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if grant.DeviceCode == "" || grant.Interval <= 0 || grant.ExpiresIn <= 0 || !validPrompt(grant) {
+	if grant.DeviceCode == "" || grant.Interval <= 0 || grant.ExpiresIn <= 0 || !ValidDevicePrompt(grant.VerificationURL, grant.UserCode) {
 		return errors.New("Trakt: invalid device authorization response")
 	}
 	// Clamp before converting seconds to a duration; never poll indefinitely
@@ -114,20 +114,20 @@ func (c *Client) Login(ctx context.Context, prompt func(verificationURL, userCod
 	}
 }
 
-func validPrompt(grant deviceCode) bool {
-	// These fields go straight to a terminal. Don't display arbitrary links or
-	// control sequences, even if the server returns malformed JSON values.
-	if len(grant.VerificationURL) > 1024 || strings.IndexFunc(grant.VerificationURL, func(r rune) bool { return r < '!' || r > '~' || r == '\\' }) >= 0 {
+// ValidDevicePrompt checks both fields before displaying a code or launching
+// the browser. Only HTTPS Trakt URLs and terminal-safe user codes are accepted.
+func ValidDevicePrompt(link, code string) bool {
+	if len(link) > 1024 || strings.IndexFunc(link, func(r rune) bool { return r < '!' || r > '~' || r == '\\' }) >= 0 {
 		return false
 	}
-	u, err := url.Parse(grant.VerificationURL)
+	u, err := url.Parse(link)
 	if err != nil || u.Scheme != "https" || u.User != nil || (u.Host != "trakt.tv" && u.Host != "auth.trakt.tv" && u.Host != "app.trakt.tv") {
 		return false
 	}
-	if len(grant.UserCode) == 0 || len(grant.UserCode) > 64 {
+	if len(code) == 0 || len(code) > 64 {
 		return false
 	}
-	for _, r := range grant.UserCode {
+	for _, r := range code {
 		if !(r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r == '-') {
 			return false
 		}

@@ -13,13 +13,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"ani/internal/browser"
 	"ani/internal/config"
 
 	"github.com/muesli/cancelreader"
@@ -489,22 +488,7 @@ func Redact(v url.Values) string {
 }
 
 // OpenBrowser launches url in the platform default browser (best-effort).
-func OpenBrowser(url string) {
-	var bin string
-	switch runtime.GOOS {
-	case "darwin":
-		bin = "open"
-	case "windows":
-		bin = "rundll32"
-	default:
-		bin = "xdg-open"
-	}
-	if bin == "rundll32" {
-		_ = exec.Command(bin, "url.dll,FileProtocolHandler", url).Start()
-		return
-	}
-	_ = exec.Command(bin, url).Start()
-}
+func OpenBrowser(url string) { _ = browser.Open(url) }
 
 // RandomString returns a base64url-encoded random string of n bytes.
 func RandomString(n int) string {

@@ -32,6 +32,12 @@ var (
 	errLogout  = errors.New("logout")
 )
 
+// A media switch from the release list carries its episode for the return trip.
+// It is independent of a switch between anime playback providers.
+type openMovies struct{ episode int }
+
+func (openMovies) Error() string { return "switch to Movies & TV" }
+
 // errSourceSwitch signals that a picker requested a provider change via the
 // `:` palette. From the anime picker, Run applies it and re-resolves; from the
 // release picker, releaseLoop applies it and re-opens the same anime. Carries
@@ -53,61 +59,108 @@ var ErrCancelled = errors.New("cancelled")
 // landing screen (the newest uploads, flat list, episode filter disabled).
 const latestUploadsAID = -1
 
-// Run is the main flow: resolve an anime, then loop picking releases →
-// play/download → write back to MAL. Esc in the release picker returns to
-// anime selection.
+// Run keeps one session for each media source. The inactive source performs no
+// startup work: launching --movies does not start the anime warmup or MAL login.
 func Run(opt *Options) error {
+	var anime animeSession
+	var movies tui.MovieState
+	return runMediaSources(opt, anime.enter, func(o *Options) (tui.MediaSource, error) { return browseMovies(o, &movies) })
+}
+
+// A switch goes through this loop, never through nested pickers or a persisted
+// playback-provider change. A positional query belongs only to the starting source.
+func runMediaSources(opt *Options, anime, movies func(*Options) (tui.MediaSource, error)) error {
+	a, m := *opt, *opt
+	a.Movies, m.Movies = false, true
+	source := tui.MediaAnime
 	if opt.Movies {
-		return browseMovies(opt, opt.Query) // independent catalog: no MAL login, warmup, or write-back
+		source, a.Query = tui.MediaMovies, ""
+	} else {
+		m.Query = ""
 	}
-	aired := providerAiredCaches{}    // late results always land in their originating provider's cache
-	relcache := newReleaseCache()     // session-scoped; fetched releases survive Esc-back / re-entry
-	health := tui.NewProviderHealth() // session-scoped; backend reachability for the down warning
-	snapshots := newAiredSnapshots(health)
-	animeState := tui.NewAnimeState()  // session-scoped; anime picker's options/cursor/cache survive Esc-back
-	go mal.WarmAidResolvers(opt.Debug) // overlap the one-time Fribb/AniDB map load with the first MAL fetch
 	for {
-		aid, item, err := resolve(opt, aired.forSource(opt.Source), health, animeState, snapshots)
+		var next tui.MediaSource
+		var err error
+		switch source {
+		case tui.MediaAnime:
+			next, err = anime(&a)
+		case tui.MediaMovies:
+			next, err = movies(&m)
+		default:
+			return fmt.Errorf("unknown media source %q", source)
+		}
+		if err != nil || next == "" {
+			return err
+		}
+		source = next
+	}
+}
+
+type animeSession struct {
+	aired     providerAiredCaches
+	releases  *releaseCache
+	health    *tui.ProviderHealth
+	snapshots airedSnapshots
+	picker    *tui.AnimeState
+	// While looking at releases, keep the chosen show and episode across Tab.
+	aid, episode int
+	item         *mal.Item
+}
+
+func (s *animeSession) enter(opt *Options) (tui.MediaSource, error) {
+	if s.picker == nil {
+		s.aired, s.releases, s.health = providerAiredCaches{}, newReleaseCache(), tui.NewProviderHealth()
+		s.snapshots, s.picker = newAiredSnapshots(s.health), tui.NewAnimeState()
+		go mal.WarmAidResolvers(opt.Debug)
+	}
+	var change openMovies
+	for {
+		if s.item != nil {
+			err := releaseLoop(opt, s.aid, s.item, s.aired, s.health, s.releases, s.episode)
+			if errors.As(err, &change) {
+				s.episode = change.episode
+				if s.aid == 0 {
+					s.aid = s.item.AnidbAID
+				}
+				return tui.MediaMovies, nil
+			}
+			if !errors.Is(err, errBackToAnime) {
+				return "", err
+			}
+			s.picker.PatchItem(*s.item)
+			s.item, s.episode = nil, 0
+		}
+		aid, item, err := resolve(opt, s.aired.forSource(opt.Source), s.health, s.picker, s.snapshots)
+		if errors.As(err, &change) {
+			return tui.MediaMovies, nil
+		}
 		if errors.Is(err, errRelogin) {
 			if e := mal.Login(opt.Debug); e != nil {
 				fmt.Fprintf(os.Stderr, "ani: login failed: %v\n", e)
 			}
-			continue // re-resolve: MAL if login worked, else AnimeTosho
+			s.picker = tui.NewAnimeState() // never reuse signed-out or another account's rows
+			continue                       // re-resolve: MAL if login worked, else AnimeTosho
 		}
 		if errors.Is(err, errLogout) {
 			if e := mal.Logout(); e != nil {
 				fmt.Fprintf(os.Stderr, "ani: logout failed: %v\n", e)
 			}
+			s.picker = tui.NewAnimeState()
 			continue // re-resolve: token gone → AnimeTosho
 		}
 		var srcSwitch errSourceSwitch
 		if errors.As(err, &srcSwitch) {
-			if srcSwitch.source == "flixhq" {
-				if err := browseMovies(opt, ""); err != nil {
-					return err
-				}
-				continue // return to the same anime catalog without changing its source
-			}
-			// Provider change from the anime picker's `:` palette: apply it and
-			// re-resolve (the release picker handles its own switches in place).
-			applySourceSwitch(opt, srcSwitch.source, health)
-			relcache.Reset()
+			applySourceSwitch(opt, srcSwitch.source, s.health)
+			s.releases.Reset()
+			if !mal.LoggedIn() {
+				s.picker = tui.NewAnimeState()
+			} // signed-out search results belong to the previous backend
 			continue
 		}
 		if err != nil {
-			return err
+			return "", err
 		}
-		if err := releaseLoop(opt, aid, item, aired, health, relcache); err != nil {
-			if errors.Is(err, errBackToAnime) {
-				// The loop's write-back left `item` refreshed (watched count,
-				// status) — merge it into the session's carried rows so the
-				// picker re-entry shows it without re-fetching (instant back).
-				animeState.PatchItem(*item)
-				continue // Esc in release picker (or a dead switched-to provider) → re-resolve
-			}
-			return err
-		}
-		return nil
+		s.aid, s.item = aid, item
 	}
 }
 
@@ -133,9 +186,28 @@ func resolveAnidb(aid int) (int, *mal.Item, error) {
 	return aid, &mal.Item{Title: title, TotalEps: totalEps}, nil
 }
 
+// animeSelection handles the same top-level navigation and MAL account actions
+// whether the anime picker is showing MAL data or a signed-out fallback.
+func animeSelection(res *tui.Result) (*mal.Item, error) {
+	if res != nil {
+		switch {
+		case res.MediaSwitch == tui.MediaMovies:
+			return nil, openMovies{}
+		case res.Relogin:
+			return nil, errRelogin
+		case res.Logout:
+			return nil, errLogout
+		case res.SourceSwitch != "":
+			return nil, errSourceSwitch{source: res.SourceSwitch}
+		case !res.Quit && res.Anime != nil:
+			return res.Anime, nil
+		}
+	}
+	return nil, ErrCancelled
+}
+
 // resolveMal runs the anime picker over MAL and resolves the AniDB id from the
-// picked item. Browse opens on Season (current); Tab → My List. A non-empty
-// query means search.
+// picked item. The initial anime view is the current season unless searching.
 func resolveMal(opt *Options, aired *tui.AiredCache, health *tui.ProviderHealth, animeState *tui.AnimeState, snapshots airedSnapshots) (int, *mal.Item, error) {
 	query := opt.Query
 	source := tui.SourceSeason // default browse source
@@ -187,19 +259,10 @@ func resolveMal(opt *Options, aired *tui.AiredCache, health *tui.ProviderHealth,
 	if err != nil {
 		return 0, nil, err
 	}
-	if res != nil && res.Relogin {
-		return 0, nil, errRelogin
+	item, err := animeSelection(res)
+	if err != nil {
+		return 0, nil, err
 	}
-	if res != nil && res.Logout {
-		return 0, nil, errLogout
-	}
-	if res != nil && res.SourceSwitch != "" {
-		return 0, nil, errSourceSwitch{source: res.SourceSwitch}
-	}
-	if res == nil || res.Quit || res.Anime == nil {
-		return 0, nil, ErrCancelled
-	}
-	item := res.Anime
 	// hianime (streaming) resolves by title in streamLoop — no AniDB aid needed.
 	if opt.Source == "hianime" {
 		return 0, item, nil
@@ -398,87 +461,65 @@ func resolveAnidbManual(item *mal.Item, opt *Options) int {
 // series and lets the user pick; no query returns the latest-uploads sentinel
 // (animetosho only — hianime has no equivalent).
 func resolveAnimetosho(opt *Options, health *tui.ProviderHealth, animeState *tui.AnimeState) (int, *mal.Item, error) {
-	if opt.Source == "hianime" {
-		return resolveHianimeNoLogin(opt, health, animeState)
-	}
-	if opt.Query == "" {
+	source := opt.Source
+	if source != "hianime" && opt.Query == "" {
 		return latestUploadsAID, &mal.Item{Title: "Latest uploads"}, nil
 	}
-	series, err := animetosho.SearchSeries(opt.Query)
-	if err != nil {
-		health.MarkDown("torrent", downReason(err))
-		return 0, nil, err
-	}
-	health.MarkUp("torrent")
-	items := seriesToItems(series)
-	if len(items) == 0 {
-		return 0, nil, fmt.Errorf("no anime found")
-	}
-	load := func(tui.AnimeSource, string, string) ([]mal.Item, error) { return items, nil }
-	if opt.DryRun {
-		// Dry-run: skip the anime picker, auto-pick the first series hit.
-		item := items[0]
-		fmt.Fprintf(os.Stderr, "DRY-RUN: auto-picked %q\n", item.Title)
-		if item.AnidbAID == 0 {
-			return 0, nil, fmt.Errorf("no AniDB id for %q", item.Title)
+	// Load inside the picker, just as on the MAL path. A missing query, empty
+	// result or unavailable anime backend must not trap Tab or the Account menu.
+	load := func(_ tui.AnimeSource, q, _ string) ([]mal.Item, error) {
+		if source == "hianime" {
+			if q == "" {
+				return nil, errors.New("HiAnime needs a title (ani <title>), or press L to connect MAL")
+			}
+			shows, err := hianime.Search(q)
+			if err != nil {
+				health.MarkDown("hianime", downReason(err))
+				return nil, err
+			}
+			health.MarkUp("hianime")
+			items := make([]mal.Item, 0, len(shows))
+			for _, show := range shows {
+				items = append(items, mal.Item{Title: show.Name})
+			}
+			return items, nil
 		}
-		return item.AnidbAID, &item, nil
+		series, err := animetosho.SearchSeries(q)
+		if err != nil {
+			health.MarkDown("torrent", downReason(err))
+			return nil, err
+		}
+		health.MarkUp("torrent")
+		return seriesToItems(series), nil
 	}
-	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, health, opt.Source, animeState, nil, nil, opt.Debug)
-	if err != nil {
-		return 0, nil, err
+	var item *mal.Item
+	if opt.DryRun {
+		items, err := load(tui.SourceSeason, opt.Query, "")
+		if err != nil {
+			return 0, nil, err
+		}
+		if len(items) == 0 {
+			return 0, nil, errors.New("no anime found")
+		}
+		item = &items[0]
+		fmt.Fprintf(os.Stderr, "DRY-RUN: auto-picked %q\n", item.Title)
+	} else {
+		res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, health, source, animeState, nil, nil, opt.Debug)
+		if err != nil {
+			return 0, nil, err
+		}
+		item, err = animeSelection(res)
+		if err != nil {
+			return 0, nil, err
+		}
 	}
-	if res != nil && res.SourceSwitch != "" {
-		return 0, nil, errSourceSwitch{source: res.SourceSwitch}
+	if source == "hianime" {
+		return 0, item, nil
 	}
-	if res == nil || res.Quit || res.Anime == nil {
-		return 0, nil, ErrCancelled
-	}
-	item := res.Anime
 	if item.AnidbAID == 0 {
 		return 0, nil, fmt.Errorf("no AniDB id for %q", item.Title)
 	}
 	return item.AnidbAID, item, nil
-}
-
-// resolveHianimeNoLogin is the no-MAL hianime path: search hianime by query,
-// let the user pick, then return the item (aid=0 — hianime resolves by title in
-// streamLoop). Unlike animetosho there's no "latest uploads" landing, so a
-// query is required.
-func resolveHianimeNoLogin(opt *Options, health *tui.ProviderHealth, animeState *tui.AnimeState) (int, *mal.Item, error) {
-	if opt.Query == "" {
-		return 0, nil, fmt.Errorf("hianime mode requires a search query (run: ani <title>)")
-	}
-	shows, err := hianime.Search(opt.Query)
-	if err != nil {
-		health.MarkDown("hianime", downReason(err))
-		return 0, nil, err
-	}
-	health.MarkUp("hianime")
-	items := make([]mal.Item, 0, len(shows))
-	for _, s := range shows {
-		items = append(items, mal.Item{Title: s.Name})
-	}
-	if len(items) == 0 {
-		return 0, nil, fmt.Errorf("no anime found")
-	}
-	load := func(tui.AnimeSource, string, string) ([]mal.Item, error) { return items, nil }
-	if opt.DryRun {
-		item := items[0]
-		fmt.Fprintf(os.Stderr, "DRY-RUN: auto-picked %q\n", item.Title)
-		return 0, &item, nil
-	}
-	res, err := tui.RunAnimePicker(tui.SourceSeason, opt.Query, load, nil, nil, nil, nil, nil, nil, health, opt.Source, animeState, nil, nil, opt.Debug)
-	if err != nil {
-		return 0, nil, err
-	}
-	if res != nil && res.SourceSwitch != "" {
-		return 0, nil, errSourceSwitch{source: res.SourceSwitch}
-	}
-	if res == nil || res.Quit || res.Anime == nil {
-		return 0, nil, ErrCancelled
-	}
-	return 0, res.Anime, nil
 }
 
 // seriesToItems projects AnimeTosho series-search hits into picker items (title
@@ -534,22 +575,12 @@ func applySourceSwitch(opt *Options, source string, health *tui.ProviderHealth) 
 // newest releases site-wide with the episode filter disabled; that view offers
 // no switch (hianime resolves per show). Returns errBackToAnime when the user
 // backs out.
-func releaseLoop(opt *Options, aid int, item *mal.Item, aired providerAiredCaches, health *tui.ProviderHealth, relcache *releaseCache) error {
-	// Episode to restore after a provider switch: keeps the user's selection
-	// when the same anime re-opens on the other backend (0 = none yet).
-	reentryEpisode := 0
+func releaseLoop(opt *Options, aid int, item *mal.Item, aired providerAiredCaches, health *tui.ProviderHealth, relcache *releaseCache, reentryEpisode int) error {
 	for {
 		err := runReleaseLoop(opt, aid, item, aired.forSource(opt.Source), health, relcache, reentryEpisode)
 		var srcSwitch errSourceSwitch
 		if !errors.As(err, &srcSwitch) {
 			return err
-		}
-		if srcSwitch.source == "flixhq" {
-			if err := browseMovies(opt, ""); err != nil {
-				return err
-			}
-			reentryEpisode = srcSwitch.episode
-			continue
 		}
 		applySourceSwitch(opt, srcSwitch.source, health)
 		item.AiredEps = 0 // the carried count belonged to the old provider
@@ -849,13 +880,16 @@ func pickReleaseTUI(item *mal.Item, opt *Options, fetch func(int) []*playable.Re
 		}
 		config.SaveFilters(res.FilterGroup, res.FilterQuality, opt.Sort, opt.Source)
 	}
-	if res != nil && res.SourceSwitch != "" {
+	if res != nil && (res.MediaSwitch == tui.MediaMovies || res.SourceSwitch != "") {
 		// Carry the selected episode so the re-opened picker restores it.
 		// FilterEpisode 0 means "all" here — map it to DefaultEpisodeAll so it
 		// isn't confused with "no override".
 		ep := res.FilterEpisode
 		if ep == 0 {
 			ep = tui.DefaultEpisodeAll
+		}
+		if res.MediaSwitch == tui.MediaMovies {
+			return nil, "", openMovies{episode: ep}
 		}
 		return nil, "", errSourceSwitch{source: res.SourceSwitch, episode: ep}
 	}
@@ -907,13 +941,14 @@ Usage:
   <anidb-id>  numeric AniDB id (e.g. 18886) -> skip straight to its releases
   (no arg)    your MAL list (logged in) or the latest uploads (not logged in)
 
-Logged-in flow:  browse My List / This Season / Search  ->  pick a release
-                 ->  Enter plays  /  d downloads  ->  MAL progress write-back
+Source:          Tab switches Anime ↔ Movies & TV; both are also under : → Source.
+Anime:           Season and My List are anime views (: → View or v while browsing).
+                 L connects MyAnimeList. Enter plays; d downloads a torrent.
 Not logged in:   AnimeTosho series search, or the latest uploads.
 
-Movies & TV:     --movies opens FlixHQ search (or use : → Search movies & TV).
-                 Pick a movie, or a series → season → episode. Playback uses mpv
-                 with yt-dlp on PATH. No torrents, MAL login, or MAL write-back.
+Movies & TV:     Search FlixHQ, pick a movie or a series → season → episode.
+                 The picker offers Trakt sign-in, or you can browse without it.
+                 L opens Trakt login. Playback uses mpv with yt-dlp on PATH.
 
 Anime provider: set "source" in config.json to "torrent" (default: AnimeTosho torrents
           via webtorrent) or "hianime" (hianime.fm streaming via mpv — sub/dub +

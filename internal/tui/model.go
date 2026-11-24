@@ -30,12 +30,10 @@ type Result struct {
 	Relogin bool // re-run the browser OAuth flow
 	Logout  bool // forget the saved MAL token
 
-	// SourceSwitch requests a provider change ("torrent"/"hianime") or a visit
-	// to the separate "flixhq" movie/TV catalog (no anime source change) from either
-	// picker's `:` palette; app.Run applies it (persist + re-select the
-	// provider's filters, then re-resolve — the release picker re-opens on the
-	// same anime).
-	SourceSwitch string
+	// MediaSwitch moves between Anime and Movies & TV. It never changes the
+	// anime playback provider or the user's filters for that provider.
+	MediaSwitch  MediaSource
+	SourceSwitch string // anime playback provider change (torrent / hianime)
 
 	// Filter preferences from the release picker (persisted across sessions).
 	FilterGroup   string
