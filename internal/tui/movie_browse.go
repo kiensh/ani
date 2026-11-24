@@ -22,6 +22,7 @@ type movieListing struct {
 	view   movieView
 	titles []flixhq.Title
 	cursor int
+	stale  bool // a confirmed Trakt write requires a refresh when this shelf reopens
 }
 
 type movieBrowseLoaded struct {
@@ -102,7 +103,7 @@ func (m *moviePicker) startSearch(match bool) tea.Cmd {
 	m.initial = false
 	m.problem, m.notice = "", ""
 	if m.view != movieResults {
-		m.home = movieListing{m.view, m.titles, m.cursor[movieTitles]}
+		m.home = movieListing{view: m.view, titles: m.titles, cursor: m.cursor[movieTitles]}
 		m.query = nil
 	}
 	m.titles, m.cursor[movieTitles] = nil, 0
@@ -117,6 +118,9 @@ func (m *moviePicker) startSearch(match bool) tea.Cmd {
 func (m *moviePicker) returnHome() tea.Cmd {
 	m.stopLoad()
 	m.view, m.titles, m.cursor[movieTitles] = m.home.view, m.home.titles, m.home.cursor
+	if m.home.stale {
+		m.titles = nil
+	} // Init reloads from Trakt, retaining the cursor if possible.
 	m.stage, m.home = movieTitles, movieListing{}
 	m.query, m.matching, m.editing = nil, false, false
 	m.problem, m.notice = "", ""

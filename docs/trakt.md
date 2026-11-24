@@ -22,7 +22,7 @@ Highlight a provider title to see its poster, synopsis and available details; on
 
 ## Track a selection
 
-In `ani --movies`, highlight a movie or show and press **w** to add it to your Trakt watchlist. Press **m** on a movie or a specific episode to mark it watched. The picker shows candidate Trakt titles (including year and ID); choose the right one and press **Enter** to confirm, or **Esc** to cancel. A series watchlist entry refers to the series; a watched entry refers only to the selected season/episode, never an entire series. Playback, closing `mpv`, and `--dry-run` never mark anything watched. This records watch history, not a playback timestamp.
+In **Movies & TV**, search with **/**, enter a title and press **Enter**. Highlight a result and press **Space** for its **Actions**, or press **:** and search for `add` or `watched`. Choose **Add to My Watchlist** to save the movie for later, or **Mark movie as watched** to record it in your history. The direct shortcuts are **w** for watchlist and **m** for watched. For a series, add the series to your watchlist or select a specific episode before marking it watched. The picker shows candidate Trakt titles (including year and ID); choose the right one and press **Enter** to confirm, or **Esc** to cancel. A series watchlist entry refers to the series; a watched entry refers only to the selected season/episode, never an entire series. Playback, closing `mpv`, and `--dry-run` never mark anything watched. This records watch history, not a playback timestamp.
 
 ## Privacy and disconnecting
 

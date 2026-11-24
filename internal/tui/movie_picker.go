@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"unicode"
@@ -248,7 +249,7 @@ func (m *moviePicker) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case traktMatchesMsg:
 		m.loadedTrackMatches(msg)
 	case traktWriteMsg:
-		m.savedTrack(msg)
+		return m, m.savedTrack(msg)
 	case movieDevicePromptMsg:
 		return m, m.showDevicePrompt(msg)
 	case movieBrowserMsg:
@@ -372,6 +373,10 @@ func (m *moviePicker) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			*pos = max(0, *pos-max(1, m.height-6))
 		case "pgdown", "ctrl+d":
 			*pos = min(last, *pos+max(1, m.height-6))
+		case " ":
+			if actions := m.titleActions(); len(actions) > 0 {
+				m.palette.Open(actions)
+			}
 		case "s":
 			m.openSubtitleInput()
 		case "m", "w":
@@ -403,7 +408,8 @@ func (m *moviePicker) leave(source MediaSource) tea.Cmd {
 }
 
 func (m *moviePicker) movieCommands() []Command {
-	cmds := append(mediaSourceCommands(MediaMovies),
+	cmds := append(m.titleActions(), mediaSourceCommands(MediaMovies)...)
+	cmds = append(cmds,
 		Command{Category: "View", Title: "My Watchlist", Intent: "view:watchlist", Keywords: "home trakt saved movies series"},
 		Command{Category: "View", Title: "Recently Added", Intent: "view:recent", Keywords: "browse flixhq latest movies series"},
 	)
@@ -423,6 +429,14 @@ func (m *moviePicker) movieCommands() []Command {
 
 func (m *moviePicker) applyMovieCommand(intent string) tea.Cmd {
 	switch intent {
+	case "trakt:add-watchlist":
+		return m.openTrackForm(true)
+	case "trakt:mark-watched":
+		return m.openTrackForm(false)
+	case "watchlist:find":
+		if _, ok := m.actionTitle(); ok && m.view == movieWatchlist && m.stage == movieTitles {
+			return m.startSearch(true)
+		}
 	case "play:subtitle":
 		m.openSubtitleInput()
 	case "source:anime":
@@ -457,6 +471,17 @@ func (m *moviePicker) View() string {
 		return header + "\n" + m.subtitleView()
 	}
 	if m.palette.Active() {
+		if t, ok := m.actionTitle(); ok {
+			subject := t.Name
+			if t.Year != "" {
+				subject += " (" + t.Year + ")"
+			}
+			if m.stage == movieEpisodes {
+				e := m.episodes()[m.cursor[movieEpisodes]]
+				subject += fmt.Sprintf(" S%02dE%02d", e.Season, e.Number)
+			}
+			header += "\n" + TitleStyle.Render(clipANSI("Selected: "+subject, max(1, m.width-2)))
+		}
 		return header + "\n" + OverlayBorderStyle.Render(m.palette.View(m.width-2, m.height-5)) + "\n" + HelpStyle.Render("Type to filter · ↑/↓ select · Enter run · Esc close")
 	}
 	if m.dialog.mode != movieAccountClosed {
@@ -502,6 +527,9 @@ func (m *moviePicker) View() string {
 	}
 	if m.canAttachSubtitle() {
 		help = "s subtitle file · " + help
+	}
+	if _, ok := m.actionTitle(); ok {
+		help = "Space actions · " + help
 	}
 	shortcuts := ": commands · L connect Trakt · Tab switch to Anime"
 	if m.connected {

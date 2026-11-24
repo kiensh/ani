@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"ani/internal/flixhq"
 	"ani/internal/trakt"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -50,12 +51,56 @@ type traktWriteMsg struct {
 	err  error
 }
 
+// Space and : use the same actions for the highlighted title. Neither opens
+// a Trakt connection just to display choices; the existing confirmation flow
+// owns title matching and writes.
+func (m *moviePicker) actionTitle() (flixhq.Title, bool) {
+	if m.cancel != nil || m.subPrompt != nil || m.dialog.mode != movieAccountClosed || m.track != nil || m.play {
+		return flixhq.Title{}, false
+	}
+	t, ok := m.focusedMovie()
+	return t, ok && m.rowCount() > 0
+}
+
+func (m *moviePicker) titleActions() []Command {
+	t, ok := m.actionTitle()
+	if !ok {
+		return nil
+	}
+	var cmds []Command
+	if m.view != movieWatchlist {
+		label := "Add to My Watchlist"
+		if t.Kind == "series" {
+			label = "Add series to My Watchlist"
+		}
+		cmds = append(cmds, Command{Category: "Actions", Title: label, Intent: "trakt:add-watchlist", Keywords: "save plan to watch trakt status w"})
+	}
+	if t.Kind == "movie" || m.stage == movieEpisodes {
+		label := "Mark movie as watched"
+		if m.stage == movieEpisodes {
+			label = "Mark episode as watched"
+		}
+		cmds = append(cmds, Command{Category: "Actions", Title: label, Intent: "trakt:mark-watched", Keywords: "complete seen history trakt status m"})
+	}
+	if m.stage == movieTitles && m.view == movieWatchlist {
+		cmds = append(cmds, Command{Category: "Actions", Title: "Find on FlixHQ", Intent: "watchlist:find", Keywords: "match play provider episodes"})
+	}
+	return cmds
+}
+
 func (m *moviePicker) openTrackForm(watchlist bool) tea.Cmd {
+	t, ok := m.actionTitle()
+	if !ok {
+		return nil
+	}
+	if watchlist && m.view == movieWatchlist {
+		m.notice = t.Name + " is already on your Trakt watchlist."
+		return nil
+	}
 	if !m.connected {
 		m.offerLogin()
 		return nil
 	}
-	t := m.titles[m.cursor[movieTitles]]
 	f := &movieTrackForm{watchlist: watchlist, name: t.Name, kind: t.Kind, year: t.Year}
 	if !watchlist && t.Kind == "series" {
 		if m.stage != movieEpisodes {
@@ -146,16 +191,25 @@ func (m *moviePicker) trackKey(key string) tea.Cmd {
 	return nil
 }
 
-func (m *moviePicker) savedTrack(msg traktWriteMsg) {
+func (m *moviePicker) savedTrack(msg traktWriteMsg) tea.Cmd {
 	f := m.track
 	if f == nil || !f.saving || m.cancel == nil || msg.id != m.request {
-		return
+		return nil
 	}
 	m.stopLoad()
 	m.track = nil
 	if msg.err != nil {
 		m.problem = msg.err.Error()
-		return
+		return nil
+	}
+	// Trakt is authoritative: adding to the watchlist, or marking a title
+	// watched, can change its membership and rank. Keep the search results
+	// in place but don't restore an old copy of the watchlist on Esc.
+	var refresh tea.Cmd
+	if m.view == movieWatchlist {
+		refresh = m.loadBrowse()
+	} else if m.home.view == movieWatchlist {
+		m.home.stale = true
 	}
 	if f.watchlist {
 		m.notice = msg.name + " is on your Trakt watchlist."
@@ -164,6 +218,7 @@ func (m *moviePicker) savedTrack(msg traktWriteMsg) {
 	} else {
 		m.notice = msg.name + " is marked watched on Trakt."
 	}
+	return refresh
 }
 
 func (m *moviePicker) trackView() string {
