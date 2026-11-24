@@ -36,7 +36,7 @@ func RunPlay(magnet, title, player string, dryRun bool) error {
 
 // RunPlayURL passes a stream URL to mpv: direct HLS for HiAnime, or a Vidmoly
 // embed that mpv opens with its yt-dlp hook. Unlike RunPlay, neither needs a
-// torrent client. Preserve the provider's referrer and optional subtitle URL.
+// torrent client. Preserve the provider's referrer and optional subtitle URL or file path.
 func RunPlayURL(streamURL, title, referer, subURL, player string, dryRun bool) error {
 	if player == "" {
 		player = "mpv"

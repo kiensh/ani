@@ -26,7 +26,7 @@ type Release struct {
 
 	// Stream-only (HiAnime/FlixHQ). When set, the item plays via mpv+URL, not
 	// webtorrent. Referer is the stream host's required referer (it answers
-	// 403 without it); SubtitleURL is an optional remote subtitle track.
+	// 403 without it). SubtitleURL is an optional subtitle URL or local sidecar path.
 	StreamURL   string
 	Referer     string
 	SubtitleURL string

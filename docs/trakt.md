@@ -16,6 +16,10 @@ Movies & TV opens on **My Watchlist**, even when the list is empty. If you skip 
 
 Highlight a provider title to see its poster, synopsis and available details; on narrow terminals the preview sits below the list. Loading a preview does not play or track anything.
 
+## Subtitles in Movies & TV
+
+**Enter** plays the selected movie or episode and attaches full English captions when the provider has them, even if the video has no embedded track. It prefers a regular English track, then English SDH/CC; a forced-only or commentary track is not a substitute for the dialogue. If the provider has none, the video still plays. **s** (or `:` → **Play with subtitle file…**) lets you paste a local `.srt`, `.vtt`, `.ass`, or `.ssa` path and press **Enter** to play with that file instead. From My Watchlist, first choose the matching provider movie or episode. The local file is used only for this playback; it is not uploaded, copied into your account, or deleted. Provider captions are downloaded into a private temporary file and removed when the player exits. In mpv, **j** cycles subtitle tracks and **v** toggles their visibility (default bindings). Use a subtitle file that matches the cut of the movie to keep dialogue in sync.
+
 ## Track a selection
 
 In `ani --movies`, highlight a movie or show and press **w** to add it to your Trakt watchlist. Press **m** on a movie or a specific episode to mark it watched. The picker shows candidate Trakt titles (including year and ID); choose the right one and press **Enter** to confirm, or **Esc** to cancel. A series watchlist entry refers to the series; a watched entry refers only to the selected season/episode, never an entire series. Playback, closing `mpv`, and `--dry-run` never mark anything watched. This records watch history, not a playback timestamp.

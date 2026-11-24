@@ -19,25 +19,23 @@ import (
 // catalog supplies a movie/episode page; only that selected page is resolved.
 func browseMovies(opt *Options, state *tui.MovieState) (tui.MediaSource, error) {
 	c := flixhq.New()
-	play := func(t flixhq.Title, ep *flixhq.Episode) error {
+	play := func(t flixhq.Title, ep *flixhq.Episode, subtitleFile string) error {
 		if !opt.DryRun {
 			if _, err := exec.LookPath("yt-dlp"); err != nil {
 				return fmt.Errorf("FlixHQ playback needs yt-dlp on PATH (used by mpv)")
 			}
 			fmt.Fprintf(os.Stderr, "FlixHQ: finding Vidmoly stream for %s…\n", t.Name)
 		}
-		r, err := resolveMovie(context.Background(), c.Resolve, t, ep)
-		if err != nil {
-			return err
-		}
-		AnnouncePick(r)
-		if err := player.RunPlayURL(r.StreamURL, r.Title, r.Referer, r.SubtitleURL, opt.Player, opt.DryRun); err != nil {
-			return fmt.Errorf("Vidmoly playback: %w (the link may be unavailable; use mpv with an up-to-date yt-dlp)", err)
-		}
-		return nil
+		return playCaptionedMovie(context.Background(), c, t, ep, subtitleFile, os.Stderr, func(r *playable.Release) error {
+			AnnouncePick(r)
+			if err := player.RunPlayURL(r.StreamURL, r.Title, r.Referer, r.SubtitleURL, opt.Player, opt.DryRun); err != nil {
+				return fmt.Errorf("Vidmoly playback: %w (the link may be unavailable; use mpv with an up-to-date yt-dlp)", err)
+			}
+			return nil
+		})
 	}
 	if opt.DryRun {
-		return "", dryRunMovies(c, opt.Query, play)
+		return "", dryRunMovies(c, opt.Query, func(t flixhq.Title, ep *flixhq.Episode) error { return play(t, ep, "") })
 	}
 	return tui.RunMoviePicker(opt.Query, c, play, trakt.New(), browser.Open, state)
 }

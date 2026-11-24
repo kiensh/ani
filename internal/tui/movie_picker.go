@@ -65,6 +65,8 @@ type moviePicker struct {
 	notice        string
 	source        MediaSource
 	play          bool
+	subPrompt     *movieSubtitleInput
+	subtitleFile  string // one playback only; never sent to a provider or Trakt
 	width, height int
 }
 
@@ -92,7 +94,7 @@ func newMoviePicker(query string, catalog MovieCatalog, account MovieAccount, op
 
 // RunMoviePicker releases the terminal before resolving and playing a selection.
 // Reuse the same list and cursor afterwards, including on a dead embed.
-func RunMoviePicker(query string, catalog MovieCatalog, play func(flixhq.Title, *flixhq.Episode) error, account MovieAccount, openURL func(string) error, state *MovieState) (MediaSource, error) {
+func RunMoviePicker(query string, catalog MovieCatalog, play func(flixhq.Title, *flixhq.Episode, string) error, account MovieAccount, openURL func(string) error, state *MovieState) (MediaSource, error) {
 	m := newMoviePicker(query, catalog, account, openURL, state)
 	defer m.stopLoad()
 	defer m.stopPreview()
@@ -108,7 +110,9 @@ func RunMoviePicker(query string, catalog MovieCatalog, play func(flixhq.Title, 
 		if m.stage == movieEpisodes {
 			episode = &m.episodes()[m.cursor[movieEpisodes]]
 		}
-		if err := play(m.titles[m.cursor[movieTitles]], episode); err != nil {
+		subtitleFile := m.subtitleFile
+		m.subtitleFile = ""
+		if err := play(m.titles[m.cursor[movieTitles]], episode, subtitleFile); err != nil {
 			m.problem = err.Error()
 		} else if m.connected {
 			m.notice = "Finished watching? Press m to mark this selection watched on Trakt."
@@ -255,6 +259,9 @@ func (m *moviePicker) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.accountDone(msg)
 	case tea.KeyMsg:
 		key := msg.String()
+		if m.subPrompt != nil {
+			return m, m.subtitleKey(msg)
+		}
 		if key == "tab" {
 			return m, m.leave(MediaAnime)
 		}
@@ -365,6 +372,8 @@ func (m *moviePicker) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			*pos = max(0, *pos-max(1, m.height-6))
 		case "pgdown", "ctrl+d":
 			*pos = min(last, *pos+max(1, m.height-6))
+		case "s":
+			m.openSubtitleInput()
 		case "m", "w":
 			return m, m.openTrackForm(key == "w")
 		case "enter":
@@ -398,6 +407,9 @@ func (m *moviePicker) movieCommands() []Command {
 		Command{Category: "View", Title: "My Watchlist", Intent: "view:watchlist", Keywords: "home trakt saved movies series"},
 		Command{Category: "View", Title: "Recently Added", Intent: "view:recent", Keywords: "browse flixhq latest movies series"},
 	)
+	if m.canAttachSubtitle() {
+		cmds = append(cmds, Command{Category: "Playback", Title: "Play with subtitle file…", Intent: "play:subtitle", Keywords: "captions English local srt vtt ass ssa"})
+	}
 	login := "Connect Trakt"
 	if m.connected {
 		login = "Reauthorize Trakt"
@@ -411,6 +423,8 @@ func (m *moviePicker) movieCommands() []Command {
 
 func (m *moviePicker) applyMovieCommand(intent string) tea.Cmd {
 	switch intent {
+	case "play:subtitle":
+		m.openSubtitleInput()
 	case "source:anime":
 		return m.leave(MediaAnime)
 	case "view:recent", "view:watchlist":
@@ -439,6 +453,9 @@ func (m *moviePicker) View() string {
 		status = "connected"
 	}
 	header := HeaderStyle.Render("Source: Movies & TV") + ProviderStyle.Render("  ·  Provider: FlixHQ") + FaintStyle.Render("  ·  Trakt: "+status)
+	if m.subPrompt != nil {
+		return header + "\n" + m.subtitleView()
+	}
 	if m.palette.Active() {
 		return header + "\n" + OverlayBorderStyle.Render(m.palette.View(m.width-2, m.height-5)) + "\n" + HelpStyle.Render("Type to filter · ↑/↓ select · Enter run · Esc close")
 	}
@@ -482,6 +499,9 @@ func (m *moviePicker) View() string {
 		case movieResults:
 			help = "Enter open/play · Esc back · / search · v views · w watchlist · m watched · q exit"
 		}
+	}
+	if m.canAttachSubtitle() {
+		help = "s subtitle file · " + help
 	}
 	shortcuts := ": commands · L connect Trakt · Tab switch to Anime"
 	if m.connected {

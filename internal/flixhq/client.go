@@ -13,8 +13,10 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"ani/internal/playable"
 )
@@ -221,7 +223,17 @@ func (c *Client) Episodes(ctx context.Context, t Title) ([]Episode, error) {
 	return parseEpisodes(body, actual), nil
 }
 
+// Resolve returns the selected embed and, when available, its public English subtitle track.
 func (c *Client) Resolve(ctx context.Context, pageURL string) (*playable.Release, error) {
+	return c.resolve(ctx, pageURL, true)
+}
+
+// ResolveVideoOnly selects the same embed without looking up provider subtitles.
+func (c *Client) ResolveVideoOnly(ctx context.Context, pageURL string) (*playable.Release, error) {
+	return c.resolve(ctx, pageURL, false)
+}
+
+func (c *Client) resolve(ctx context.Context, pageURL string, subtitles bool) (*playable.Release, error) {
 	u, kind := catalogLink(pageURL, nil)
 	if kind != "movie" && kind != "episode" {
 		return nil, errors.New("flixhq: expected a movie or episode page")
@@ -266,30 +278,171 @@ func (c *Client) Resolve(ctx context.Context, pageURL string) (*playable.Release
 		return nil, errors.New("flixhq: invalid player list")
 	}
 	for _, s := range servers {
-		if strings.EqualFold(s.Name, "Vidmoly") {
-			if embed := canonicalEmbed(s.Link); embed != "" {
-				return &playable.Release{Title: "Vidmoly", Group: "Vidmoly", StreamURL: embed, Referer: actual.String()}, nil
-			}
+		if !strings.EqualFold(s.Name, "Vidmoly") {
+			continue
 		}
+		embed, manifest := vidmolyEmbed(s.Link)
+		if embed == "" {
+			continue
+		}
+		r := &playable.Release{Title: "Vidmoly", Group: "Vidmoly", StreamURL: embed, Referer: actual.String()}
+		if subtitles && manifest != "" {
+			r.SubtitleURL = c.englishTrack(ctx, manifest)
+		}
+		if err := ctx.Err(); err != nil { // Optional lookup failure is OK; caller cancellation isn't.
+			return nil, err
+		}
+		return r, nil
 	}
 	return nil, errors.New("flixhq: no supported Vidmoly player for this page")
 }
 
-// Vidmoly sometimes appends a subget subtitle hint. The embed plays without
-// it: validate the link and return only its canonical HTTPS host and path.
-func canonicalEmbed(link string) string {
+// Only the selected embed can supply a manifest. en_sub is an advisory flag,
+// not a subtitle URL. Never hand the query (including unsupported hints) to the player.
+func vidmolyEmbed(link string) (embed, manifest string) {
 	if len(link) > 16<<10 || strings.ContainsAny(link, "#\\\r\n") {
-		return ""
+		return "", ""
 	}
 	base, query, hasQuery := strings.Cut(link, "?")
 	if !embedURL.MatchString(base) {
-		return ""
+		return "", ""
 	}
 	if hasQuery {
-		q, err := url.ParseQuery(query)
-		if err != nil || len(q) != 1 || len(q["subget"]) != 1 {
-			return ""
+		raw, ok := strings.CutPrefix(query, "subget=")
+		if !ok || strings.ContainsAny(raw, "&;") {
+			return "", "" // Unknown or duplicate parameters aren't a supported embed.
+		}
+		if hint, err := url.QueryUnescape(raw); err == nil && manifestURL.MatchString(hint) {
+			return base, hint
 		}
 	}
-	return base
+	return base, ""
+}
+
+const (
+	maxManifest = 64 << 10
+	maxVTT      = 2 << 20
+)
+
+var (
+	// Match the entire wire URL. Only base64 padding can be percent-escaped in
+	// a filename; never unescape a path and accidentally admit a separator.
+	manifestURL = regexp.MustCompile(`^https://qqqcdn\.cloud/subtitles/(?:fs|fm)/token/[a-zA-Z0-9]{1,512}\.json$`)
+	trackURL    = regexp.MustCompile(`^https://qqqcdn\.cloud/inter[ms]/[0-9a-fA-F]{2}/[a-zA-Z0-9_+-]+(?:=|%3[Dd]){0,2}\.vtt$`)
+)
+
+func validTrack(raw string) bool { return len(raw) <= 2048 && trackURL.MatchString(raw) }
+
+// Both callers validate their URL before getting here. checkRedirect prohibits
+// all non-catalog redirects. These GETs carry no catalog headers or cookies.
+func (c *Client) subtitleGET(ctx context.Context, raw, accept string, limit int64, timeout time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
+	if err != nil {
+		return nil, errors.New("flixhq: invalid subtitle request")
+	}
+	req.Header.Set("Accept", accept)
+	b, _, err := c.read(req, limit)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return b, err
+}
+
+func (c *Client) englishTrack(ctx context.Context, manifest string) string {
+	body, err := c.subtitleGET(ctx, manifest, "application/json", maxManifest, 2*time.Second)
+	if err != nil {
+		return ""
+	}
+	var tracks []json.RawMessage
+	if json.Unmarshal(body, &tracks) != nil || len(tracks) > 256 {
+		return ""
+	}
+	var best string
+	bestRank, bestDefault := 0, false
+	for _, row := range tracks {
+		var t struct {
+			File, Label, Kind string
+			Default           bool
+		}
+		if json.Unmarshal(row, &t) != nil || !validTrack(t.File) {
+			continue // One malformed row needn't hide the other tracks.
+		}
+		if !strings.EqualFold(t.Kind, "captions") && !strings.EqualFold(t.Kind, "subtitles") {
+			continue
+		}
+		rank := englishRank(t.Label)
+		if rank > 0 && (rank > bestRank || (rank == bestRank && t.Default && !bestDefault)) {
+			best, bestRank, bestDefault = t.File, rank, t.Default
+		}
+	}
+	return best
+}
+
+// Prefer ordinary full-dialogue captions to SDH/CC. Forced-only tracks cover
+// signs or foreign dialogue, not the full dub. Neither they, commentary nor
+// unknown language qualifiers qualify just because the provider marks them default.
+func englishRank(label string) int {
+	if len(label) > 128 {
+		return 0
+	}
+	words := strings.FieldsFunc(strings.ToLower(label), func(r rune) bool { return strings.ContainsRune(" \t-[]()_/", r) })
+	if len(words) == 0 || (words[0] != "english" && words[0] != "en" && words[0] != "eng") {
+		return 0
+	}
+	rank := 2
+	for _, word := range words[1:] {
+		switch word {
+		case "english", "en", "eng", "us", "uk", "gb", "full", "normal", "regular", "subtitles":
+		case "sdh", "cc", "hearing", "impaired", "closed", "captions":
+			rank = 1
+		default:
+			if _, err := strconv.ParseUint(word, 10, 16); err != nil { // e.g. "English - [Eng] 2"
+				return 0
+			}
+		}
+	}
+	return rank
+}
+
+// FetchEnglishVTT downloads a track returned by Resolve. A CDN error page,
+// playlist or binary payload must never become the player's subtitle file.
+func (c *Client) FetchEnglishVTT(ctx context.Context, trackURL string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !validTrack(trackURL) {
+		return nil, errors.New("flixhq: invalid subtitle URL")
+	}
+	b, err := c.subtitleGET(ctx, trackURL, "text/vtt", maxVTT, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if !validVTT(b) {
+		return nil, errors.New("flixhq: expected WebVTT subtitles")
+	}
+	return b, nil
+}
+
+const timestamp = `(?:[0-9]{2,}:)?[0-5][0-9]:[0-5][0-9]\.[0-9]{3}`
+
+var vttCue = regexp.MustCompile(`[\r\n]` + timestamp + `[ \t]+-->[ \t]+` + timestamp + `(?:[ \t\r\n]|$)`)
+
+func validVTT(b []byte) bool {
+	b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf"))
+	i := bytes.IndexAny(b, "\r\n")
+	if i < 0 || !utf8.Valid(b) {
+		return false
+	}
+	header, ok := bytes.CutPrefix(b[:i], []byte("WEBVTT"))
+	if !ok || (len(header) != 0 && header[0] != ' ' && header[0] != '\t') || bytes.Contains(header, []byte("-->")) {
+		return false
+	}
+	for _, c := range b {
+		if (c < ' ' && c != '\t' && c != '\r' && c != '\n') || c == 0x7f {
+			return false
+		}
+	}
+	return vttCue.Match(b[i:])
 }

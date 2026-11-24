@@ -949,7 +949,9 @@ Not logged in:   AnimeTosho series search, or the latest uploads.
 Movies & TV:     Opens on My Watchlist; / searches and v switches to Recently Added.
                  Highlight a title to preview its poster and details before playing.
                  The picker offers Trakt sign-in, or you can browse without it.
-                 L opens Trakt login. Playback uses mpv with yt-dlp on PATH.
+                 L opens Trakt login. Enter uses English captions when available;
+                 s plays the selected movie/episode with your own subtitle file.
+                 Playback uses mpv with yt-dlp on PATH.
 
 Anime provider: set "source" in config.json to "torrent" (default: AnimeTosho torrents
           via webtorrent) or "hianime" (hianime.fm streaming via mpv — sub/dub +

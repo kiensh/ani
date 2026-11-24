@@ -86,7 +86,7 @@ func (m *moviePicker) focusedMovie() (flixhq.Title, bool) {
 func (m *moviePicker) syncPreview() tea.Cmd {
 	p := &m.preview
 	t, ok := m.focusedMovie()
-	if !ok || t.URL == "" || m.width < 1 || m.height < 1 || m.play || m.source != "" || m.dialog.mode != movieAccountClosed || m.palette.Active() || m.track != nil {
+	if !ok || t.URL == "" || m.width < 1 || m.height < 1 || m.play || m.source != "" || m.dialog.mode != movieAccountClosed || m.palette.Active() || m.track != nil || m.subPrompt != nil {
 		m.stopPreview()
 		return nil
 	}

@@ -8,9 +8,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Exercise the real http.Client (including redirect handling) but never dial
@@ -437,5 +439,232 @@ func TestCatalogFailures(t *testing.T) {
 	_, err := c.Search(t.Context(), "campus")
 	if err == nil || calls != 2 || !strings.Contains(err.Error(), fmt.Sprint(http.StatusBadGateway)) || strings.Contains(err.Error(), "opaque-example") {
 		t.Fatalf("unexpected catalog error: %v, %d requests", err, calls)
+	}
+}
+
+const (
+	cdn           = "https://qqqcdn.cloud"
+	movieManifest = cdn + "/subtitles/fs/token/abc123.json"
+	showManifest  = cdn + "/subtitles/fm/token/def456.json"
+	movieTrack    = cdn + "/interm/4d/TestMovie%3D%3D.vtt"
+	showTrack     = cdn + "/inters/0a/TestShow.vtt"
+)
+
+// Test every CDN request on the existing transport seam, with the same
+// headers, time budget and redirect policy a real request would have.
+func subtitleClient(t *testing.T, pagePath, players string, onCDN http.HandlerFunc) *Client {
+	t.Helper()
+	return offline(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.String() == "https://"+primary+pagePath:
+			io.WriteString(w, pageFixture)
+		case r.Method == "POST" && r.URL.String() == "https://"+primary+ajaxPath:
+			io.WriteString(w, players)
+		case r.Method == "GET" && r.URL.Host == "qqqcdn.cloud" && onCDN != nil:
+			for _, h := range []string{"Referer", "Origin", "Cookie", "Authorization", "X-Requested-With"} {
+				if r.Header.Get(h) != "" {
+					t.Fatalf("unexpected CDN header %s", h)
+				}
+			}
+			deadline, ok := r.Context().Deadline()
+			if !ok || time.Until(deadline) > 5*time.Second {
+				t.Fatal("missing short CDN request deadline")
+			}
+			onCDN(w, r)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL)
+		}
+	})
+}
+
+func TestResolveEnglishSubtitles(t *testing.T) {
+	for _, tc := range []struct{ path, hint, manifest, file, label string }{
+		{movie, url.QueryEscape(movieManifest), movieManifest, movieTrack, "English - [Eng] 2"},
+		{episode, showManifest, showManifest, showTrack, "English"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			const decoy = "?subget=" + cdn + "/subtitles/fs/token/decoy.json"
+			players := `[{"name":"Other","link":"` + embed + decoy + `"},
+				{"name":"Vidmoly","link":"https://untrusted.test/embed-bad.html` + decoy + `"},
+				{"name":"Vidmoly","en_sub":1,"link":"` + embed + `?subget=` + tc.hint + `"},
+				{"name":"Vidmoly","link":"` + embed + decoy + `"}]`
+			calls := 0
+			c := subtitleClient(t, tc.path, players, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.String() != tc.manifest || r.Header.Get("Accept") != "application/json" {
+					t.Fatalf("unexpected manifest request %v", r.URL)
+				}
+				calls++
+				io.WriteString(w, `[{"file":"`+showTrack+`","label":"English - Sdh [Eng] 3","kind":"captions","default":true},
+					{"file":"`+tc.file+`","label":"`+tc.label+`","kind":"captions"}]`)
+			})
+			page := "https://" + primary + tc.path
+			video, err := c.ResolveVideoOnly(t.Context(), page)
+			if err != nil || calls != 0 || video.SubtitleURL != "" || video.StreamURL != embed {
+				t.Fatalf("video-only: %+v, %v, %d manifest requests", video, err, calls)
+			}
+			r, err := c.Resolve(t.Context(), page)
+			if err != nil || calls != 1 || r.SubtitleURL != tc.file || r.StreamURL != video.StreamURL || r.Referer != video.Referer {
+				t.Fatalf("resolve: %+v, %v, %d manifest requests", r, err, calls)
+			}
+		})
+	}
+}
+
+func TestSubtitleHintAllowlist(t *testing.T) {
+	for _, hint := range []string{
+		"", "http://qqqcdn.cloud/subtitles/fs/token/abc123.json", "//qqqcdn.cloud/subtitles/fs/token/abc123.json",
+		strings.Replace(movieManifest, ".cloud/", ".cloud.ad.test/", 1), strings.Replace(movieManifest, ".cloud/", ".cloud:443/", 1),
+		strings.Replace(movieManifest, "//", "//u@", 1), movieManifest + "?extra=x", movieManifest + "#ad", movieManifest + "\n",
+		strings.Replace(movieManifest, "/fs/", "/../", 1), strings.Replace(movieManifest, "/fs/", "/users/", 1),
+		strings.Replace(movieManifest, "abc123", "abc%2F123", 1), url.QueryEscape(movieManifest), movieTrack,
+	} {
+		emb, got := vidmolyEmbed(embed + "?subget=" + url.QueryEscape(hint))
+		if emb != embed || got != "" {
+			t.Errorf("hint %q: got embed %q, manifest %q", hint, emb, got)
+		}
+	}
+	// Neither a URL in en_sub nor another server's manifest belongs to the
+	// chosen embed. Resolve must not issue a CDN request for either one.
+	players := `[{"name":"Vidmoly","link":"` + embed + `","en_sub":"` + movieManifest + `"},
+		{"name":"Vidmoly","link":"` + embed + `?subget=` + movieManifest + `"}]`
+	c := subtitleClient(t, movie, players, nil)
+	if r, err := c.Resolve(t.Context(), "https://"+primary+movie); err != nil || r.StreamURL != embed || r.SubtitleURL != "" {
+		t.Fatalf("unexpected release: %+v, %v", r, err)
+	}
+}
+
+func TestEnglishTrackSelection(t *testing.T) {
+	track := func(file, label, kind string, def bool) string {
+		return fmt.Sprintf(`{"file":%q,"label":%q,"kind":%q,"default":%t}`, file, label, kind, def)
+	}
+	cc := track(showTrack, "English (CC)", "captions", false)
+	forced := track(movieTrack, "English - Forced [Eng] 1", "subtitles", true)
+	for _, tc := range []struct{ name, rows, want string }{
+		{"CC before forced", forced + "," + cc, showTrack},
+		{"forced-only is not full dialogue", forced, ""},
+		{"no signs-only track", track(movieTrack, "English (Signs and Songs)", "captions", true), ""},
+		{"no foreign default", track(showTrack, "French [Eng]", "captions", true), ""},
+		{"no commentary", track(showTrack, "English - Director Commentary", "captions", true), ""},
+		{"no thumbnails", track(showTrack, "English", "thumbnails", true), ""},
+		{"skip unsafe normal", track("https://other.test/sub.vtt", "English", "captions", true) + "," + cc, showTrack},
+		{"skip malformed sibling", `{"label":false},` + cc, showTrack},
+		{"default breaks equal rank tie", track(showTrack, "ENG", "captions", false) + "," + track(movieTrack, "English", "captions", true), movieTrack},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := subtitleClient(t, movie, "", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "["+tc.rows+"]") })
+			if got := c.englishTrack(t.Context(), movieManifest); got != tc.want {
+				t.Errorf("English track = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOptionalManifestFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, location string
+		status               int
+	}{
+		{"empty list", "[]", "", 200}, {"invalid JSON", `[] {}`, "", 200},
+		{"oversize", strings.Repeat(" ", maxManifest) + `[]`, "", 200}, {"unavailable", "", "", 503},
+		{"redirect", "", movieManifest + "?data=ignored", 302},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			players := `[{"name":"Vidmoly","en_sub":1,"link":"` + embed + `?subget=` + movieManifest + `"}]`
+			c := subtitleClient(t, movie, players, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if tc.location != "" {
+					w.Header().Set("Location", tc.location)
+				}
+				w.WriteHeader(tc.status)
+				io.WriteString(w, tc.body)
+			})
+			r, err := c.Resolve(t.Context(), "https://"+primary+movie)
+			if err != nil || calls != 1 || r.StreamURL != embed || r.SubtitleURL != "" {
+				t.Fatalf("failed optional lookup: %+v, %v, %d requests", r, err, calls)
+			}
+		})
+	}
+}
+
+func TestCancelSubtitleRequests(t *testing.T) {
+	for _, fetch := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(t.Context())
+		players := `[{"name":"Vidmoly","link":"` + embed + `?subget=` + movieManifest + `"}]`
+		c := subtitleClient(t, movie, players, func(w http.ResponseWriter, r *http.Request) { cancel(); w.WriteHeader(503) })
+		var err error
+		if fetch {
+			_, err = c.FetchEnglishVTT(ctx, movieTrack)
+		} else {
+			_, err = c.Resolve(ctx, "https://"+primary+movie)
+		}
+		cancel()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation (fetch=%t): %v", fetch, err)
+		}
+	}
+}
+
+func TestFetchEnglishVTT(t *testing.T) {
+	const cue = "00:00:03.150 --> 00:00:05.000\nInto the café.\n"
+	for _, tc := range []struct{ file, vtt string }{
+		{movieTrack, "WEBVTT\n\n" + cue},
+		{showTrack, "\xef\xbb\xbfWEBVTT - English\r\n\r\n1\r\n00:03.150 --> 00:05.000 align:start\r\nHi.\r\n"},
+	} {
+		c := subtitleClient(t, "", "", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.String() != tc.file || r.Header.Get("Accept") != "text/vtt" {
+				t.Fatalf("unexpected VTT request: %s", r.URL)
+			}
+			io.WriteString(w, tc.vtt)
+		})
+		b, err := c.FetchEnglishVTT(t.Context(), tc.file)
+		if err != nil || string(b) != tc.vtt {
+			t.Fatalf("unexpected VTT: %q, %v", b, err)
+		}
+	}
+}
+
+func TestRejectInvalidTrackURLs(t *testing.T) {
+	c := subtitleClient(t, "", "", nil)
+	for _, raw := range []string{
+		"file:///tmp/local.vtt", "//qqqcdn.cloud/interm/4d/a.vtt", strings.Replace(movieTrack, "https", "http", 1),
+		strings.Replace(movieTrack, "//", "//u@", 1), strings.Replace(movieTrack, ".cloud/", ".cloud:443/", 1),
+		strings.Replace(movieTrack, ".cloud/", ".cloud.ad.test/", 1), movieTrack + "?", movieTrack + "#", movieTrack + "\n",
+		movieManifest, cdn + "/other/4d/a.vtt", cdn + "/inters/0a/../a.vtt", cdn + "/interm/4d/a%2fb.vtt",
+		cdn + "/interm/4d/a%5cb.vtt", cdn + "/interm/4d/a%253D.vtt", cdn + "/interm/4d/a%00.vtt",
+		cdn + "/interm/4d/a.m3u8", cdn + "/interm/4d/" + strings.Repeat("a", 2048) + ".vtt",
+	} {
+		if b, err := c.FetchEnglishVTT(t.Context(), raw); err == nil || b != nil {
+			t.Errorf("accepted %q", raw)
+		}
+	}
+}
+
+func TestRejectInvalidVTTResponses(t *testing.T) {
+	const real = "WEBVTT\n\n00:00:03.150 --> 00:00:05.000\nHello\n"
+	for _, tc := range []struct {
+		name, body, location string
+		status               int
+	}{
+		{"HTML", "<html>WEBVTT</html>", "", 200}, {"playlist", "#EXTM3U\nhttp://somewhere/stream", "", 200},
+		{"wrong signature", "WEBVTTx" + real[6:], "", 200}, {"missing cues", "WEBVTT\n\nNo captions", "", 200},
+		{"binary", real + "\x00", "", 200}, {"invalid UTF-8", real + "\xff", "", 200},
+		{"oversize", real + strings.Repeat("a", maxVTT), "", 200}, {"not found", real, "", 404},
+		{"CDN redirect", "", showTrack, 302}, {"external redirect", "", "http://other.test/a.vtt", 302},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			c := subtitleClient(t, "", "", func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "text/vtt") // Not evidence of a valid track.
+				w.Header().Set("Location", tc.location)
+				w.WriteHeader(tc.status)
+				io.WriteString(w, tc.body)
+			})
+			b, err := c.FetchEnglishVTT(t.Context(), movieTrack)
+			if b != nil || err == nil || calls != 1 || strings.Contains(err.Error(), "TestMovie") {
+				t.Fatalf("response not rejected cleanly: %d bytes, %v, %d calls", len(b), err, calls)
+			}
+		})
 	}
 }
