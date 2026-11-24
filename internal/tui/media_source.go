@@ -19,6 +19,6 @@ func mediaSourceCommands(active MediaSource) []Command {
 	}
 	return []Command{
 		{Category: "Source", Title: label(MediaAnime, "Anime"), Intent: "source:anime", Keywords: "anime MAL MyAnimeList"},
-		{Category: "Source", Title: label(MediaMovies, "Movies & TV"), Intent: "source:movies", Keywords: "films series FlixHQ Trakt"},
+		{Category: "Source", Title: label(MediaMovies, "Movies & TV"), Intent: "source:movies", Keywords: "films series Trakt watchlist history"},
 	}
 }

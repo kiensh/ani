@@ -6,19 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strconv"
-	"strings"
 	"time"
-	"unicode"
 )
-
-// Title identifies a Trakt movie or series. ID is a Trakt ID, not a provider
-// ID. The kind and ID together identify an item; names and years need not be unique.
-type Title struct {
-	Name, Kind string
-	Year, ID   int
-}
 
 // HistoryItem describes one play, not an aggregate. Title is the parent series
 // for episodes; season zero is a special. Movies have no season or episode.
@@ -28,116 +18,14 @@ type HistoryItem struct {
 	WatchedAt       time.Time
 }
 
-type traktIDs struct {
-	Trakt int `json:"trakt"`
-}
-
-type mediaTitle struct {
-	Title string
-	Year  int
-	IDs   traktIDs
-}
-
-func (m *mediaTitle) title(kind string) (Title, bool) {
-	if m == nil || m.IDs.Trakt <= 0 {
-		return Title{}, false
-	}
-	// Remote labels go directly into the terminal. Remove control and format
-	// characters (including bidi overrides), then collapse line separators.
-	s := strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return ' '
-		}
-		return r
-	}, m.Title)
-	name := strings.Join(strings.Fields(s), " ")
-	return Title{Name: name, Kind: kind, Year: m.Year, ID: m.IDs.Trakt}, name != ""
-}
-
-type mediaRow struct {
-	Type        string
-	Movie, Show *mediaTitle
-}
-
-func (r mediaRow) title() (Title, bool) {
-	switch r.Type {
-	case "movie":
-		return r.Movie.title("movie")
-	case "show":
-		return r.Show.title("series")
-	default:
-		return Title{}, false
-	}
-}
-
-func mediaType(kind string) (string, error) {
-	switch kind {
-	case "movie":
-		return "movie", nil
-	case "series":
-		return "show", nil
-	default:
-		return "", errors.New("Trakt: expected a movie or series")
-	}
-}
-
-// Search returns candidates for explicit selection, with exact results first
-// and then broader results. A lone candidate is not proof of an identity match.
-func (c *Client) Search(ctx context.Context, kind, name string) ([]Title, error) {
-	apiType, err := mediaType(kind)
-	if err != nil {
-		return nil, err
-	}
-	name = strings.TrimSpace(name)
-	if name == "" || len(name) > 512 {
-		return nil, errors.New("Trakt: enter a title of at most 512 bytes")
-	}
-	// https://github.com/trakt/trakt-api/blob/master/projects/developer/src/lib/guides/search.md
-	var titles []Title
-	seen := make(map[int]bool)
-	for _, suffix := range []string{"/exact", ""} {
-		query := name
-		if suffix == "" {
-			// Punctuation in a catalog title is literal, not a search operator.
-			var escaped strings.Builder
-			for _, r := range name {
-				if strings.ContainsRune(`+-&|!(){}[]^"~*?:/\`, r) {
-					escaped.WriteByte('\\')
-				}
-				escaped.WriteRune(r)
-			}
-			query = escaped.String()
-		}
-		path := "/search/" + apiType + suffix + "?page=1&limit=50&query=" + url.QueryEscape(query)
-		var rows []mediaRow
-		if err := c.do(ctx, http.MethodGet, path, nil, &rows, false); err != nil {
-			return nil, err
-		}
-		if rows == nil {
-			return nil, errors.New("Trakt: missing title search results")
-		}
-		for _, r := range rows {
-			if t, ok := r.title(); ok && t.Kind == kind && !seen[t.ID] {
-				titles = append(titles, t)
-				seen[t.ID] = true
-			}
-		}
-	}
-	return titles, nil
-}
-
 // Watchlist reads movies and shows (not season/episode list entries) in the
 // account's ranked order. A failed page never masquerades as a complete list.
 func (c *Client) Watchlist(ctx context.Context) ([]Title, error) {
 	var titles []Title
-	type key struct {
-		kind string
-		id   int
-	}
-	seen := make(map[key]bool)
+	seen := make(map[titleKey]bool)
 	for page := 1; ; page++ {
 		var rows []mediaRow
-		path := fmt.Sprintf("/users/me/watchlist/movie,show/rank?page=%d&limit=100", page)
+		path := fmt.Sprintf("/users/me/watchlist/movie,show/rank?extended=full&page=%d&limit=100", page)
 		h, err := c.doWithHeaders(ctx, http.MethodGet, path, nil, &rows, true)
 		if err != nil {
 			return nil, err
@@ -150,33 +38,97 @@ func (c *Client) Watchlist(ctx context.Context) ([]Title, error) {
 		}
 		before := len(titles)
 		for _, r := range rows {
-			if t, ok := r.title(); ok && !seen[key{t.Kind, t.ID}] {
-				seen[key{t.Kind, t.ID}] = true
+			t, ok := r.title()
+			if !ok {
+				return nil, errors.New("Trakt: incomplete watchlist title")
+			}
+			if !seen[t.key()] {
+				seen[t.key()] = true
 				titles = append(titles, t)
 			}
+		}
+		if len(rows) != 0 && len(titles) == before {
+			return nil, errors.New("Trakt: watchlist pagination did not advance")
 		}
 		// Trakt can clamp the requested limit. Prefer its page count; when
 		// headers are absent, continue even after a short page until [] arrives.
 		if raw := h.Get("X-Pagination-Page-Count"); raw != "" {
 			count, err := strconv.Atoi(raw)
-			if err != nil || count < 0 || (count == 0 && len(rows) != 0) {
+			if count == 0 && err == nil && page == 1 && len(rows) == 0 {
+				return titles, nil
+			}
+			if err != nil || count < page || (count > page && len(rows) == 0) {
 				return nil, errors.New("Trakt: invalid watchlist page count")
 			}
-			if page >= count {
+			if page == count {
 				return titles, nil
 			}
 		} else if len(rows) == 0 {
 			return titles, nil
 		}
-		if len(titles) == before {
-			return nil, errors.New("Trakt: watchlist pagination did not advance")
+	}
+}
+
+// WatchedMovies uses the authenticated, unpaginated watched aggregate, not a
+// limited page of plays. Request minimal embedded movies to keep large accounts
+// within the response budget. TitleDetails can hydrate the focused movie.
+func (c *Client) WatchedMovies(ctx context.Context) ([]Title, error) {
+	var rows []struct {
+		Type  string
+		Movie *mediaTitle
+		Plays *int
+	}
+	h, err := c.doWithHeaders(ctx, http.MethodGet, "/sync/watched/movies", nil, &rows, true)
+	if err != nil {
+		return nil, err
+	}
+	if rows == nil {
+		return nil, errors.New("Trakt: missing watched movies")
+	}
+	// The sync contract promises ALL watched items. Don't interpret an
+	// unexpectedly partial or malformed response as the account's state.
+	if !completeAggregate(h, len(rows)) {
+		return nil, errors.New("Trakt: incomplete watched movie aggregate")
+	}
+	var titles []Title
+	seen := make(map[int]bool)
+	for _, row := range rows {
+		t, ok := row.Movie.title("movie")
+		if !ok || (row.Type != "" && row.Type != "movie") || (row.Plays != nil && *row.Plays < 1) {
+			return nil, errors.New("Trakt: invalid watched movie record")
 		}
+		if !seen[t.ID] {
+			seen[t.ID] = true
+			titles = append(titles, t)
+		}
+	}
+	return titles, nil
+}
+
+// The normal sync response has no pagination headers. If the server supplies
+// any, there must be evidence that this response is the entire dataset.
+func completeAggregate(h http.Header, n int) bool {
+	page := h.Get("X-Pagination-Page")
+	total := h.Get("X-Pagination-Item-Count")
+	if (page != "" && page != "1") || (total != "" && total != strconv.Itoa(n)) {
+		return false
+	}
+	switch h.Get("X-Pagination-Page-Count") {
+	case "":
+		return total != "" || (page == "" && h.Get("X-Pagination-Limit") == "")
+	case "0":
+		return n == 0
+	case "1":
+		return true
+	default:
+		return false
 	}
 }
 
 type mediaEpisode struct {
 	Season *int // Distinguish an absent season from an explicit season zero.
 	Number int
+	Title  string
 	IDs    traktIDs
 }
 
@@ -305,6 +257,19 @@ func (c *Client) MarkWatched(ctx context.Context, t Title, season, episode int) 
 	if err != nil {
 		return err
 	}
+	return c.markTargetWatched(ctx, item)
+}
+
+// MarkEpisodeWatched uses the ID retained from Episodes, without resolving a
+// show title or a season a second time. No write follows an inconclusive read.
+func (c *Client) MarkEpisodeWatched(ctx context.Context, ep Episode) error {
+	if ep.ID <= 0 || ep.Season < 0 || ep.Number <= 0 {
+		return errors.New("Trakt: choose a confirmed episode to mark watched")
+	}
+	return c.markTargetWatched(ctx, target{"episodes", ep.ID})
+}
+
+func (c *Client) markTargetWatched(ctx context.Context, item target) error {
 	already, err := c.watched(ctx, item)
 	if err != nil || already {
 		return err

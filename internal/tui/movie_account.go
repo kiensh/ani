@@ -13,6 +13,7 @@ import (
 type MovieAccount interface {
 	MovieTracker
 	Watchlist(context.Context) ([]trakt.Title, error)
+	WatchedMovies(context.Context) ([]trakt.Title, error)
 	Connected() bool
 	Login(context.Context, func(verificationURL, userCode string)) error
 	Logout() error
@@ -180,9 +181,7 @@ func (m *moviePicker) accountDone(msg movieAccountDoneMsg) tea.Cmd {
 	m.stopLoad()
 	m.refreshAccount() // failed reauthorization need not invalidate the old account
 	if !m.connected || msg.err == nil {
-		// Cached watchlist rows belong to the previous authorization, including
-		// a search's saved return address. Don't reveal them after an account change.
-		m.forgetWatchlist()
+		m.forgetAccountShelves()
 	}
 	if msg.err != nil {
 		if mode == movieAccountWaiting {

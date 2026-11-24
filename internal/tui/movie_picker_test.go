@@ -6,35 +6,35 @@ import (
 	"strings"
 	"testing"
 
-	"ani/internal/flixhq"
+	"ani/internal/trakt"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 type movieFixture struct {
-	titles      []flixhq.Title
-	recent      []flixhq.Title
-	recentCalls int
-	eps         []flixhq.Episode
-	err         error
-	lastQuery   string
-	series      string
+	titles, recent           []trakt.Title
+	recentCalls, searchCalls int
+	eps                      []trakt.Episode
+	err                      error
+	lastQuery                string
+	seriesID                 int
 }
 
-func (f *movieFixture) RecentlyAdded(context.Context) ([]flixhq.Title, error) {
+func (f *movieFixture) RecentReleases(context.Context) ([]trakt.Title, error) {
 	f.recentCalls++
 	return f.recent, f.err
 }
-func (f *movieFixture) Search(ctx context.Context, q string) ([]flixhq.Title, error) {
+func (f *movieFixture) SearchTitles(_ context.Context, q string) ([]trakt.Title, error) {
+	f.searchCalls++
 	f.lastQuery = q
 	return f.titles, f.err
 }
-func (f *movieFixture) Episodes(ctx context.Context, t flixhq.Title) ([]flixhq.Episode, error) {
-	f.series = t.URL
+func (f *movieFixture) Episodes(_ context.Context, t trakt.Title) ([]trakt.Episode, error) {
+	f.seriesID = t.ID
 	return f.eps, f.err
 }
 
 func TestMoviePickerNavigation(t *testing.T) {
-	f := &movieFixture{titles: []flixhq.Title{{Name: "Test", Kind: "movie", Year: "2010", URL: "/one"}, {Name: "Test", Kind: "series", Year: "2025", URL: "/two"}}, eps: []flixhq.Episode{{Season: 3, Number: 2, Name: "Other"}, {Season: 1, Number: 2, Name: "Second"}, {Season: 3, Number: 1, Name: "First"}}}
+	f := &movieFixture{titles: []trakt.Title{{Name: "Test", Kind: "movie", Year: 2010, ID: 101}, {Name: "Test", Kind: "series", Year: 2025, ID: 202}}, eps: []trakt.Episode{{Season: 3, Number: 2, Name: "Other", ID: 32}, {Season: 1, Number: 2, Name: "Second", ID: 12}, {Season: 3, Number: 1, Name: "First", ID: 31}}}
 	m := &moviePicker{MovieState: &MovieState{}, catalog: f, width: 80, height: 22}
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("사과 Pie")})
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -43,14 +43,14 @@ func TestMoviePickerNavigation(t *testing.T) {
 		t.Fatalf("title search: %s", m.View())
 	}
 	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !m.play || cmd == nil || f.series != "" {
+	if !m.play || cmd == nil || f.seriesID != 0 {
 		t.Fatal("movie should play immediately without requesting episodes")
 	}
 	m.play = false
 	m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m.Update(cmd())
-	if f.series != "/two" || m.stage != movieSeasons || m.seasons[0] != 1 || m.seasons[1] != 3 {
+	if f.seriesID != 202 || f.searchCalls != 1 || m.stage != movieSeasons || m.seasons[0] != 1 || m.seasons[1] != 3 {
 		t.Fatalf("seasons: %s", m.View())
 	}
 	m.Update(tea.KeyMsg{Type: tea.KeyDown})

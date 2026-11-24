@@ -7,15 +7,15 @@ import (
 	"strings"
 	"unicode"
 
-	"ani/internal/flixhq"
+	"ani/internal/trakt"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 // MovieCatalog is deliberately separate from MAL: even a numeric film title is a search.
 type MovieCatalog interface {
-	RecentlyAdded(context.Context) ([]flixhq.Title, error)
-	Search(context.Context, string) ([]flixhq.Title, error)
-	Episodes(context.Context, flixhq.Title) ([]flixhq.Episode, error)
+	RecentReleases(context.Context) ([]trakt.Title, error)
+	SearchTitles(context.Context, string) ([]trakt.Title, error)
+	Episodes(context.Context, trakt.Title) ([]trakt.Episode, error)
 }
 
 type movieStage int
@@ -29,8 +29,8 @@ const (
 
 type movieLoaded struct {
 	id       int
-	titles   []flixhq.Title
-	episodes []flixhq.Episode
+	titles   []trakt.Title
+	episodes []trakt.Episode
 	err      error
 }
 
@@ -40,12 +40,12 @@ type MovieState struct {
 	visited, initial bool
 	stage            movieStage
 	view             movieView
-	home             movieListing // return address for searches and provider matches
-	matching         bool         // choosing a FlixHQ counterpart to a watchlist row
+	home             movieListing // return address for searches
+	shelfStale       bool         // reload when returning from an episode after a write
 	query            []rune
-	titles           []flixhq.Title
+	titles           []trakt.Title
 	seasons          []int
-	bySeason         map[int][]flixhq.Episode
+	bySeason         map[int][]trakt.Episode
 	cursor           [4]int
 }
 
@@ -88,14 +88,14 @@ func newMoviePicker(query string, catalog MovieCatalog, account MovieAccount, op
 			m.offerLogin()
 		}
 	} else if !m.connected {
-		m.forgetWatchlist() // signed out while browsing the other source
+		m.forgetAccountShelves() // signed out while browsing the other source
 	}
 	return m
 }
 
 // RunMoviePicker releases the terminal before resolving and playing a selection.
-// Reuse the same list and cursor afterwards, including on a dead embed.
-func RunMoviePicker(query string, catalog MovieCatalog, play func(flixhq.Title, *flixhq.Episode, string) error, account MovieAccount, openURL func(string) error, state *MovieState) (MediaSource, error) {
+// Reuse the same list and cursor afterwards, even when playback fails.
+func RunMoviePicker(query string, catalog MovieCatalog, play func(trakt.Title, *trakt.Episode, string) error, account MovieAccount, openURL func(string) error, state *MovieState) (MediaSource, error) {
 	m := newMoviePicker(query, catalog, account, openURL, state)
 	defer m.stopLoad()
 	defer m.stopPreview()
@@ -107,7 +107,7 @@ func RunMoviePicker(query string, catalog MovieCatalog, play func(flixhq.Title, 
 			return m.source, nil
 		}
 		m.play = false
-		var episode *flixhq.Episode
+		var episode *trakt.Episode
 		if m.stage == movieEpisodes {
 			episode = &m.episodes()[m.cursor[movieEpisodes]]
 		}
@@ -131,7 +131,7 @@ func (m *moviePicker) Init() tea.Cmd {
 		m.initial = false
 		return m.load()
 	}
-	if m.stage == movieTitles && m.view != movieResults && m.titles == nil {
+	if m.stage == movieTitles && m.view != movieResults && (m.titles == nil || m.shelfStale) {
 		return m.loadBrowse()
 	}
 	return nil
@@ -158,7 +158,7 @@ func (m *moviePicker) load() tea.Cmd {
 	if m.stage == movieSearch {
 		query := strings.TrimSpace(string(m.query))
 		return func() tea.Msg {
-			titles, err := m.catalog.Search(ctx, query)
+			titles, err := m.catalog.SearchTitles(ctx, query)
 			return movieLoaded{id: id, titles: titles, err: err}
 		}
 	}
@@ -179,18 +179,6 @@ func (m *moviePicker) loaded(msg movieLoaded) {
 		return
 	}
 	if m.stage == movieSearch {
-		if m.matching {
-			// The watchlist tells us which kind to look for, not which
-			// FlixHQ URL to play. Even a single candidate needs a second Enter.
-			kind := m.home.titles[m.home.cursor].Kind
-			var candidates []flixhq.Title
-			for _, t := range msg.titles {
-				if t.Kind == kind {
-					candidates = append(candidates, t)
-				}
-			}
-			msg.titles = candidates
-		}
 		if len(msg.titles) == 0 {
 			m.problem = "No matching movies or series. Try another title."
 			return
@@ -203,7 +191,7 @@ func (m *moviePicker) loaded(msg movieLoaded) {
 		m.problem = "No episodes listed for this series."
 		return
 	}
-	m.bySeason = make(map[int][]flixhq.Episode)
+	m.bySeason = make(map[int][]trakt.Episode)
 	m.seasons = nil
 	for _, ep := range msg.episodes {
 		if _, exists := m.bySeason[ep.Season]; !exists {
@@ -213,12 +201,12 @@ func (m *moviePicker) loaded(msg movieLoaded) {
 	}
 	slices.Sort(m.seasons)
 	for _, eps := range m.bySeason {
-		slices.SortStableFunc(eps, func(a, b flixhq.Episode) int { return a.Number - b.Number })
+		slices.SortStableFunc(eps, func(a, b trakt.Episode) int { return a.Number - b.Number })
 	}
 	m.cursor[movieSeasons], m.stage = 0, movieSeasons
 }
 
-func (m *moviePicker) episodes() []flixhq.Episode {
+func (m *moviePicker) episodes() []trakt.Episode {
 	return m.bySeason[m.seasons[m.cursor[movieSeasons]]]
 }
 
@@ -246,8 +234,6 @@ func (m *moviePicker) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case movieLoaded:
 		m.loaded(msg)
-	case traktMatchesMsg:
-		m.loadedTrackMatches(msg)
 	case traktWriteMsg:
 		return m, m.savedTrack(msg)
 	case movieDevicePromptMsg:
@@ -292,7 +278,7 @@ func (m *moviePicker) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A slow or unavailable shelf must never block switching views or
 		// starting a title search. The new request invalidates late responses.
 		if key == "/" && m.stage != movieSearch {
-			return m, m.startSearch(false)
+			return m, m.startSearch()
 		}
 		if key == "v" && m.stage == movieTitles {
 			return m, m.toggleView()
@@ -300,9 +286,6 @@ func (m *moviePicker) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cancel != nil {
 			if key == "esc" {
 				m.stopLoad()
-				if m.matching && m.stage == movieSearch {
-					return m, m.returnHome()
-				}
 			}
 			return m, nil
 		}
@@ -313,12 +296,15 @@ func (m *moviePicker) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.stage == movieSearch || m.view == movieResults {
 					return m, m.returnHome()
 				}
-				if m.view == movieRecent {
+				if m.view != movieWatchlist {
 					return m, m.showView(movieWatchlist)
 				}
 				return m, m.leave("")
 			default:
 				m.stage--
+				if m.stage == movieTitles && m.shelfStale {
+					return m, m.loadBrowse()
+				}
 			}
 			return m, nil
 		}
@@ -384,9 +370,6 @@ func (m *moviePicker) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			switch m.stage {
 			case movieTitles:
-				if m.view == movieWatchlist {
-					return m, m.startSearch(true)
-				}
 				if m.titles[*pos].Kind == "series" {
 					return m, m.load()
 				}
@@ -402,16 +385,21 @@ func (m *moviePicker) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *moviePicker) leave(source MediaSource) tea.Cmd {
+	if m.track != nil && m.track.saving {
+		// Cancellation doesn't prove the server didn't receive the write.
+		m.invalidateAccountShelves()
+	}
 	m.stopLoad()
 	m.source, m.play = source, false
 	return tea.Quit
 }
 
 func (m *moviePicker) movieCommands() []Command {
-	cmds := append(m.titleActions(), mediaSourceCommands(MediaMovies)...)
+	cmds := append(mediaSourceCommands(MediaMovies), m.titleActions()...)
 	cmds = append(cmds,
-		Command{Category: "View", Title: "My Watchlist", Intent: "view:watchlist", Keywords: "home trakt saved movies series"},
-		Command{Category: "View", Title: "Recently Added", Intent: "view:recent", Keywords: "browse flixhq latest movies series"},
+		Command{Category: "View", Title: movieWatchlist.label(), Intent: "view:watchlist", Keywords: "trakt home saved queue"},
+		Command{Category: "View", Title: movieRecent.label(), Intent: "view:recent", Keywords: "browse latest movies series"},
+		Command{Category: "View", Title: movieWatched.label(), Intent: "view:watched", Keywords: "trakt watched films history"},
 	)
 	if m.canAttachSubtitle() {
 		cmds = append(cmds, Command{Category: "Playback", Title: "Play with subtitle file…", Intent: "play:subtitle", Keywords: "captions English local srt vtt ass ssa"})
@@ -433,22 +421,22 @@ func (m *moviePicker) applyMovieCommand(intent string) tea.Cmd {
 		return m.openTrackForm(true)
 	case "trakt:mark-watched":
 		return m.openTrackForm(false)
-	case "watchlist:find":
-		if _, ok := m.actionTitle(); ok && m.view == movieWatchlist && m.stage == movieTitles {
-			return m.startSearch(true)
-		}
 	case "play:subtitle":
 		m.openSubtitleInput()
 	case "source:anime":
 		return m.leave(MediaAnime)
-	case "view:recent", "view:watchlist":
+	case "view:recent", "view:watchlist", "view:watched":
 		if m.dialog.mode == movieAccountDisconnecting || (m.track != nil && m.track.saving) {
 			return nil // don't interrupt a write to start browsing
 		}
-		if intent == "view:watchlist" {
+		switch intent {
+		case "view:recent":
+			return m.showView(movieRecent)
+		case "view:watched":
+			return m.showView(movieWatched)
+		default:
 			return m.showView(movieWatchlist)
 		}
-		return m.showView(movieRecent)
 	case "trakt:login":
 		return m.startLogin()
 	case "trakt:logout":
@@ -466,16 +454,13 @@ func (m *moviePicker) View() string {
 	if m.connected {
 		status = "connected"
 	}
-	header := HeaderStyle.Render("Source: Movies & TV") + ProviderStyle.Render("  ·  Provider: FlixHQ") + FaintStyle.Render("  ·  Trakt: "+status)
+	header := HeaderStyle.Render("Source: Movies & TV") + ProviderStyle.Render("  ·  Catalog: Trakt") + FaintStyle.Render("  ·  Account: "+status)
 	if m.subPrompt != nil {
 		return header + "\n" + m.subtitleView()
 	}
 	if m.palette.Active() {
 		if t, ok := m.actionTitle(); ok {
-			subject := t.Name
-			if t.Year != "" {
-				subject += " (" + t.Year + ")"
-			}
+			subject := movieTitleLabel(t)
 			if m.stage == movieEpisodes {
 				e := m.episodes()[m.cursor[movieEpisodes]]
 				subject += fmt.Sprintf(" S%02dE%02d", e.Season, e.Number)
@@ -516,19 +501,20 @@ func (m *moviePicker) View() string {
 	}
 	help := "↑/↓ select · Enter open/play · w watchlist · m watched · / search · Esc back"
 	if m.stage == movieTitles {
-		switch m.view {
-		case movieWatchlist:
-			help = "Enter find on FlixHQ · v Recently Added · / search · r refresh · q exit"
-		case movieRecent:
-			help = "Enter open/play · v/Esc My Watchlist · / search · r refresh · w watchlist · m watched · q exit"
-		case movieResults:
+		if m.view == movieResults {
 			help = "Enter open/play · Esc back · / search · v views · w watchlist · m watched · q exit"
+		} else {
+			help = "v " + m.view.nextShelf().label()
+			if m.view == movieWatchlist {
+				help += " · : Watched Movies"
+			}
+			help += " · Enter open/play · / search · r refresh · q exit"
 		}
 	}
 	if m.canAttachSubtitle() {
 		help = "s subtitle file · " + help
 	}
-	if _, ok := m.actionTitle(); ok {
+	if len(m.titleActions()) > 0 {
 		help = "Space actions · " + help
 	}
 	shortcuts := ": commands · L connect Trakt · Tab switch to Anime"

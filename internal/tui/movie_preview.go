@@ -6,24 +6,32 @@ import (
 	"strings"
 	"time"
 
-	"ani/internal/flixhq"
+	"ani/internal/trakt"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 type movieDetailSource interface {
-	Details(context.Context, flixhq.Title) (flixhq.Details, error)
+	TitleDetails(context.Context, trakt.Title) (trakt.Title, error)
 }
 
+// Numeric Trakt IDs are unique per media kind, not across movies and shows.
+type previewID struct {
+	kind string
+	id   int
+}
+
+func previewKey(t trakt.Title) previewID { return previewID{t.Kind, t.ID} }
+
 type previewEntry struct {
-	page       string
-	details    flixhq.Details
+	title      previewID
+	details    trakt.Title
 	hasDetails bool
 	poster     []byte // compressed image, reused when resizing or revisiting this title
 }
 
 type previewFocus struct {
-	page       string
+	title      previewID
 	cols, rows int
 }
 type moviePreview struct {
@@ -39,7 +47,7 @@ type moviePreview struct {
 type moviePreviewDue int
 type movieDetailMsg struct {
 	generation int
-	details    flixhq.Details
+	details    trakt.Title
 	err        error
 }
 type movieArtMsg struct {
@@ -52,7 +60,7 @@ type movieArtMsg struct {
 
 func (p *moviePreview) entry() *previewEntry {
 	for i := range p.entries {
-		if p.entries[i].page == p.focus.page {
+		if p.entries[i].title == p.focus.title {
 			return &p.entries[i]
 		}
 	}
@@ -61,7 +69,7 @@ func (p *moviePreview) entry() *previewEntry {
 		copy(p.entries, p.entries[1:])
 		p.entries = p.entries[:maxEntries-1]
 	}
-	p.entries = append(p.entries, previewEntry{page: p.focus.page})
+	p.entries = append(p.entries, previewEntry{title: p.focus.title})
 	return &p.entries[len(p.entries)-1]
 }
 
@@ -76,9 +84,9 @@ func (m *moviePicker) stopPreview() {
 	p.posterStarted, p.posterFailed, p.detailsFailed = false, false, false
 }
 
-func (m *moviePicker) focusedMovie() (flixhq.Title, bool) {
+func (m *moviePicker) focusedMovie() (trakt.Title, bool) {
 	if m.stage == movieSearch || m.cursor[movieTitles] < 0 || m.cursor[movieTitles] >= len(m.titles) {
-		return flixhq.Title{}, false
+		return trakt.Title{}, false
 	}
 	return m.titles[m.cursor[movieTitles]], true
 }
@@ -86,12 +94,12 @@ func (m *moviePicker) focusedMovie() (flixhq.Title, bool) {
 func (m *moviePicker) syncPreview() tea.Cmd {
 	p := &m.preview
 	t, ok := m.focusedMovie()
-	if !ok || t.URL == "" || m.width < 1 || m.height < 1 || m.play || m.source != "" || m.dialog.mode != movieAccountClosed || m.palette.Active() || m.track != nil || m.subPrompt != nil {
+	if !ok || t.ID <= 0 || m.width < 1 || m.height < 1 || m.play || m.source != "" || m.dialog.mode != movieAccountClosed || m.palette.Active() || m.track != nil || m.subPrompt != nil {
 		m.stopPreview()
 		return nil
 	}
 	l := m.movieLayout()
-	key := previewFocus{t.URL, l.coverCols, l.coverRows}
+	key := previewFocus{previewKey(t), l.coverCols, l.coverRows}
 	if p.focus == key {
 		return nil
 	}
@@ -110,7 +118,7 @@ func (m *moviePicker) syncPreview() tea.Cmd {
 
 func (m *moviePicker) posterCmd(url string) tea.Cmd {
 	p := &m.preview
-	if p.posterStarted || p.focus.rows < 1 || !flixhq.ValidPosterURL(url) {
+	if p.posterStarted || p.focus.rows < 1 || !trakt.ValidPosterURL(url) {
 		return nil
 	}
 	p.posterStarted = true
@@ -148,16 +156,16 @@ func (m *moviePicker) updateWithPreview(msg tea.Msg) (tea.Model, tea.Cmd) {
 			url = e.details.PosterURL
 		}
 		var details tea.Cmd
-		if source, ok := m.catalog.(movieDetailSource); ok && !e.hasDetails {
+		if source, ok := m.catalog.(movieDetailSource); ok && !e.hasDetails && (t.Overview == "" || t.PosterURL == "") {
 			ctx, id := p.ctx, p.generation
-			details = func() tea.Msg { d, err := source.Details(ctx, t); return movieDetailMsg{id, d, err} }
+			details = func() tea.Msg { d, err := source.TitleDetails(ctx, t); return movieDetailMsg{id, d, err} }
 		}
 		return m, tea.Batch(details, m.posterCmd(url))
 	case movieDetailMsg:
 		if !valid(msg.generation) {
 			return m, nil
 		}
-		if msg.err != nil {
+		if msg.err != nil || previewKey(msg.details) != p.focus.title {
 			p.detailsFailed = true
 			return m, nil
 		}
@@ -222,8 +230,8 @@ func (m *moviePicker) browsePanes(heading string) string {
 		case movieTitles:
 			t := m.titles[i]
 			label = fmt.Sprintf("[%s] %s", t.Kind, t.Name)
-			if t.Year != "" {
-				label += " (" + t.Year + ")"
+			if t.Year > 0 {
+				label += fmt.Sprintf(" (%d)", t.Year)
 			}
 		case movieSeasons:
 			s := m.seasons[i]
@@ -253,12 +261,30 @@ func (m *moviePicker) previewText(l moviePaneLayout) string {
 		return FaintStyle.Render("Title details")
 	}
 	p := &m.preview
-	var d flixhq.Details
-	var ready bool
-	if p.focus.page == t.URL && t.URL != "" {
+	d := t // full catalog/list rows can render immediately, including private shelves
+	ready := d.Overview != "" && d.PosterURL != ""
+	if p.focus.title == previewKey(t) && t.ID > 0 {
 		for _, e := range p.entries {
-			if e.page == t.URL {
-				d, ready = e.details, e.hasDetails
+			if e.title == p.focus.title && e.hasDetails {
+				// List snapshots and summaries can be independently sparse. Keep
+				// inline metadata if the focused summary returns only artwork.
+				x := e.details
+				if x.Overview != "" {
+					d.Overview = x.Overview
+				}
+				if x.PosterURL != "" {
+					d.PosterURL = x.PosterURL
+				}
+				if x.Genres != "" {
+					d.Genres = x.Genres
+				}
+				if x.Runtime > 0 {
+					d.Runtime = x.Runtime
+				}
+				if x.Rating > 0 {
+					d.Rating = x.Rating
+				}
+				ready = true
 				break
 			}
 		}
@@ -269,24 +295,21 @@ func (m *moviePicker) previewText(l moviePaneLayout) string {
 	} else {
 		meta = append(meta, "Movie")
 	}
-	if t.Year != "" {
-		meta = append(meta, t.Year)
+	if t.Year > 0 {
+		meta = append(meta, fmt.Sprint(t.Year))
 	}
-	if d.Duration != "" {
-		meta = append(meta, d.Duration)
+	if d.Runtime > 0 {
+		meta = append(meta, fmt.Sprintf("%d min", d.Runtime))
 	}
-	if d.Rating != "" {
-		meta = append(meta, "★ "+d.Rating)
+	if d.Rating > 0 {
+		meta = append(meta, fmt.Sprintf("★ %.1f", d.Rating))
 	}
 	lines := []string{TitleStyle.Render(clipANSI(wrapTwoLines(t.Name, l.detailW), l.detailW)), FaintStyle.Render(clipANSI(strings.Join(meta, " · "), l.detailW))}
 	if m.stage == movieEpisodes && len(m.episodes()) > 0 {
 		e := m.episodes()[m.cursor[movieEpisodes]]
 		lines = append(lines, ProgressStyle.Render(clipANSI(fmt.Sprintf("S%02dE%02d · %s", e.Season, e.Number, e.Name), l.detailW)))
 	}
-	if t.URL == "" {
-		return strings.Join(append(lines, FaintStyle.Render(wrap("Select to find matching provider titles.", l.detailW))), "\n")
-	}
-	if p.focus.page == t.URL && p.art != "" && l.coverRows > 0 {
+	if p.focus.title == previewKey(t) && p.art != "" && l.coverRows > 0 {
 		lines = append(lines, p.art+"\x1b[0m")
 	} else if p.posterFailed || (ready && t.PosterURL == "" && d.PosterURL == "" && l.coverRows > 0) {
 		lines = append(lines, FaintStyle.Render("Poster unavailable"))
@@ -294,8 +317,8 @@ func (m *moviePicker) previewText(l moviePaneLayout) string {
 	if d.Genres != "" {
 		lines = append(lines, GenresStyle.Render(clipANSI("Genres: "+d.Genres, l.detailW)))
 	}
-	if d.Description != "" {
-		lines = append(lines, clipANSI(wrap(d.Description, l.detailW), l.detailW))
+	if d.Overview != "" {
+		lines = append(lines, clipANSI(wrap(d.Overview, l.detailW), l.detailW))
 	} else if !ready && p.detailsFailed {
 		lines = append(lines, FaintStyle.Render("Details unavailable"))
 	} else if !ready {

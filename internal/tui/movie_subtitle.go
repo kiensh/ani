@@ -22,7 +22,7 @@ func (m *moviePicker) canAttachSubtitle() bool {
 	switch m.stage {
 	case movieTitles:
 		t, ok := m.focusedMovie()
-		return ok && m.view != movieWatchlist && t.Kind == "movie" && t.URL != ""
+		return ok && t.Kind == "movie"
 	case movieEpisodes:
 		return m.rowCount() > 0
 	}
@@ -31,7 +31,7 @@ func (m *moviePicker) canAttachSubtitle() bool {
 
 func (m *moviePicker) openSubtitleInput() {
 	if !m.canAttachSubtitle() {
-		m.problem = "Select a provider movie or a specific episode first."
+		m.problem = "Select a movie or a specific episode first."
 		return
 	}
 	m.problem, m.notice = "", ""

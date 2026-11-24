@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"ani/internal/flixhq"
+	"ani/internal/trakt"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -47,14 +47,14 @@ func TestMovieFileSubtitleAction(t *testing.T) {
 	if err := os.WriteFile(p, []byte("WEBVTT\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	m := &moviePicker{MovieState: &MovieState{stage: movieTitles, view: movieRecent, titles: []flixhq.Title{{Kind: "series", Name: "Example", URL: "/show"}}}}
+	m := &moviePicker{MovieState: &MovieState{stage: movieTitles, view: movieRecent, titles: []trakt.Title{{Kind: "series", Name: "Example", ID: 5}}}}
 	m.Update(movieKey("s"))
 	if m.subPrompt != nil || m.play {
 		t.Fatal("cannot attach to the entire series")
 	}
 	m.stage = movieEpisodes
 	m.seasons = []int{1}
-	m.bySeason = map[int][]flixhq.Episode{1: {{Season: 1, Number: 2, URL: "/episode"}}}
+	m.bySeason = map[int][]trakt.Episode{1: {{Season: 1, Number: 2, ID: 22}}}
 	m.Update(movieKey("s"))
 	if !strings.Contains(m.View(), "Play with subtitle file") {
 		t.Fatal("no file prompt")
@@ -77,13 +77,17 @@ func TestMovieFileSubtitleAction(t *testing.T) {
 }
 
 func TestSubtitleShortcutContext(t *testing.T) {
-	m := &moviePicker{MovieState: &MovieState{stage: movieTitles, view: movieRecent, titles: []flixhq.Title{{Name: "Movie", Kind: "movie", URL: "/movie"}}}}
-	if !m.canAttachSubtitle() {
-		t.Fatal("missing movie action")
-	}
-	m.view = movieWatchlist
-	if m.canAttachSubtitle() {
-		t.Fatal("watchlist rows are not resolved provider titles")
+	m := &moviePicker{MovieState: &MovieState{stage: movieTitles, titles: []trakt.Title{{Name: "Movie", Kind: "movie", ID: 123}}}}
+	for _, v := range []movieView{movieRecent, movieWatchlist, movieWatched, movieResults} {
+		m.view = v
+		if !m.canAttachSubtitle() {
+			t.Fatalf("no subtitles on %s", v.label())
+		}
+		m.Update(movieKey("s"))
+		if m.subPrompt == nil || m.play {
+			t.Fatal("movie should accept a local subtitle without provider selection")
+		}
+		m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	}
 	m.stage = movieSearch
 	m.editing = true

@@ -12,24 +12,25 @@ import (
 	"strings"
 	"testing"
 
-	"ani/internal/flixhq"
+	"ani/internal/trakt"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 type previewCatalog struct {
 	movieFixture
-	calls []string
+	calls []int
 }
 
-func (c *previewCatalog) Details(_ context.Context, t flixhq.Title) (flixhq.Details, error) {
-	c.calls = append(c.calls, t.URL)
-	return flixhq.Details{Description: "Synopsis for " + t.Name, Genres: "Drama", Rating: "8.4", Duration: "92 min"}, nil
+func (c *previewCatalog) TitleDetails(_ context.Context, t trakt.Title) (trakt.Title, error) {
+	c.calls = append(c.calls, t.ID)
+	t.Overview, t.Genres, t.Rating, t.Runtime = "Synopsis for "+t.Name, "Drama", 8.4, 92
+	return t, nil
 }
 
 func TestMoviePreviewFollowsFocusAndCachesDetails(t *testing.T) {
 	cat := &previewCatalog{}
-	m := &moviePicker{MovieState: &MovieState{stage: movieTitles, titles: []flixhq.Title{{Name: "First", Kind: "movie", URL: "/first"}, {Name: "Second", Kind: "series", Year: "2019", URL: "/second"}}}, catalog: cat}
+	m := &moviePicker{MovieState: &MovieState{stage: movieTitles, titles: []trakt.Title{{Name: "First", Kind: "movie", ID: 15}, {Name: "Second", Kind: "series", Year: 2019, ID: 15}}}, catalog: cat}
 	t.Cleanup(m.stopPreview)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 28})
 	firstID := m.preview.generation
@@ -76,23 +77,43 @@ func TestMoviePreviewFollowsFocusAndCachesDetails(t *testing.T) {
 
 func TestMoviePreviewLayoutsAndWatchlistPrivacy(t *testing.T) {
 	cat := &previewCatalog{}
-	m := &moviePicker{MovieState: &MovieState{stage: movieTitles, view: movieWatchlist, titles: []flixhq.Title{{Name: "A Private Title", Kind: "movie", Year: "2024"}}}, catalog: cat}
+	m := &moviePicker{MovieState: &MovieState{stage: movieTitles, view: movieWatchlist, titles: []trakt.Title{{Name: "A Private Title", Kind: "movie", Year: 2024, ID: 42, Overview: "Trakt overview", PosterURL: "https://media.trakt.tv/images/movies/000/000/042/posters/thumb/abc.jpg.webp"}}}, catalog: cat}
+	t.Cleanup(m.stopPreview)
 	for _, width := range []int{44, 80, 118} {
-		_, cmd := m.Update(tea.WindowSizeMsg{Width: width, Height: 26})
-		if cmd != nil {
-			t.Fatal("watchlist preview should not resolve a private title through FlixHQ")
+		m.Update(tea.WindowSizeMsg{Width: width, Height: 26})
+		if m.preview.focus.title != (previewID{"movie", 42}) {
+			t.Fatal("watchlist preview must use the existing Trakt identity")
 		}
+		_, cmd := m.Update(moviePreviewDue(m.preview.generation))
+		if (cmd == nil && m.preview.art == "") || !m.preview.posterStarted || len(cat.calls) > 0 {
+			t.Fatal("full watchlist row should render its poster without another catalog lookup")
+		}
+		m.Update(movieArtMsg{generation: m.preview.generation, text: "WATCHLIST POSTER"})
 		panes := m.browsePanes("My Watchlist")
 		lines := strings.Split(panes, "\n")
 		if lipgloss.Width(panes) > width {
 			t.Fatalf("%d-cell window overflow: %d", width, lipgloss.Width(panes))
 		}
-		if !strings.Contains(panes, "A Private Title") || !strings.Contains(panes, "2024") {
+		if !strings.Contains(panes, "A Private Title") || !strings.Contains(panes, "2024") || !strings.Contains(panes, "WATCHLIST POSTER") || !strings.Contains(panes, "Trakt overview") {
 			t.Fatal("missing immediate title details")
 		}
 		if side := strings.Count(lines[0], "╭") == 2; side != (width >= 66) {
 			t.Fatalf("wrong layout at width %d: %s", width, lines[0])
 		}
+	}
+}
+
+func TestSparseWatchlistRowKeepsInlineDetailsWhenArtArrives(t *testing.T) {
+	item := trakt.Title{ID: 1388, Kind: "series", Name: "Example", Year: 2008, Overview: "Overview from the watchlist row"}
+	m := &moviePicker{MovieState: &MovieState{stage: movieTitles, view: movieWatchlist, titles: []trakt.Title{item}}, catalog: &previewCatalog{}}
+	t.Cleanup(m.stopPreview)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 28})
+	if m.preview.cancel == nil {
+		t.Fatal("a watchlist row missing art needs its Trakt summary")
+	}
+	_, art := m.Update(movieDetailMsg{generation: m.preview.generation, details: trakt.Title{ID: item.ID, Kind: item.Kind, PosterURL: "https://media.trakt.tv/shows/1388/medium/poster.webp"}})
+	if art == nil || !m.preview.posterStarted || !strings.Contains(m.View(), item.Overview) {
+		t.Fatal("did not hydrate the watchlist poster while preserving its synopsis")
 	}
 }
 

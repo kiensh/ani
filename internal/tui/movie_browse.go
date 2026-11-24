@@ -1,10 +1,10 @@
 package tui
 
 import (
+	"context"
 	"fmt"
-	"strconv"
 
-	"ani/internal/flixhq"
+	"ani/internal/trakt"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -13,47 +13,66 @@ type movieView int
 const (
 	movieWatchlist movieView = iota // also the return view for an explicit CLI search
 	movieRecent
+	movieWatched
 	movieResults
 )
 
-// A search remembers the shelf it came from. Returning doesn't fetch it again
-// or lose the selected row. A nil titles slice means the shelf hasn't loaded.
+func (v movieView) accountShelf() bool { return v == movieWatchlist || v == movieWatched }
+
+func (v movieView) label() string {
+	switch v {
+	case movieWatchlist:
+		return "My Watchlist"
+	case movieRecent:
+		return "Trakt Recent Releases"
+	case movieWatched:
+		return "Watched Movies"
+	}
+	return "Search"
+}
+
+func (v movieView) nextShelf() movieView {
+	switch v {
+	case movieWatchlist:
+		return movieRecent
+	case movieRecent:
+		return movieWatched
+	default:
+		return movieWatchlist
+	}
+}
+
+// A search remembers the shelf it came from. Nil titles means it needs loading.
 type movieListing struct {
 	view   movieView
-	titles []flixhq.Title
+	titles []trakt.Title
 	cursor int
-	stale  bool // a confirmed Trakt write requires a refresh when this shelf reopens
 }
 
 type movieBrowseLoaded struct {
 	id     int
-	titles []flixhq.Title
+	titles []trakt.Title
 	err    error
 }
 
 func (m *moviePicker) loadBrowse() tea.Cmd {
-	if m.view == movieWatchlist && !m.connected {
-		return nil // the empty view explains both L to sign in and v to leave
+	if m.view.accountShelf() && !m.connected {
+		return nil // offer L to sign in; never request private data while signed out
+	}
+	var fetch func(context.Context) ([]trakt.Title, error)
+	switch m.view {
+	case movieWatchlist:
+		fetch = m.account.Watchlist
+	case movieWatched:
+		fetch = m.account.WatchedMovies
+	case movieRecent:
+		fetch = m.catalog.RecentReleases
+	default:
+		return nil
 	}
 	ctx, id := m.beginRequest()
-	if m.view == movieWatchlist {
-		return func() tea.Msg {
-			rows, err := m.account.Watchlist(ctx)
-			titles := make([]flixhq.Title, 0, len(rows))
-			for _, t := range rows {
-				year := ""
-				if t.Year > 0 {
-					year = strconv.Itoa(t.Year)
-				}
-				// Display metadata only. No Trakt ID or name-derived URL can be
-				// used as a FlixHQ identity for playback or for provider previews.
-				titles = append(titles, flixhq.Title{Name: t.Name, Kind: t.Kind, Year: year})
-			}
-			return movieBrowseLoaded{id, titles, err}
-		}
-	}
 	return func() tea.Msg {
-		titles, err := m.catalog.RecentlyAdded(ctx)
+		titles, err := fetch(ctx)
 		return movieBrowseLoaded{id, titles, err}
 	}
 }
@@ -67,20 +86,31 @@ func (m *moviePicker) loadedBrowse(msg movieBrowseLoaded) {
 		m.problem = msg.err.Error()
 		return
 	}
+	selected, ok := m.focusedMovie()
 	m.titles = msg.titles
 	if m.titles == nil {
-		m.titles = []flixhq.Title{} // a valid empty shelf, not an interrupted load
+		m.titles = []trakt.Title{} // a valid empty shelf, not an interrupted load
 	}
+	m.shelfStale = false
 	m.cursor[movieTitles] = min(m.cursor[movieTitles], max(0, len(m.titles)-1))
+	if ok { // Keep the selected identity when refreshing a reordered shelf.
+		for i, t := range m.titles {
+			if t.ID == selected.ID && t.Kind == selected.Kind {
+				m.cursor[movieTitles] = i
+				break
+			}
+		}
+	}
 }
 
 func (m *moviePicker) showView(v movieView) tea.Cmd {
 	m.stopLoad()
-	m.initial, m.editing, m.matching = false, false, false
+	m.initial, m.editing = false, false
 	m.dialog, m.track = movieAccountDialog{}, nil
 	m.notice, m.problem = "", ""
+	m.seasons, m.bySeason = nil, nil
 	if m.view != v {
-		m.titles, m.cursor[movieTitles] = nil, 0
+		m.titles, m.cursor[movieTitles], m.shelfStale = nil, 0, false
 	}
 	m.stage, m.view, m.home = movieTitles, v, movieListing{}
 	m.query = nil
@@ -92,48 +122,57 @@ func (m *moviePicker) toggleView() tea.Cmd {
 	if v == movieResults {
 		v = m.home.view
 	}
-	if v == movieWatchlist {
-		return m.showView(movieRecent)
-	}
-	return m.showView(movieWatchlist)
+	return m.showView(v.nextShelf())
 }
 
-func (m *moviePicker) startSearch(match bool) tea.Cmd {
+func (m *moviePicker) startSearch() tea.Cmd {
 	m.stopLoad()
 	m.initial = false
 	m.problem, m.notice = "", ""
 	if m.view != movieResults {
 		m.home = movieListing{view: m.view, titles: m.titles, cursor: m.cursor[movieTitles]}
+		if m.shelfStale {
+			m.home.titles = nil
+		}
 		m.query = nil
 	}
+	m.seasons, m.bySeason = nil, nil
 	m.titles, m.cursor[movieTitles] = nil, 0
-	m.stage, m.view, m.editing, m.matching = movieSearch, movieResults, !match, match
-	if match {
-		m.query = []rune(m.home.titles[m.home.cursor].Name)
-		return m.load()
-	}
+	m.stage, m.view, m.editing, m.shelfStale = movieSearch, movieResults, true, false
 	return nil
 }
 
 func (m *moviePicker) returnHome() tea.Cmd {
 	m.stopLoad()
 	m.view, m.titles, m.cursor[movieTitles] = m.home.view, m.home.titles, m.home.cursor
-	if m.home.stale {
-		m.titles = nil
-	} // Init reloads from Trakt, retaining the cursor if possible.
 	m.stage, m.home = movieTitles, movieListing{}
-	m.query, m.matching, m.editing = nil, false, false
+	m.query, m.editing = nil, false
 	m.problem, m.notice = "", ""
-	return m.Init() // --movies <query> might not have visited home yet
+	return m.Init() // CLI searches and invalidated private shelves load on return.
 }
 
-func (m *moviePicker) forgetWatchlist() {
-	if m.view == movieWatchlist {
-		m.titles, m.cursor[movieTitles] = nil, 0
+// Account shelves (including their episodes and a search's return address)
+// belong to the previous authorization. Never restore them after an account change.
+func (m *moviePicker) forgetAccountShelves() {
+	if m.view.accountShelf() {
+		m.stage, m.titles, m.cursor = movieTitles, nil, [4]int{}
+		m.seasons, m.bySeason, m.shelfStale = nil, nil, false
 	}
-	if m.home.view == movieWatchlist {
-		m.home = movieListing{view: movieWatchlist}
-		m.matching = false
+	if m.home.view.accountShelf() {
+		m.home = movieListing{view: m.home.view}
+	}
+}
+
+// A write can change both watchlist membership and the watched shelf. Only the
+// current shelf and a search's return address can be cached. Keep episode rows
+// intact until the user backs out of the show; replacing them mid-drilldown
+// could silently attach those episodes to a different title.
+func (m *moviePicker) invalidateAccountShelves() {
+	if m.view.accountShelf() {
+		m.shelfStale = true
+	}
+	if m.home.view.accountShelf() {
+		m.home.titles = nil
 	}
 }
 
@@ -145,35 +184,28 @@ func (m *moviePicker) heading() string {
 		}
 		return name
 	}
-	switch m.view {
-	case movieRecent:
-		return "Recently Added"
-	case movieWatchlist:
-		return "My Watchlist"
+	if m.view == movieResults {
+		return "Results for " + quote(string(m.query))
 	}
-	if m.matching {
-		t := m.home.titles[m.home.cursor]
-		prefix := "FlixHQ match"
-		if t.Year != "" {
-			prefix += " (" + t.Year + ")"
-		}
-		return prefix + ": " + t.Name
-	}
-	return "Results for " + quote(string(m.query))
+	return m.view.label()
 }
 
 func (m *moviePicker) emptyBrowseHint() string {
 	if m.stage != movieTitles || len(m.titles) != 0 || m.cancel != nil {
 		return ""
 	}
-	if m.view == movieWatchlist && !m.connected {
-		return "Connect Trakt with L to see your watchlist, or press v for Recently Added."
+	if m.view.accountShelf() && !m.connected {
+		return "Connect Trakt with L to see " + m.view.label() + ", or press / to search."
 	}
 	if m.problem != "" {
-		return "Press r to retry, / to search FlixHQ, or v to switch views."
+		return "Press r to retry, / to search Trakt, or v to switch views."
 	}
-	if m.view == movieWatchlist {
-		return "No watchlist titles to show. Press r to refresh or v for Recently Added."
+	switch m.view {
+	case movieWatchlist:
+		return "No watchlist titles to show. Press r to refresh or / to search."
+	case movieWatched:
+		return "No watched movies to show. Press r to refresh or / to search."
+	default:
+		return "No recent releases to show. Press r to refresh or / to search."
 	}
-	return "No recently added titles to show. Press r to refresh or / to search FlixHQ."
 }

@@ -933,7 +933,7 @@ func PrintUsage(w *os.File) {
 
 Usage:
   ani [query|anidb-id]
-  ani --movies [title]   search movies and TV on FlixHQ (e.g. ani --movies Breaking Bad)
+  ani --movies [title]   search the Trakt movie and TV catalog (e.g. ani --movies Breaking Bad)
   ani trakt login        connect your Trakt account in your own browser
   ani trakt --help       account, watchlist and history commands
 
@@ -946,8 +946,9 @@ Anime:           Season and My List are anime views (: → View or v while brows
                  L connects MyAnimeList. Enter plays; d downloads a torrent.
 Not logged in:   AnimeTosho series search, or the latest uploads.
 
-Movies & TV:     Opens on My Watchlist; / searches and v switches to Recently Added.
-                 Highlight a title to preview its poster and details before playing.
+Movies & TV:     Trakt supplies titles, posters, seasons and episodes. / searches Trakt.
+                 v cycles My Watchlist, Recent Releases, and Watched Movies; : View
+                 selects a shelf directly. FlixHQ is contacted only when you play.
                  The picker offers Trakt sign-in, or you can browse without it.
                  L opens Trakt login. Enter uses English captions when available;
                  s plays the selected movie/episode with your own subtitle file.

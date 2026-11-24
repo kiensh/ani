@@ -50,9 +50,12 @@ func libraryClient(t *testing.T, calls ...libCall) *Client {
 		if r.Method != call.method || r.URL.Path != want.Path || !reflect.DeepEqual(r.URL.Query(), want.Query()) {
 			t.Errorf("request %d: got %s %s, want %s %s", i, r.Method, r.URL, call.method, call.path)
 		}
-		auth := "Bearer test-access"
-		if strings.HasPrefix(r.URL.Path, "/search/") || strings.HasPrefix(r.URL.Path, "/shows/") {
-			auth = ""
+		auth := ""
+		if strings.HasPrefix(want.Path, "/users/me/") || strings.HasPrefix(want.Path, "/sync/") {
+			auth = "Bearer test-access"
+		}
+		if r.Header.Get("trakt-api-version") != "2" || r.Header.Get("trakt-api-key") != "test-client" {
+			t.Error("missing Trakt API headers on", r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != auth {
 			t.Error("incorrect authorization on", r.URL.Path)
@@ -101,8 +104,8 @@ func TestLibrarySearchPreservesSameNameCandidates(t *testing.T) {
 	broad := `{"type":"show","show":{"title":"A/B &\n‮C?","year":2019,"ids":{"trakt":20}}}`
 	otherKind := `{"type":"movie","movie":{"title":"A/B & C?","ids":{"trakt":99}}}`
 	c := libraryClient(t,
-		libGet(base+"/exact?page=1&limit=50&query="+url.QueryEscape(name), "["+exact+"]"),
-		libGet(base+"?page=1&limit=50&query="+url.QueryEscape(`A\/B \& C\?`), "["+exact+","+broad+","+otherKind+",{}]"))
+		libGet(base+"/exact?extended=full&page=1&limit=50&query="+url.QueryEscape(name), "["+exact+"]"),
+		libGet(base+"?extended=full&page=1&limit=50&query="+url.QueryEscape(`A\/B \& C\?`), "["+exact+","+broad+","+otherKind+",{}]"))
 	got, err := c.Search(t.Context(), "series", name)
 	want := []Title{{Name: name, Kind: "series", Year: 1960, ID: 12}, {Name: name, Kind: "series", Year: 2019, ID: 20}}
 	if err != nil || !reflect.DeepEqual(got, want) {
@@ -223,7 +226,7 @@ func TestLibraryHistoryFailsClosed(t *testing.T) {
 }
 
 func TestLibraryWatchlistPagination(t *testing.T) {
-	const prefix = "/users/me/watchlist/movie,show/rank?limit=100&page="
+	const prefix = "/users/me/watchlist/movie,show/rank?extended=full&limit=100&page="
 	one := libGet(prefix+"1", `[{"type":"movie","movie":{"title":"One","ids":{"trakt":7}}}]`)
 	two := libGet(prefix+"2", `[{"type":"show","show":{"title":"Different show, same numeric ID","year":2021,"ids":{"trakt":7}}}]`)
 	want := []Title{{Kind: "movie", ID: 7, Name: "One"}, {Kind: "series", ID: 7, Name: "Different show, same numeric ID", Year: 2021}}

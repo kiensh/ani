@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"ani/internal/flixhq"
+	"ani/internal/trakt"
 )
 
 const maxPosterBytes = 2 << 20
@@ -23,7 +23,7 @@ const maxPosterBytes = 2 << 20
 var moviePosterHTTP = &http.Client{
 	Timeout: 6 * time.Second,
 	CheckRedirect: func(r *http.Request, via []*http.Request) error {
-		if len(via) >= 3 || !flixhq.ValidPosterURL(r.URL.String()) {
+		if len(via) >= 3 || !trakt.ValidPosterURL(r.URL.String()) {
 			return errors.New("unexpected poster redirect")
 		}
 		return nil
@@ -33,14 +33,24 @@ var moviePosterHTTP = &http.Client{
 // The poster CDN is not a media provider: never attach a page referrer, account
 // headers, or an app key. Bound both the compressed download and decoded image.
 func fetchMoviePoster(ctx context.Context, url string) ([]byte, error) {
-	if !flixhq.ValidPosterURL(url) {
+	return cachedMoviePoster(ctx, url, moviePosterHTTP, posterCacheDir())
+}
+
+func cachedMoviePoster(ctx context.Context, url string, client *http.Client, dir string) ([]byte, error) {
+	if !trakt.ValidPosterURL(url) {
 		return nil, errors.New("invalid poster URL")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if b := readCachedPoster(dir, url); b != nil {
+		return b, nil
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	res, err := moviePosterHTTP.Do(req)
+	res, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -55,6 +65,10 @@ func fetchMoviePoster(ctx context.Context, url string) ([]byte, error) {
 	if len(b) > maxPosterBytes {
 		return nil, errors.New("poster too large")
 	}
+	if _, _, _, err := posterSize(b); err != nil {
+		return nil, err
+	}
+	cachePoster(dir, url, b)
 	return b, nil
 }
 
@@ -62,9 +76,9 @@ func renderMoviePoster(ctx context.Context, b []byte, cols, rows int) ([][]byte,
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
-	cfg, _, err := image.DecodeConfig(bytes.NewReader(b))
-	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width > 2048 || cfg.Height > 2048 {
-		return nil, "", errors.New("unsupported poster image")
+	w, h, webp, err := posterSize(b)
+	if err != nil {
+		return nil, "", err
 	}
 	// Use Anime's full-resolution Kitty renderer where supported. Other terminals
 	// still show an actual thumbnail rather than blank Kitty placeholder cells.
@@ -76,6 +90,13 @@ func renderMoviePoster(ctx context.Context, b []byte, cols, rows int) ([][]byte,
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
+	}
+	if webp {
+		img, err := webpThumbnail(ctx, b, w, h, cols, rows)
+		if err != nil {
+			return nil, "", err
+		}
+		return nil, blockPoster(img, cols, rows, os.Getenv("NO_COLOR") == ""), nil
 	}
 	img, _, err := image.Decode(bytes.NewReader(b))
 	if err != nil {

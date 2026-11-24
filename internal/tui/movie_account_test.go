@@ -7,25 +7,28 @@ import (
 	"testing"
 	"time"
 
-	"ani/internal/flixhq"
 	"ani/internal/trakt"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 type movieAccountStub struct {
 	*trackerStub
-	connected  bool
-	login      func(context.Context, func(string, string)) error
-	logoutErr  error
-	logouts    int
-	shelf      []trakt.Title
-	shelfErr   error
-	shelfCalls int
+	connected              bool
+	login                  func(context.Context, func(string, string)) error
+	logoutErr              error
+	logouts                int
+	shelf, films           []trakt.Title
+	shelfErr, filmsErr     error
+	shelfCalls, filmsCalls int
 }
 
 func (a *movieAccountStub) Watchlist(context.Context) ([]trakt.Title, error) {
 	a.shelfCalls++
 	return a.shelf, a.shelfErr
+}
+func (a *movieAccountStub) WatchedMovies(context.Context) ([]trakt.Title, error) {
+	a.filmsCalls++
+	return a.films, a.filmsErr
 }
 func (a *movieAccountStub) Connected() bool { return a.connected }
 func (a *movieAccountStub) Login(ctx context.Context, prompt func(string, string)) error {
@@ -85,14 +88,14 @@ func chooseMovieCommand(t *testing.T, m *moviePicker, filter string) tea.Cmd {
 }
 
 func TestMovieWelcomeAndSourceRoundTrip(t *testing.T) {
-	catalog := &movieFixture{titles: []flixhq.Title{{Name: "Original"}, {Name: "Remake"}}}
+	catalog := &movieFixture{titles: []trakt.Title{{Name: "Original", Kind: "movie", ID: 100}, {Name: "Remake", Kind: "movie", ID: 200}}}
 	a := &movieAccountStub{}
 	state := &MovieState{}
 	m := newMoviePicker("seed", catalog, a, nil, state)
 	if m.Init() != nil || m.cancel != nil || catalog.lastQuery != "" {
 		t.Fatal("signed-out entry should offer login before doing any work")
 	}
-	for _, part := range []string{"Source: Movies & TV", "Provider: FlixHQ", "Trakt: signed out", "Connect Trakt", "Continue without an account"} {
+	for _, part := range []string{"Source: Movies & TV", "Catalog: Trakt", "Account: signed out", "Connect Trakt", "Continue without an account"} {
 		if !strings.Contains(m.View(), part) {
 			t.Errorf("missing %q on first entry: %s", part, m.View())
 		}
@@ -113,7 +116,7 @@ func TestMovieWelcomeAndSourceRoundTrip(t *testing.T) {
 	if back.source != "" || back.Init() != nil || !back.connected || back.stage != movieTitles || back.cursor[movieTitles] != 1 || back.titles[1].Name != "Remake" || string(back.query) != "seed" {
 		t.Fatalf("source round trip lost navigation or account refresh: %+v", back)
 	}
-	if cmd := chooseMovieCommand(t, back, "movies"); cmd != nil || back.source != "" {
+	if cmd := chooseMovieCommand(t, back, "source movies"); cmd != nil || back.source != "" {
 		t.Fatal("selecting current source exited picker")
 	}
 	if cmd := chooseMovieCommand(t, back, "anime"); cmd == nil || back.source != MediaAnime {
@@ -132,7 +135,7 @@ func TestMovieWelcomeAndSourceRoundTrip(t *testing.T) {
 }
 
 func TestMovieDeviceLoginAndTrackingWithoutRestart(t *testing.T) {
-	a := &movieAccountStub{trackerStub: &trackerStub{results: []trakt.Title{{ID: 12, Kind: "movie", Name: "Example"}}}}
+	a := &movieAccountStub{trackerStub: &trackerStub{}}
 	approved := make(chan struct{})
 	a.login = func(ctx context.Context, prompt func(string, string)) error {
 		prompt("https://trakt.tv/activate", "TEST-CODE")
@@ -145,13 +148,13 @@ func TestMovieDeviceLoginAndTrackingWithoutRestart(t *testing.T) {
 		}
 	}
 	var opened []string
-	f := &movieFixture{recent: []flixhq.Title{{Kind: "movie", Name: "Example"}}}
+	f := &movieFixture{recent: []trakt.Title{{Kind: "movie", Name: "Example", ID: 12}}}
 	m := newMoviePicker("", f, a, func(u string) error {
 		opened = append(opened, u)
 		return errors.New("headless")
 	}, nil)
 	t.Cleanup(m.stopLoad)
-	m.Update(tea.KeyMsg{Type: tea.KeyEsc}) // skip account, then opt in to the provider shelf
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc}) // skip account, then open public recent releases
 	_, browse := m.Update(movieKey("v"))
 	finishMovieLoad(t, m, browse)
 	m.Update(movieKey("w"))
@@ -173,11 +176,12 @@ func TestMovieDeviceLoginAndTrackingWithoutRestart(t *testing.T) {
 	}
 	close(approved)
 	m.Update(nextMovieEvent(t, events))
-	if !m.connected || m.cancel != nil || !strings.Contains(m.View(), "Trakt: connected") || a.watchlist != 0 || a.watched != 0 {
+	if !m.connected || m.cancel != nil || !strings.Contains(m.View(), "Account: connected") || a.watchlist != 0 || a.watched != 0 {
 		t.Fatalf("login did not update status in place: %s", m.View())
 	}
-	_, find := m.Update(movieKey("w"))
-	m.Update(find())
+	if _, cmd := m.Update(movieKey("w")); cmd != nil || m.track == nil {
+		t.Fatal("expected local confirmation for the known Trakt ID")
+	}
 	_, write := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m.Update(write())
 	if a.watchlist != 1 || a.id != 12 || m.stage != movieTitles {
@@ -193,7 +197,7 @@ func TestMovieDeviceLoginAndTrackingWithoutRestart(t *testing.T) {
 	chooseMovieCommand(t, m, "disconnect")
 	_, logout := m.Update(movieKey("y"))
 	m.Update(logout())
-	if a.logouts != 1 || m.connected || m.cancel != nil || !strings.Contains(m.View(), "Trakt: signed out") {
+	if a.logouts != 1 || m.connected || m.cancel != nil || !strings.Contains(m.View(), "Account: signed out") {
 		t.Fatal("confirmed logout did not refresh picker immediately")
 	}
 	m.Update(movieKey("m"))
