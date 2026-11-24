@@ -101,7 +101,7 @@ func TestMovieAndSeries(t *testing.T) {
 	})
 	ctx := t.Context()
 	titles, err := c.Search(ctx, " night & campus? ")
-	wantTitles := []Title{{Name: "Night & Train", Kind: "movie", URL: root + movie, Year: "2025", PosterURL: "https://image.tmdb.org/t/p/w342/train01.jpg"}, {Name: "Campus 1999", Kind: "series", URL: root + series}}
+	wantTitles := []Title{{Name: "Night & Train", Kind: "movie", URL: root + movie, Year: "2025", PosterURL: "https://image.tmdb.org/t/p/w780/train01.jpg"}, {Name: "Campus 1999", Kind: "series", URL: root + series}}
 	if err != nil || !slices.Equal(titles, wantTitles) {
 		t.Fatalf("Search: %+v, %v", titles, err)
 	}
@@ -348,7 +348,7 @@ const detailFixture = `
 <div data-token='unused'></div>`
 
 func TestDetails(t *testing.T) {
-	const poster = "https://image.tmdb.org/t/p/w342/campus.jpg"
+	const poster = "https://image.tmdb.org/t/p/w780/campus.jpg"
 	want := Details{Description: "Two friends & rivals return.", Genres: "Drama, Sci-Fi & Fantasy", Duration: "81 min", Rating: "7.3", PosterURL: poster}
 	for _, tc := range []struct{ kind, path string }{{"movie", movie}, {"series", series}} {
 		t.Run(tc.kind, func(t *testing.T) {
@@ -374,7 +374,7 @@ func TestDetailsPosterFallback(t *testing.T) {
 		return `<a class='nav-item' href='` + path + `'><img class='film-poster-img' title='Campus' src='` + tmdb + `w92/` + id + `.jpg'></a>`
 	}
 	for _, tc := range []struct{ name, existing, searchHTML, want string }{
-		{"exact path across mirrors", "", card("/watch-series/campus-remake/", "wrong") + card(series, "right"), tmdb + "w342/right.jpg"},
+		{"exact path across mirrors", "", card("/watch-series/campus-remake/", "wrong") + card(series, "right"), tmdb + "w780/right.jpg"},
 		{"not a title or prefix match", "", card(movie, "wrong") + card("/watch-series/campus-remake/", "wrong") + card(strings.TrimSuffix(series, "/"), "wrong"), ""},
 		{"lookup failure preserves details", "", "", ""},
 		{"existing art needs no lookup", tmdb + "w342/selected.jpg", "", ""},

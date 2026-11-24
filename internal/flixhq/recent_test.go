@@ -42,7 +42,7 @@ func TestRecentlyAdded(t *testing.T) {
 	got, err := c.RecentlyAdded(t.Context())
 	want := []Title{
 		{Name: "Night & Train", Kind: "movie", URL: root + movie, Year: "1998"},
-		{Name: "Campus 1984", Kind: "series", URL: root + series, PosterURL: "https://image.tmdb.org/t/p/w342/campus.jpg"},
+		{Name: "Campus 1984", Kind: "series", URL: root + series, PosterURL: "https://image.tmdb.org/t/p/w780/campus.jpg"},
 		{Name: "Next", Kind: "movie", URL: root + "/watch-movie/next/", Year: "2004"},
 	}
 	if err != nil || !slices.Equal(got, want) || calls != 1 {

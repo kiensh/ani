@@ -91,16 +91,31 @@ func useNativeMoviePoster(ctx context.Context) bool {
 		return false
 	}
 	program := os.Getenv("TERM_PROGRAM")
-	if os.Getenv("KITTY_WINDOW_ID") == "" && os.Getenv("TERM") != "xterm-kitty" && program != "ghostty" && program != "WezTerm" {
-		return false
-	}
+	native := os.Getenv("KITTY_WINDOW_ID") != "" || graphicsTerm(os.Getenv("TERM")) || program == "ghostty" || program == "WezTerm"
 	if os.Getenv("TMUX") == "" {
-		return true
+		return native
 	}
+	// TERM_PROGRAM usually describes tmux, not the outer terminal. And a
+	// plain `show-options` reports nothing for an inherited pane option.
+	// Resolve both in the pane that will actually receive the upload.
+	args := []string{"display-message", "-p"}
+	if pane := os.Getenv("TMUX_PANE"); pane != "" {
+		args = append(args, "-t", pane)
+	}
+	args = append(args, "#{client_termname}\t#{allow-passthrough}")
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	v, err := exec.CommandContext(ctx, "tmux", "show-options", "-v", "allow-passthrough").Output()
-	return err == nil && (strings.TrimSpace(string(v)) == "on" || strings.TrimSpace(string(v)) == "all")
+	v, err := exec.CommandContext(ctx, "tmux", args...).Output()
+	outer, pass, ok := strings.Cut(strings.TrimRight(string(v), "\r\n"), "\t")
+	return err == nil && ok && (pass == "on" || pass == "all") && (native || graphicsTerm(outer))
+}
+
+func graphicsTerm(term string) bool {
+	switch term {
+	case "xterm-kitty", "xterm-ghostty", "wezterm":
+		return true
+	}
+	return false
 }
 
 // Each terminal cell is about two pixels tall. Use its foreground and background

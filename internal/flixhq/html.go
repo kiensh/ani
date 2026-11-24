@@ -124,7 +124,8 @@ func cardPoster(card string) string {
 		}
 		for _, src := range []string{a["src"], a["data-src"]} {
 			if ValidPosterURL(src) {
-				return "https://image.tmdb.org/t/p/w342/" + src[strings.LastIndexByte(src, '/')+1:]
+				// Keep enough source pixels for native graphics on HiDPI displays.
+				return "https://image.tmdb.org/t/p/w780/" + src[strings.LastIndexByte(src, '/')+1:]
 			}
 		}
 	}

@@ -97,6 +97,7 @@ func TestMoviePreviewLayoutsAndWatchlistPrivacy(t *testing.T) {
 }
 
 func TestMovieTerminalPoster(t *testing.T) {
+	t.Setenv("TMUX", "")
 	t.Setenv("TERM_PROGRAM", "")
 	t.Setenv("KITTY_WINDOW_ID", "")
 	t.Setenv("TERM", "xterm-256color")

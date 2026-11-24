@@ -246,7 +246,13 @@ func coverPlaceholder(ctx context.Context, path string, input io.Reader, cols, r
 	if input == nil {
 		args = append(args, "--stdin=no", path)
 	} else {
-		args = append(args, "--stdin=yes")
+		// We already know this terminal supports Kitty graphics. Stream the
+		// actual pixels instead of probing file/shared-memory transfer via a
+		// terminal round trip from a background TUI command.
+		args = append(args, "--stdin=yes", "--transfer-mode=stream")
+		if os.Getenv("TMUX") != "" {
+			args = append(args, "--passthrough=tmux")
+		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
