@@ -34,10 +34,9 @@ func RunPlay(magnet, title, player string, dryRun bool) error {
 	return RunWithSignals(exec.Command("webtorrent", args...), dryRun)
 }
 
-// RunPlayURL plays a direct stream URL (HLS m3u8) in mpv — used by the hianime
-// streaming provider. Unlike RunPlay (webtorrent+magnet), this launches mpv
-// directly with the URL. referer is required by the stream host (it answers
-// 403 without it); subURL optionally attaches a remote subtitle track.
+// RunPlayURL passes a stream URL to mpv: direct HLS for HiAnime, or a Vidmoly
+// embed that mpv opens with its yt-dlp hook. Unlike RunPlay, neither needs a
+// torrent client. Preserve the provider's referrer and optional subtitle URL.
 func RunPlayURL(streamURL, title, referer, subURL, player string, dryRun bool) error {
 	if player == "" {
 		player = "mpv"

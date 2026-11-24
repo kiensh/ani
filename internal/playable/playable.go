@@ -24,7 +24,7 @@ type Release struct {
 	Leechers  int
 	Magnet    string
 
-	// Stream-only (hianime). When set, the item plays via mpv+URL, not
+	// Stream-only (HiAnime/FlixHQ). When set, the item plays via mpv+URL, not
 	// webtorrent. Referer is the stream host's required referer (it answers
 	// 403 without it); SubtitleURL is an optional remote subtitle track.
 	StreamURL   string

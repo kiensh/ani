@@ -476,7 +476,7 @@ func (m *releasePicker) releaseCommands() []Command {
 			Command{Category: "Provider", Title: providerLabel("hianime", !torrentActive), Intent: "provider:hianime", Keywords: "stream backend"},
 		)
 	}
-	return cmds
+	return append(cmds, movieCatalogCommand)
 }
 
 // applyCommand runs a palette intent, reusing the same mutators/flags as the
@@ -515,6 +515,9 @@ func (m *releasePicker) applyCommand(intent string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case intent == "quit":
 		m.result.Quit = true
+		return m, tea.Quit
+	case intent == movieCatalogCommand.Intent:
+		m.result.SourceSwitch = "flixhq"
 		return m, tea.Quit
 	case strings.HasPrefix(intent, "provider:"):
 		// Switch backend for THIS anime (app.Run applies it and re-opens the

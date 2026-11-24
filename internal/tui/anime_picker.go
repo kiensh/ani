@@ -1468,6 +1468,7 @@ func (m *animePicker) animeCommands() []Command {
 	cmds = append(cmds,
 		Command{Category: "Provider", Title: providerLabel("torrent", torrentActive), Intent: "provider:torrent", Keywords: "animetosho backend"},
 		Command{Category: "Provider", Title: providerLabel("hianime", !torrentActive), Intent: "provider:hianime", Keywords: "stream backend"},
+		movieCatalogCommand,
 	)
 
 	// Per-anime actions target the focused row (same as the Space menu); only
@@ -1643,6 +1644,9 @@ func (m *animePicker) applyCommand(intent string) (tea.Model, tea.Cmd) {
 		m.overlay.text = fmt.Sprintf("Remove %q from your list?", it.Title)
 		m.overlay.pendingAction = StatusAction{Remove: true}
 		return m, nil
+	case intent == movieCatalogCommand.Intent:
+		m.result.SourceSwitch = "flixhq"
+		return m, tea.Batch(tea.Quit, m.quitCmd())
 	case strings.HasPrefix(intent, "provider:"):
 		src := strings.TrimPrefix(intent, "provider:")
 		if src != "torrent" && src != "hianime" {

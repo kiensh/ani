@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"ani/internal/animetosho"
 	"ani/internal/app"
@@ -25,8 +26,8 @@ func main() {
 	}
 }
 
-// run parses the single positional argument (plus the hidden --debug/--dry-run
-// dev flags) and dispatches into app.Run. No user-facing flags:
+// run dispatches an anime query or the separate --movies catalog. The hidden
+// --debug and --dry-run flags work with either mode:
 //
 //	ani               -> MAL list (logged in) or latest uploads (not logged in)
 //	ani <name>        -> search by name
@@ -38,8 +39,9 @@ func main() {
 // echoes DEBUG lines to the terminal (which the TUI's alt screen would otherwise
 // hide).
 func run(args []string) error {
-	debug, dryRun, help, query := parseArgs(args)
-	if help {
+	cli := parseArgs(args)
+	debug, dryRun := cli.Debug, cli.DryRun
+	if cli.Help {
 		app.PrintUsage(os.Stderr)
 		return nil
 	}
@@ -76,7 +78,8 @@ func run(args []string) error {
 		Sort:    ui.NormalizeSort(cfg.Sort),
 		Player:  app.OrDefault(cfg.Player, "mpv"),
 		Dir:     cfg.Dir,
-		Query:   query,
+		Query:   cli.Query,
+		Movies:  cli.Movies,
 		Source:  cfg.Source,
 	}
 	runErr := app.Run(o)
@@ -95,24 +98,34 @@ func run(args []string) error {
 	return runErr
 }
 
-// parseArgs extracts the hidden dev flags from anywhere in args and returns the
-// first positional as query. Flags combine freely in any order.
-func parseArgs(args []string) (debug, dryRun, help bool, query string) {
+type cliArgs struct {
+	Debug, DryRun, Help, Movies bool
+	Query                       string
+}
+
+func parseArgs(args []string) cliArgs {
+	var flags cliArgs
+	var words []string
 	for _, a := range args {
 		switch a {
 		case "-h", "--help":
-			help = true
+			flags.Help = true
 		case "--debug", "-debug":
-			debug = true
+			flags.Debug = true
 		case "--dry-run", "-dry-run":
-			dryRun = true
+			flags.DryRun = true
+		case "--movies":
+			flags.Movies = true
 		default:
-			if query == "" {
-				query = a
-			}
+			words = append(words, a)
 		}
 	}
-	return debug, dryRun, help, query
+	if flags.Movies {
+		flags.Query = strings.Join(words, " ")
+	} else if len(words) > 0 {
+		flags.Query = words[0] // preserve the anime CLI's single positional argument
+	}
+	return flags
 }
 
 // debugLogPath returns the always-on debug log location, mirroring malTokenPath

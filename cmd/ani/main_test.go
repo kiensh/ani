@@ -2,14 +2,29 @@ package main
 
 import "testing"
 
+func TestMovieArgs(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want cliArgs
+	}{
+		{[]string{"--movies"}, cliArgs{Movies: true}},
+		{[]string{"Breaking", "--movies", "Bad", "--dry-run"}, cliArgs{Movies: true, DryRun: true, Query: "Breaking Bad"}},
+		{[]string{"--movies", "1917"}, cliArgs{Movies: true, Query: "1917"}},
+	} {
+		if got := parseArgs(tc.args); got != tc.want {
+			t.Errorf("%v: got %+v, want %+v", tc.args, got, tc.want)
+		}
+	}
+}
+
 func TestParseArgs(t *testing.T) {
 	cases := []struct {
-		name        string
-		args        []string
-		debug       bool
-		dryRun      bool
-		help        bool
-		query       string
+		name   string
+		args   []string
+		debug  bool
+		dryRun bool
+		help   bool
+		query  string
 	}{
 		{"flags after positional", []string{"frieren", "--dry-run", "--debug"}, true, true, false, "frieren"},
 		{"flags before positional", []string{"--debug", "--dry-run", "frieren"}, true, true, false, "frieren"},
@@ -24,10 +39,10 @@ func TestParseArgs(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			dbg, dry, help, q := parseArgs(c.args)
-			if dbg != c.debug || dry != c.dryRun || help != c.help || q != c.query {
-				t.Errorf("parseArgs(%v) = (debug=%v dry=%v help=%v query=%q), want (debug=%v dry=%v help=%v query=%q)",
-					c.args, dbg, dry, help, q, c.debug, c.dryRun, c.help, c.query)
+			got := parseArgs(c.args)
+			want := cliArgs{Debug: c.debug, DryRun: c.dryRun, Help: c.help, Query: c.query}
+			if got != want {
+				t.Errorf("parseArgs(%v) = %+v, want %+v", c.args, got, want)
 			}
 		})
 	}

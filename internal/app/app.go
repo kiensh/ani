@@ -57,6 +57,9 @@ const latestUploadsAID = -1
 // play/download → write back to MAL. Esc in the release picker returns to
 // anime selection.
 func Run(opt *Options) error {
+	if opt.Movies {
+		return browseMovies(opt, opt.Query) // independent catalog: no MAL login, warmup, or write-back
+	}
 	aired := providerAiredCaches{}    // late results always land in their originating provider's cache
 	relcache := newReleaseCache()     // session-scoped; fetched releases survive Esc-back / re-entry
 	health := tui.NewProviderHealth() // session-scoped; backend reachability for the down warning
@@ -79,6 +82,12 @@ func Run(opt *Options) error {
 		}
 		var srcSwitch errSourceSwitch
 		if errors.As(err, &srcSwitch) {
+			if srcSwitch.source == "flixhq" {
+				if err := browseMovies(opt, ""); err != nil {
+					return err
+				}
+				continue // return to the same anime catalog without changing its source
+			}
 			// Provider change from the anime picker's `:` palette: apply it and
 			// re-resolve (the release picker handles its own switches in place).
 			applySourceSwitch(opt, srcSwitch.source, health)
@@ -535,6 +544,13 @@ func releaseLoop(opt *Options, aid int, item *mal.Item, aired providerAiredCache
 		if !errors.As(err, &srcSwitch) {
 			return err
 		}
+		if srcSwitch.source == "flixhq" {
+			if err := browseMovies(opt, ""); err != nil {
+				return err
+			}
+			reentryEpisode = srcSwitch.episode
+			continue
+		}
 		applySourceSwitch(opt, srcSwitch.source, health)
 		item.AiredEps = 0 // the carried count belonged to the old provider
 		relcache.Reset()
@@ -879,10 +895,11 @@ func OrDefault(v, def string) string {
 
 // PrintUsage writes the CLI help text to w.
 func PrintUsage(w *os.File) {
-	fmt.Fprintln(w, `ani — a MyAnimeList TUI that streams anime
+	fmt.Fprintln(w, `ani — stream anime, movies, and TV series
 
 Usage:
   ani [query|anidb-id]
+  ani --movies [title]   search movies and TV on FlixHQ (e.g. ani --movies Breaking Bad)
 
   <query>     anime name (e.g. frieren) -> pick from matching series
   <anidb-id>  numeric AniDB id (e.g. 18886) -> skip straight to its releases
@@ -892,7 +909,11 @@ Logged-in flow:  browse My List / This Season / Search  ->  pick a release
                  ->  Enter plays  /  d downloads  ->  MAL progress write-back
 Not logged in:   AnimeTosho series search, or the latest uploads.
 
-Provider: set "source" in config.json to "torrent" (default: AnimeTosho torrents
+Movies & TV:     --movies opens FlixHQ search (or use : → Search movies & TV).
+                 Pick a movie, or a series → season → episode. Playback uses mpv
+                 with yt-dlp on PATH. No torrents, MAL login, or MAL write-back.
+
+Anime provider: set "source" in config.json to "torrent" (default: AnimeTosho torrents
           via webtorrent) or "hianime" (hianime.fm streaming via mpv — sub/dub +
           quality selection in the release picker).
 

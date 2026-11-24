@@ -5,6 +5,7 @@ package app
 type Options struct {
 	Debug  bool
 	DryRun bool
+	Movies bool // open the separate movie/TV catalog, leaving the anime source unchanged
 
 	Player  string // streaming player (mpv default)
 	Dir     string // download directory (default cwd)
