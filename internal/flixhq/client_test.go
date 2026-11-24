@@ -40,7 +40,7 @@ const (
 	embed          = "https://kaembed.net/embed-ab12cd34.html"
 	catalogFixture = `<div class="nav search-result-pop search-suggest">
 <a href="https://flixhqz.net/watch-movie/night-train/" class="nav-item highlighted">
-  <div class="film-poster"><img title="Poster fallback"></div>
+  <div class="film-poster"><img title="Poster fallback" class="film-poster-img" src="https://image.tmdb.org/t/p/w92/train01.jpg"></div>
   <div class="srp-detail"><h3 class="film-name">Night &amp; &#10; Train</h3>
   <div class="film-infor"><span>2025</span> <i class="dot"></i> <span>Movie</span></div></div>
 </a><a class='nav-item' href='/watch-series/campus/'><img title='Campus 1999'></a>
@@ -101,7 +101,7 @@ func TestMovieAndSeries(t *testing.T) {
 	})
 	ctx := t.Context()
 	titles, err := c.Search(ctx, " night & campus? ")
-	wantTitles := []Title{{Name: "Night & Train", Kind: "movie", URL: root + movie, Year: "2025"}, {Name: "Campus 1999", Kind: "series", URL: root + series}}
+	wantTitles := []Title{{Name: "Night & Train", Kind: "movie", URL: root + movie, Year: "2025", PosterURL: "https://image.tmdb.org/t/p/w342/train01.jpg"}, {Name: "Campus 1999", Kind: "series", URL: root + series}}
 	if err != nil || !slices.Equal(titles, wantTitles) {
 		t.Fatalf("Search: %+v, %v", titles, err)
 	}
@@ -298,6 +298,133 @@ func TestCancellationSkipsMirror(t *testing.T) {
 	c.http.Transport = transport(func(r *http.Request) (*http.Response, error) { calls++; cancel(); return nil, r.Context().Err() })
 	if _, err := c.Search(ctx, "campus"); !errors.Is(err, context.Canceled) || calls != 1 {
 		t.Fatalf("cancellation: %v, %d requests", err, calls)
+	}
+}
+
+func TestValidPosterURL(t *testing.T) {
+	const root = "https://image.tmdb.org"
+	const path = "/t/p/w342/d5NXSklXo0qyIYkgV94XAgMIckC.jpg"
+	for _, raw := range []string{root + path, root + "/t/p/w92/poster.webp", root + "/t/p/w780/a-b_C.png"} {
+		if !ValidPosterURL(raw) {
+			t.Errorf("refused %q", raw)
+		}
+	}
+	for _, raw := range []string{
+		"", path, "//image.tmdb.org" + path, "http://image.tmdb.org" + path,
+		root + ".example" + path, "https://u@image.tmdb.org" + path, root + ":443" + path,
+		root + "@other.test" + path, root + "\\other.test" + path, root + path + "?", root + path + "#",
+		root + path + "?size=small", root + path + "#fragment", root + path + "\n",
+		root + "/t/p/w342/../x.jpg", root + "/t/p/w342/x%2fy.jpg", root + "/t/p/w342/a.svg",
+		root + "/t/p/w99999/a.jpg", root + "/t/p/w342/" + strings.Repeat("x", 300) + ".jpg",
+	} {
+		if ValidPosterURL(raw) {
+			t.Errorf("accepted %q", raw)
+		}
+	}
+}
+
+const detailFixture = `
+<meta property="og:image" content="https://image.tmdb.org/t/p/w780/backdrop.jpg">
+<script>"<div class='m_i-d-content'><div class='description'>Fake</div></div>"</script>
+<div class='m_i-detail'>
+ <div class='m_i-d-poster'><div class='film-poster'><img class='film-poster-img' src='https://qqqcdn.cloud/images/posters/not-trusted.webp'></div></div>
+ <div class='m_i-d-content'>
+  <div id='vote-info' data-movie-id='unused'></div>
+  <div class='stats'>
+   <span class='item mr-3'><button>HD</button></span>
+   <span class='item mr-3'><i class='fas fa-star mr-2'></i>7.3</span>
+   <span class='item mr-3'>81 min</span>
+  </div>
+  <div class='description'> <strong>Campus FlixHQ Watch Online Streaming</strong> - Two friends &amp; rivals&#27;
+   <em>return</em>.<style>.unused{}</style></div>
+  <div class='elements'>
+   <div class='row-line'><span class='type'>Country:</span><a href='/country/x/'>X</a></div>
+   <div class='row-line'><span class='type'>Genre:</span><a href='/genre/drama/'>Drama</a>,
+    <a href='/genre/fantasy/'>Sci-Fi &amp; Fantasy</a></div>
+  </div>
+ </div>
+</div>
+<div class='m_i-related'><div class='film-poster'><img src='https://image.tmdb.org/t/p/w92/related.jpg'></div></div>
+<div data-token='unused'></div>`
+
+func TestDetails(t *testing.T) {
+	const poster = "https://image.tmdb.org/t/p/w342/campus.jpg"
+	want := Details{Description: "Two friends & rivals return.", Genres: "Drama, Sci-Fi & Fantasy", Duration: "81 min", Rating: "7.3", PosterURL: poster}
+	for _, tc := range []struct{ kind, path string }{{"movie", movie}, {"series", series}} {
+		t.Run(tc.kind, func(t *testing.T) {
+			calls := 0
+			c := offline(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != "GET" || r.URL.String() != "https://"+mirror+tc.path {
+					t.Fatalf("unexpected request: %s %s", r.Method, r.URL)
+				}
+				io.WriteString(w, strings.Replace(detailFixture, "https://qqqcdn.cloud/images/posters/not-trusted.webp", "https://image.tmdb.org/t/p/w185/campus.jpg", 1))
+			})
+			got, err := c.Details(t.Context(), Title{Name: "Campus", Kind: tc.kind, URL: "https://" + mirror + tc.path})
+			if err != nil || got != want || calls != 1 {
+				t.Fatalf("Details: %+v, %v (%d requests)", got, err, calls)
+			}
+		})
+	}
+}
+
+func TestDetailsPosterFallback(t *testing.T) {
+	const tmdb = "https://image.tmdb.org/t/p/"
+	card := func(path, id string) string {
+		return `<a class='nav-item' href='` + path + `'><img class='film-poster-img' title='Campus' src='` + tmdb + `w92/` + id + `.jpg'></a>`
+	}
+	for _, tc := range []struct{ name, existing, searchHTML, want string }{
+		{"exact path across mirrors", "", card("/watch-series/campus-remake/", "wrong") + card(series, "right"), tmdb + "w342/right.jpg"},
+		{"not a title or prefix match", "", card(movie, "wrong") + card("/watch-series/campus-remake/", "wrong") + card(strings.TrimSuffix(series, "/"), "wrong"), ""},
+		{"lookup failure preserves details", "", "", ""},
+		{"existing art needs no lookup", tmdb + "w342/selected.jpg", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			c := offline(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				switch {
+				case r.Method == "GET" && r.URL.String() == "https://"+mirror+series:
+					io.WriteString(w, detailFixture)
+				case tc.existing == "" && r.Method == "GET" && r.URL.Path == "/livesearch" && r.URL.Query().Get("q") == "Campus":
+					if tc.searchHTML == "" {
+						w.WriteHeader(http.StatusServiceUnavailable)
+					} else {
+						io.WriteString(w, tc.searchHTML)
+					}
+				default:
+					t.Fatalf("unexpected request: %s %s", r.Method, r.URL)
+				}
+			})
+			got, err := c.Details(t.Context(), Title{Name: "Campus", Kind: "series", URL: "https://" + mirror + series, PosterURL: tc.existing})
+			if err != nil || got.PosterURL != tc.want || got.Rating != "7.3" || got.Description == "" || calls > 3 {
+				t.Fatalf("Details: %+v, %v, calls %d", got, err, calls)
+			}
+		})
+	}
+}
+
+func TestDetailsMissingFields(t *testing.T) {
+	html := `<div class='description'>Unrelated synopsis</div><div class='stats'><span class='item'>81 min</span></div>
+	<div class='m_i-d-content'><div class='stats'><span class='item'>2025</span><span class='item'>8</span><span class='item'> min</span></div>
+	<div class='description'><strong>There</strong> is no promotional intro.</div></div>`
+	got := parseDetails(html)
+	if got != (Details{Description: "There is no promotional intro."}) {
+		t.Fatalf("unexpected missing fields: %+v", got)
+	}
+}
+
+func TestDetailsRejectsInvalidTarget(t *testing.T) {
+	c := offline(func(http.ResponseWriter, *http.Request) { t.Fatal("unexpected network request") })
+	const root = "https://" + primary
+	for _, title := range []Title{
+		{Kind: "series", URL: root + movie}, {Kind: "movie", URL: root + series}, {Kind: "episode", URL: root + episode},
+		{Kind: "series", URL: root + series + "?"}, {Kind: "movie", URL: "https://evil.test" + movie},
+		{Kind: "", URL: root + ajaxPath}, {Kind: "home", URL: root + "/home"},
+	} {
+		if _, err := c.Details(t.Context(), title); err == nil {
+			t.Errorf("accepted invalid target %+v", title)
+		}
 	}
 }
 

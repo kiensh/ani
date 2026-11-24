@@ -12,6 +12,7 @@ import (
 // actions. Connected reads local state only; Login must respect cancellation.
 type MovieAccount interface {
 	MovieTracker
+	Watchlist(context.Context) ([]trakt.Title, error)
 	Connected() bool
 	Login(context.Context, func(verificationURL, userCode string)) error
 	Logout() error
@@ -63,7 +64,7 @@ func (m *moviePicker) closeAccount() tea.Cmd {
 	m.stopLoad()
 	m.dialog = movieAccountDialog{}
 	m.problem = ""
-	return m.Init() // resume any initial title query held for the welcome prompt
+	return m.Init() // resume the browse view or query held for the welcome prompt
 }
 
 func (m *moviePicker) accountKey(key string) tea.Cmd {
@@ -178,6 +179,11 @@ func (m *moviePicker) accountDone(msg movieAccountDoneMsg) tea.Cmd {
 	}
 	m.stopLoad()
 	m.refreshAccount() // failed reauthorization need not invalidate the old account
+	if !m.connected || msg.err == nil {
+		// Cached watchlist rows belong to the previous authorization, including
+		// a search's saved return address. Don't reveal them after an account change.
+		m.forgetWatchlist()
+	}
 	if msg.err != nil {
 		if mode == movieAccountWaiting {
 			m.offerLogin()
@@ -193,7 +199,7 @@ func (m *moviePicker) accountDone(msg movieAccountDoneMsg) tea.Cmd {
 		return nil
 	}
 	if m.connected {
-		m.notice = "Trakt connected. Use w for your watchlist or m to mark watched."
+		m.notice = "Trakt connected. Use v to switch views, w to add to your watchlist, or m to mark watched."
 	} else {
 		m.notice = "Trakt disconnected. You can still browse and play."
 	}

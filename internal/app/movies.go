@@ -61,15 +61,22 @@ func resolveMovie(ctx context.Context, resolve func(context.Context, string) (*p
 // As in anime mode, dry-run resolves the first result without starting a TUI
 // or executing a player. Numeric titles remain movie searches, not AniDB IDs.
 func dryRunMovies(c tui.MovieCatalog, query string, play func(flixhq.Title, *flixhq.Episode) error) error {
-	if strings.TrimSpace(query) == "" {
-		return fmt.Errorf("--movies --dry-run requires a title")
-	}
 	ctx := context.Background()
-	titles, err := c.Search(ctx, query)
+	query = strings.TrimSpace(query)
+	var titles []flixhq.Title
+	var err error
+	if query == "" {
+		titles, err = c.RecentlyAdded(ctx)
+	} else {
+		titles, err = c.Search(ctx, query)
+	}
 	if err != nil {
 		return err
 	}
 	if len(titles) == 0 {
+		if query == "" {
+			return fmt.Errorf("no titles in Recently Added")
+		}
 		return fmt.Errorf("no movies or series found for %q", query)
 	}
 	t := titles[0]

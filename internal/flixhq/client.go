@@ -27,7 +27,8 @@ const (
 	maxPlayers = 256 << 10
 )
 
-type Title struct{ Name, Kind, URL, Year string }
+type Title struct{ Name, Kind, URL, Year, PosterURL string }
+type Details struct{ Description, Genres, Duration, Rating, PosterURL string }
 type Episode struct {
 	Season, Number int
 	Name, URL      string
@@ -64,6 +65,9 @@ func route(u *url.URL) string {
 	}
 	if u.RawQuery != "" {
 		return ""
+	}
+	if u.Path == "/home" {
+		return "home"
 	}
 	if m := titlePath.FindStringSubmatch(u.Path); m != nil {
 		return m[1]
@@ -151,16 +155,21 @@ func (c *Client) Search(ctx context.Context, query string) ([]Title, error) {
 	if query == "" || len(query) > 512 {
 		return nil, errors.New("flixhq: enter a search term of at most 512 bytes")
 	}
+	return c.catalog(ctx, "/livesearch", url.Values{"q": {query}}.Encode(), parseTitles)
+}
+
+// Use the mirror on either a transport failure or an unrecognized primary page.
+func (c *Client) catalog(ctx context.Context, path, query string, parse func(string, *url.URL) ([]Title, error)) ([]Title, error) {
 	var failures []error
 	for _, host := range []string{primary, mirror} {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		u := &url.URL{Scheme: "https", Host: host, Path: "/livesearch", RawQuery: url.Values{"q": {query}}.Encode()}
+		u := &url.URL{Scheme: "https", Host: host, Path: path, RawQuery: query}
 		body, actual, err := c.page(ctx, u)
 		if err == nil {
 			var results []Title
-			results, err = parseTitles(body, actual)
+			results, err = parse(body, actual)
 			if err == nil {
 				return results, nil
 			}
@@ -171,6 +180,33 @@ func (c *Client) Search(ctx context.Context, query string) ([]Title, error) {
 		failures = append(failures, fmt.Errorf("%s: %w", host, err))
 	}
 	return nil, errors.Join(failures...)
+}
+
+// Details reads human-facing catalog metadata, never the playback resolver.
+func (c *Client) Details(ctx context.Context, t Title) (Details, error) {
+	u, kind := catalogLink(t.URL, nil)
+	if (kind != "movie" && kind != "series") || kind != t.Kind {
+		return Details{}, errors.New("flixhq: expected a matching movie or series page")
+	}
+	body, _, err := c.page(ctx, u)
+	if err != nil {
+		return Details{}, err
+	}
+	d := parseDetails(body)
+	// Home cards often use an unsupported image host. Search only for this
+	// selected title, and match its exact route across trusted mirrors; names
+	// (even with a year) aren't enough to disambiguate a remake.
+	if d.PosterURL == "" && t.PosterURL == "" && t.Name != "" && ctx.Err() == nil {
+		matches, _ := c.Search(ctx, t.Name) // Optional art mustn't discard text.
+		for _, match := range matches {
+			v, k := catalogLink(match.URL, nil)
+			if k == kind && v.Path == u.Path && match.PosterURL != "" {
+				d.PosterURL = match.PosterURL
+				break
+			}
+		}
+	}
+	return d, nil
 }
 
 func (c *Client) Episodes(ctx context.Context, t Title) ([]Episode, error) {

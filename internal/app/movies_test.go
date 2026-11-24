@@ -16,6 +16,11 @@ type catalogStub struct {
 	searched, opened string
 }
 
+func (c *catalogStub) RecentlyAdded(context.Context) ([]flixhq.Title, error) {
+	c.searched = "<recent>"
+	return c.titles, nil
+}
+
 func (c *catalogStub) Search(_ context.Context, q string) ([]flixhq.Title, error) {
 	c.searched = q
 	return c.titles, nil
@@ -58,8 +63,8 @@ func TestMovieDryRunSelectionAndPlayback(t *testing.T) {
 func TestMovieDryRunErrors(t *testing.T) {
 	c := &catalogStub{}
 	never := func(flixhq.Title, *flixhq.Episode) error { t.Fatal("unexpected playback"); return nil }
-	if err := Run(&Options{Movies: true, DryRun: true}); err == nil || !strings.Contains(err.Error(), "requires a title") {
-		t.Fatalf("empty movie-mode command: %v", err)
+	if err := dryRunMovies(c, "", never); err == nil || c.searched != "<recent>" || !strings.Contains(err.Error(), "Recently Added") {
+		t.Fatalf("empty Recently Added: %v", err)
 	}
 	if err := dryRunMovies(c, "absent", never); err == nil {
 		t.Fatal("expected empty search error")

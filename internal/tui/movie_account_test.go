@@ -14,12 +14,19 @@ import (
 
 type movieAccountStub struct {
 	*trackerStub
-	connected bool
-	login     func(context.Context, func(string, string)) error
-	logoutErr error
-	logouts   int
+	connected  bool
+	login      func(context.Context, func(string, string)) error
+	logoutErr  error
+	logouts    int
+	shelf      []trakt.Title
+	shelfErr   error
+	shelfCalls int
 }
 
+func (a *movieAccountStub) Watchlist(context.Context) ([]trakt.Title, error) {
+	a.shelfCalls++
+	return a.shelf, a.shelfErr
+}
 func (a *movieAccountStub) Connected() bool { return a.connected }
 func (a *movieAccountStub) Login(ctx context.Context, prompt func(string, string)) error {
 	return a.login(ctx, prompt)
@@ -138,13 +145,14 @@ func TestMovieDeviceLoginAndTrackingWithoutRestart(t *testing.T) {
 		}
 	}
 	var opened []string
-	m := newMoviePicker("", nil, a, func(u string) error {
+	f := &movieFixture{recent: []flixhq.Title{{Kind: "movie", Name: "Example"}}}
+	m := newMoviePicker("", f, a, func(u string) error {
 		opened = append(opened, u)
 		return errors.New("headless")
 	}, nil)
 	t.Cleanup(m.stopLoad)
-	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m.stage, m.titles = movieTitles, []flixhq.Title{{Kind: "movie", Name: "Example"}}
+	_, browse := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m.Update(browse())
 	m.Update(movieKey("w"))
 	_, login := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	events := runMovieLogin(t, login)
@@ -200,8 +208,9 @@ func TestMovieDeviceFlowCancelAndIgnoreSupersededEvents(t *testing.T) {
 		<-ctx.Done()
 		return ctx.Err()
 	}
-	m := newMoviePicker("", nil, a, func(string) error { t.Fatal("opened a canceled browser request"); return nil }, nil)
+	m := newMoviePicker("", &movieFixture{}, a, func(string) error { t.Fatal("opened a canceled browser request"); return nil }, nil)
 	t.Cleanup(m.stopLoad)
+	m.Update(m.Init()())
 	_, reauth := m.Update(movieKey("L"))
 	events := runMovieLogin(t, reauth)
 	first := nextMovieEvent(t, events).(movieDevicePromptMsg)
@@ -237,7 +246,8 @@ func TestMovieDeviceFlowCancelAndIgnoreSupersededEvents(t *testing.T) {
 
 func TestMovieDeviceFlowFailureAndUntrustedPrompt(t *testing.T) {
 	a := &movieAccountStub{login: func(context.Context, func(string, string)) error { return errors.New("fake sign-in failure") }}
-	m := newMoviePicker("", nil, a, nil, nil)
+	f := &movieFixture{}
+	m := newMoviePicker("", f, a, nil, nil)
 	t.Cleanup(m.stopLoad)
 	events := runMovieLogin(t, chooseMovieCommand(t, m, "connect"))
 	m.Update(nextMovieEvent(t, events))
@@ -263,16 +273,18 @@ func TestMovieDeviceFlowFailureAndUntrustedPrompt(t *testing.T) {
 		}
 		m.Update(nextMovieEvent(t, events))
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if m.dialog.mode != movieAccountClosed || m.problem != "" || string(m.query) != "" {
-		t.Fatal("unable to continue offline after login failed")
+	_, browse := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	finishMovieLoad(t, m, browse)
+	if m.dialog.mode != movieAccountClosed || m.problem != "" || string(m.query) != "" || f.recentCalls != 1 {
+		t.Fatal("unable to continue browsing after login failed")
 	}
 }
 
 func TestMovieAccountErrorsKeepExistingConnection(t *testing.T) {
 	a := &movieAccountStub{connected: true, logoutErr: errors.New("could not disconnect"), login: func(context.Context, func(string, string)) error { return errors.New("approval denied") }}
-	m := newMoviePicker("", nil, a, nil, nil)
+	m := newMoviePicker("", &movieFixture{}, a, nil, nil)
 	t.Cleanup(m.stopLoad)
+	finishMovieLoad(t, m, m.Init())
 	events := runMovieLogin(t, chooseMovieCommand(t, m, "reauthorize"))
 	m.Update(nextMovieEvent(t, events))
 	if !m.connected || !strings.Contains(m.View(), "approval denied") || !strings.Contains(m.View(), "Keep current account") || nextMovieEvent(t, events) != nil {

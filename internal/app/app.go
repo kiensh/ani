@@ -946,7 +946,8 @@ Anime:           Season and My List are anime views (: → View or v while brows
                  L connects MyAnimeList. Enter plays; d downloads a torrent.
 Not logged in:   AnimeTosho series search, or the latest uploads.
 
-Movies & TV:     Search FlixHQ, pick a movie or a series → season → episode.
+Movies & TV:     Opens on Recently Added; / searches and v switches to My Watchlist.
+                 Highlight a title to preview its poster and details before playing.
                  The picker offers Trakt sign-in, or you can browse without it.
                  L opens Trakt login. Playback uses mpv with yt-dlp on PATH.
 

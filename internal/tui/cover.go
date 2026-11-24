@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -234,13 +235,23 @@ func stripCursorMoves(data []byte) string {
 // coordinates — clearing is automatic when the text changes. Requires tmux
 // `allow-passthrough on` (raw APC reaches kitty unwrapped).
 func RenderCoverPlaceholder(path string, cols, rows int) (upload [][]byte, text string, err error) {
+	return coverPlaceholder(context.Background(), path, nil, cols, rows)
+}
+
+// Movie posters are already in a bounded memory cache, so icat can read those
+// from stdin instead of creating a second, temporary image file on every focus.
+func coverPlaceholder(ctx context.Context, path string, input io.Reader, cols, rows int) (upload [][]byte, text string, err error) {
 	var out bytes.Buffer
-	place := fmt.Sprintf("%dx%d@1x1", cols, rows)
-	// --unicode-placeholder anchors the image to text (tmux-safe, auto-clears).
-	// --passthrough defaults to "detect": wraps in tmux passthrough inside tmux,
-	// raw APC outside — splitPassthrough handles both.
-	c := exec.Command("kitten", "icat", "--unicode-placeholder",
-		"--silent", "--stdin=no", "--place="+place, path)
+	args := []string{"icat", "--unicode-placeholder", "--silent", fmt.Sprintf("--place=%dx%d@1x1", cols, rows)}
+	if input == nil {
+		args = append(args, "--stdin=no", path)
+	} else {
+		args = append(args, "--stdin=yes")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	c := exec.CommandContext(ctx, "kitten", args...)
+	c.Stdin = input
 	c.Stdout = &out
 	var stderr bytes.Buffer
 	c.Stderr = &stderr

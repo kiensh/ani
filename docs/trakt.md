@@ -10,6 +10,12 @@ The binary is still `ani`; **Watchpane** is the Trakt app registration. Tracking
 
 This uses device authorization, not a callback server. If you registered a different redirect URI from `http://127.0.0.1:8765/callback`, set `TRAKT_REDIRECT_URI` to the registered value for token refresh.
 
+## Browse movies and shows
+
+Movies & TV opens on **Recently Added**, signed in or out. It mixes FlixHQ’s Latest Movies and Latest TV Shows; it’s not a ranking by original release date. Use **/** to search, or **v** to switch to your Trakt **My Watchlist**. Selecting a watchlist item opens matching provider results so you can confirm the right title and year. A title argument (for example `ani --movies Breaking Bad`) still opens search results directly.
+
+Highlight a provider title to see its poster, synopsis and available details; on narrow terminals the preview sits below the list. Loading a preview does not play or track anything.
+
 ## Track a selection
 
 In `ani --movies`, highlight a movie or show and press **w** to add it to your Trakt watchlist. Press **m** on a movie or a specific episode to mark it watched. The picker shows candidate Trakt titles (including year and ID); choose the right one and press **Enter** to confirm, or **Esc** to cancel. A series watchlist entry refers to the series; a watched entry refers only to the selected season/episode, never an entire series. Playback, closing `mpv`, and `--dry-run` never mark anything watched. This records watch history, not a playback timestamp.

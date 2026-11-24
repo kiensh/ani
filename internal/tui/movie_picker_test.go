@@ -11,13 +11,19 @@ import (
 )
 
 type movieFixture struct {
-	titles    []flixhq.Title
-	eps       []flixhq.Episode
-	err       error
-	lastQuery string
-	series    string
+	titles      []flixhq.Title
+	recent      []flixhq.Title
+	recentCalls int
+	eps         []flixhq.Episode
+	err         error
+	lastQuery   string
+	series      string
 }
 
+func (f *movieFixture) RecentlyAdded(context.Context) ([]flixhq.Title, error) {
+	f.recentCalls++
+	return f.recent, f.err
+}
 func (f *movieFixture) Search(ctx context.Context, q string) ([]flixhq.Title, error) {
 	f.lastQuery = q
 	return f.titles, f.err
