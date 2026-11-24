@@ -10,6 +10,7 @@ import (
 	"ani/internal/flixhq"
 	"ani/internal/playable"
 	"ani/internal/player"
+	"ani/internal/trakt"
 	"ani/internal/tui"
 )
 
@@ -37,7 +38,11 @@ func browseMovies(opt *Options, query string) error {
 	if opt.DryRun {
 		return dryRunMovies(c, query, play)
 	}
-	return tui.RunMoviePicker(query, c, play)
+	var tracker tui.MovieTracker
+	if account := trakt.New(); account.Connected() {
+		tracker = account
+	}
+	return tui.RunMoviePicker(query, c, play, tracker)
 }
 
 func resolveMovie(ctx context.Context, resolve func(context.Context, string) (*playable.Release, error), t flixhq.Title, ep *flixhq.Episode) (*playable.Release, error) {

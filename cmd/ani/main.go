@@ -39,6 +39,9 @@ func main() {
 // echoes DEBUG lines to the terminal (which the TUI's alt screen would otherwise
 // hide).
 func run(args []string) error {
+	if len(args) > 0 && args[0] == "trakt" {
+		return traktCommand(args[1:])
+	}
 	cli := parseArgs(args)
 	debug, dryRun := cli.Debug, cli.DryRun
 	if cli.Help {

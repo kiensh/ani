@@ -48,14 +48,17 @@ type moviePicker struct {
 	request       int
 	cancel        context.CancelFunc
 	problem       string
+	notice        string
+	tracker       MovieTracker // nil unless this device is connected
+	track         *movieTrackForm
 	play          bool
 	width, height int
 }
 
 // RunMoviePicker releases the terminal before resolving and playing a selection.
 // Reuse the same list and cursor afterwards, including on a dead embed.
-func RunMoviePicker(query string, catalog MovieCatalog, play func(flixhq.Title, *flixhq.Episode) error) error {
-	m := &moviePicker{catalog: catalog, query: []rune(query), initial: query != ""}
+func RunMoviePicker(query string, catalog MovieCatalog, play func(flixhq.Title, *flixhq.Episode) error, tracker MovieTracker) error {
+	m := &moviePicker{catalog: catalog, query: []rune(query), initial: query != "", tracker: tracker}
 	defer m.stopLoad()
 	for {
 		if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
@@ -71,6 +74,8 @@ func RunMoviePicker(query string, catalog MovieCatalog, play func(flixhq.Title, 
 		}
 		if err := play(m.titles[m.cursor[movieTitles]], episode); err != nil {
 			m.problem = err.Error()
+		} else if m.tracker != nil {
+			m.notice = "Finished watching? Press m to mark this selection watched on Trakt."
 		}
 	}
 }
@@ -90,13 +95,17 @@ func (m *moviePicker) stopLoad() {
 	}
 }
 
-func (m *moviePicker) load() tea.Cmd {
+func (m *moviePicker) beginRequest() (context.Context, int) {
 	m.stopLoad()
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	m.request++
-	id := m.request
-	m.problem = ""
+	m.problem, m.notice = "", ""
+	return ctx, m.request
+}
+
+func (m *moviePicker) load() tea.Cmd {
+	ctx, id := m.beginRequest()
 	if m.stage == movieSearch {
 		query := strings.TrimSpace(string(m.query))
 		return func() tea.Msg {
@@ -169,8 +178,15 @@ func (m *moviePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case movieLoaded:
 		m.loaded(msg)
+	case traktMatchesMsg:
+		m.loadedTrackMatches(msg)
+	case traktWriteMsg:
+		m.savedTrack(msg)
 	case tea.KeyMsg:
 		key := msg.String()
+		if m.track != nil && key != "ctrl+c" {
+			return m, m.trackKey(key)
+		}
 		if key == "ctrl+c" || (key == "q" && m.stage != movieSearch) {
 			m.stopLoad()
 			return m, tea.Quit
@@ -181,7 +197,7 @@ func (m *moviePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		m.problem = ""
+		m.problem, m.notice = "", ""
 		if key == "esc" {
 			if m.stage == movieSearch {
 				return m, tea.Quit
@@ -225,6 +241,8 @@ func (m *moviePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			*pos = max(0, *pos-max(1, m.height-6))
 		case "pgdown", "ctrl+d":
 			*pos = min(last, *pos+max(1, m.height-6))
+		case "m", "w":
+			return m, m.openTrackForm(key == "w")
 		case "/":
 			m.stage = movieSearch
 		case "enter":
@@ -245,6 +263,9 @@ func (m *moviePicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *moviePicker) View() string {
+	if m.track != nil {
+		return m.trackView()
+	}
 	lines := []string{HeaderStyle.Render("Movies & TV") + ProviderStyle.Render("  ·  FlixHQ")}
 	if m.stage == movieSearch {
 		lines = append(lines, "Search: "+string(m.query)+"▏")
@@ -289,7 +310,10 @@ func (m *moviePicker) View() string {
 	if m.problem != "" {
 		lines = append(lines, ErrorStyle.Render(m.problem))
 	}
-	help := "↑/↓ select · Enter open/play · / search · Esc back · q exit"
+	if m.notice != "" {
+		lines = append(lines, FaintStyle.Render(m.notice))
+	}
+	help := "↑/↓ select · Enter open/play · w watchlist · m watched · / search · Esc back · q exit"
 	if m.stage == movieSearch {
 		help = "Type a title · Enter search · Ctrl+U clear · Esc exit"
 	}

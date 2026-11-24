@@ -900,6 +900,8 @@ func PrintUsage(w *os.File) {
 Usage:
   ani [query|anidb-id]
   ani --movies [title]   search movies and TV on FlixHQ (e.g. ani --movies Breaking Bad)
+  ani trakt login        connect your Trakt account in your own browser
+  ani trakt --help       account, watchlist and history commands
 
   <query>     anime name (e.g. frieren) -> pick from matching series
   <anidb-id>  numeric AniDB id (e.g. 18886) -> skip straight to its releases
